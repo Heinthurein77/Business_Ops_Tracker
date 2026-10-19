@@ -237,10 +237,19 @@ export default function AdminDashboardPage() {
   };
 
   const kpiCards = [
-    { label: 'MTD Revenue', value: money(currentRow?.mtdRevenue), sub: 'Month-to-date', color: 'brand' },
-    { label: 'Cash Flow', value: money(currentRow?.cash_flow), sub: currentRow ? currentRow.report_date : 'No data', color: 'emerald' },
-    { label: 'Receivable', value: money(currentRow?.receivable), sub: currentRow ? currentRow.report_date : 'No data', color: 'amber' },
+    { label: 'MTD Revenue', value: money(currentRow?.mtdRevenue), sub: 'Month-to-date', color: 'brand', spark: trendAsc.map((r) => (r.revenue || 0) + (r.other_amount || 0)), sparkColor: '#6366f1' },
+    { label: 'Cash Flow', value: money(currentRow?.cash_flow), sub: currentRow ? currentRow.report_date : 'No data', color: 'emerald', spark: trendAsc.map((r) => r.cash_flow || 0), sparkColor: '#10b981' },
+    { label: 'Receivable', value: money(currentRow?.receivable), sub: currentRow ? currentRow.report_date : 'No data', color: 'amber', spark: trendAsc.map((r) => r.receivable || 0), sparkColor: '#f59e0b' },
   ];
+
+  const sparkOptions = (color) => ({
+    chart: { type: 'area', sparkline: { enabled: true }, fontFamily: 'Inter, sans-serif' },
+    colors: [color],
+    stroke: { curve: 'smooth', width: 2 },
+    fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.35, opacityTo: 0.02 } },
+    dataLabels: { enabled: false },
+    tooltip: { enabled: false },
+  });
 
   return (
     <div className={`min-h-screen ${PAGE_BG} text-slate-800 dark:text-slate-200 antialiased flex flex-col lg:flex-row`}>
@@ -353,6 +362,41 @@ export default function AdminDashboardPage() {
           glassClass={GLASS}
         />
 
+        {/* PORTFOLIO HEALTH — every BU at a glance. Click a card to drill in. */}
+        <section>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 tracking-tight">Portfolio Health</h2>
+            <p className="text-xs text-slate-400 dark:text-slate-500">
+              {ov.operations.filter((o) => o.submitted_today).length} of {ov.operations.length} reported today
+            </p>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            {ov.operations.map((op) => {
+              const st = (op.financial_status || 'grey').toLowerCase();
+              const isSelected = op.bu_id === selectedBuId;
+              return (
+                <button
+                  key={op.bu_id}
+                  type="button"
+                  onClick={() => selectBu(op.bu_id)}
+                  className={`${GLASS} p-3.5 text-left transition-all hover:-translate-y-0.5 ${isSelected ? 'ring-2 ring-brand-500 ring-offset-1 dark:ring-offset-slate-950' : ''}`}
+                >
+                  <div className="flex items-center gap-1.5 mb-1.5 min-w-0">
+                    <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: STATUS_COLOR[st] || STATUS_COLOR.grey }} />
+                    <p className="text-[12px] font-bold text-slate-800 dark:text-slate-200 truncate">{op.bu_name}</p>
+                  </div>
+                  <p className="text-xl font-bold tabular-nums text-slate-900 dark:text-slate-100 leading-none">
+                    {op.achievement_pct != null ? `${op.achievement_pct}%` : '—'}
+                  </p>
+                  <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-1.5 truncate">
+                    {op.submitted_today ? `✓ Reported ${op.submitted_today_time || ''}` : '⚠ Not reported today'}
+                  </p>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+
         {/* KPI CARDS ROW */}
         <section className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {kpiCards.map((card) => (
@@ -361,6 +405,11 @@ export default function AdminDashboardPage() {
               <p className="text-[11px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-[0.08em]">{card.label}</p>
               <p className="font-bold text-slate-900 dark:text-slate-100 text-[26px] leading-tight mt-1.5 tabular-nums">{card.value}</p>
               <p className={`text-[11px] font-medium mt-1 text-${card.color}-600 dark:text-${card.color}-400`}>{card.sub}</p>
+              {card.spark.length > 1 && (
+                <div className="mt-2 -mb-1">
+                  <Chart options={sparkOptions(card.sparkColor)} series={[{ data: card.spark }]} type="area" height={44} />
+                </div>
+              )}
             </div>
           ))}
           <div className={`${GLASS} p-5 relative overflow-hidden flex flex-col justify-between`}>
