@@ -379,6 +379,7 @@ export default function AdminDashboardPage() {
                   key={op.bu_id}
                   type="button"
                   onClick={() => selectBu(op.bu_id)}
+                  title={op.bu_name}
                   className={`${GLASS} p-3.5 text-left transition-all hover:-translate-y-0.5 ${isSelected ? 'ring-2 ring-brand-500 ring-offset-1 dark:ring-offset-slate-950' : ''}`}
                 >
                   <div className="flex items-center gap-1.5 mb-1.5 min-w-0">
