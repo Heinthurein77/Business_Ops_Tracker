@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import Chart from 'react-apexcharts';
 import { api, ApiError } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import CeoProfileCard from '../components/CeoProfileCard';
@@ -413,6 +414,36 @@ export default function CeoDashboardPage() {
               })}
             </div>
           </div>
+          {/* 14-DAY FINANCIAL TREND — sparklines from the CEO's own submissions. */}
+          {data.financial_trend && (
+            <div className="mt-6 pt-5 border-t border-slate-100">
+              <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-[0.08em] mb-3">14-Day Trend</p>
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                {[
+                  { key: 'revenue', label: 'Revenue', color: '#6366f1' },
+                  { key: 'cash_flow', label: 'Cash Flow', color: '#0ea5e9' },
+                  { key: 'receivable', label: 'Receivable', color: '#f59e0b' },
+                  { key: 'payable', label: 'Payable', color: '#f97316' },
+                ].map((t) => (
+                  <div key={t.key} className="rounded-xl border border-slate-200 bg-white p-3.5">
+                    <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-1">{t.label}</p>
+                    <Chart
+                      options={{
+                        chart: { type: 'area', sparkline: { enabled: true }, fontFamily: 'Inter, sans-serif' },
+                        colors: [t.color],
+                        stroke: { curve: 'smooth', width: 2 },
+                        fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.35, opacityTo: 0.02 } },
+                        tooltip: { enabled: false },
+                      }}
+                      series={[{ data: data.financial_trend[t.key] || [] }]}
+                      type="area"
+                      height={52}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </section>
 
         {/* MONTHLY TARGET & DAILY PERFORMANCE */}

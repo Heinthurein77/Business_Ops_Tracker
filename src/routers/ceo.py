@@ -1,7 +1,7 @@
 import threading
 import time
 from collections import defaultdict, deque
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
 
@@ -132,6 +132,39 @@ def ceo_dashboard(
         .filter(DailyFinancial.business_unit_id == user.business_unit_id, DailyFinancial.report_date == report_date)
         .first()
     )
+    # 14-day trend for the CEO's own BU — powers the sparklines on their dashboard.
+    trend_days = [report_date - timedelta(days=offset) for offset in range(13, -1, -1)]
+    trend_rows = (
+        db.query(
+            DailyFinancial.report_date,
+            DailyFinancial.revenue,
+            DailyFinancial.cash_flow,
+            DailyFinancial.receivable,
+            DailyFinancial.payable,
+        )
+        .filter(
+            DailyFinancial.business_unit_id == user.business_unit_id,
+            DailyFinancial.report_date >= trend_days[0],
+            DailyFinancial.report_date <= trend_days[-1],
+        )
+        .all()
+    )
+    trend_by_date = {
+        r: {
+            "revenue": float(rv) if rv is not None else 0.0,
+            "cash_flow": float(cf) if cf is not None else 0.0,
+            "receivable": float(rc) if rc is not None else 0.0,
+            "payable": float(py) if py is not None else 0.0,
+        }
+        for r, rv, cf, rc, py in trend_rows
+    }
+    financial_trend = {
+        "labels": [d.strftime("%d %b") for d in trend_days],
+        "revenue": [round(trend_by_date.get(d, {}).get("revenue", 0.0), 2) for d in trend_days],
+        "cash_flow": [round(trend_by_date.get(d, {}).get("cash_flow", 0.0), 2) for d in trend_days],
+        "receivable": [round(trend_by_date.get(d, {}).get("receivable", 0.0), 2) for d in trend_days],
+        "payable": [round(trend_by_date.get(d, {}).get("payable", 0.0), 2) for d in trend_days],
+    }
     activity = (
         db.query(ActivityLog)
         .filter(
@@ -320,6 +353,7 @@ def ceo_dashboard(
             "other_amount": float(financial.other_amount) if financial and financial.other_amount is not None else None,
             "other_notes": financial.other_notes if financial else None,
         } if financial else None,
+        "financial_trend": financial_trend,
         "activity": {
             "meetings_attended": activity.meetings_attended,
             "site_visits": activity.site_visits,
