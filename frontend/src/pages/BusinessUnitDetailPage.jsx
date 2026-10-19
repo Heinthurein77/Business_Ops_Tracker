@@ -30,7 +30,7 @@ const STATUS_BADGE_CLASS = {
   red: 'bg-red-500/10 border-red-500/20 dark:border-red-500/30',
   yellow: 'bg-amber-500/10 border-amber-500/20 dark:border-amber-500/30',
   green: 'bg-emerald-500/10 border-emerald-500/20 dark:border-emerald-500/30',
-  grey: 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700',
+  grey: 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700',
 };
 const STATUS_TEXT_CLASS = { red: 'text-red-600 dark:text-red-400', yellow: 'text-amber-600 dark:text-amber-400', green: 'text-emerald-600 dark:text-emerald-400', grey: 'text-slate-500 dark:text-slate-400' };
 const STATUS_LABEL = { red: 'Critical', yellow: 'Warning', green: 'Good', grey: 'No Data' };
@@ -161,7 +161,7 @@ export default function BusinessUnitDetailPage() {
 
   return (
     <div className={`min-h-screen ${PAGE_BG} text-slate-900 dark:text-slate-100 antialiased`}>
-      <header className="bg-white/80 dark:bg-slate-950 text-slate-900 dark:text-white sticky top-0 z-40 shadow-sm dark:shadow-xl border-b border-white/60 dark:border-white/5 backdrop-blur-md">
+      <header className="bg-white dark:bg-slate-950 text-slate-900 dark:text-white sticky top-0 z-40 shadow-sm dark:shadow-xl border-b border-slate-200 dark:border-white/5 ">
         <div className="max-w-[1300px] mx-auto px-4 sm:px-6 py-2.5 sm:py-3 flex items-center justify-between flex-wrap gap-3">
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg bg-gradient-to-br from-brand-500 to-indigo-400 flex items-center justify-center shadow-lg shadow-brand-500/30 flex-shrink-0">
@@ -243,7 +243,7 @@ export default function BusinessUnitDetailPage() {
           <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">CEO Submitted Data</p>
           <h2 className="font-bold text-slate-900 dark:text-slate-100 text-base mb-5">4-Quadrant Snapshot — {data.bu.name}</h2>
           <div className="grid lg:grid-cols-12 gap-6 items-start">
-            <div className="lg:col-span-3 flex flex-col items-center gap-5 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/50 p-6">
+            <div className="lg:col-span-3 flex flex-col items-center gap-5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-6">
               <QuadrantStatusCircle
                 financial={data.financial_status}
                 social={data.social_status}
@@ -298,7 +298,7 @@ export default function BusinessUnitDetailPage() {
                 const m = quadrantMetrics[q.key];
                 const badgeClass = QUADRANT_BADGE_CLASS[m.status] || QUADRANT_BADGE_CLASS.unknown;
                 return (
-                  <div key={q.key} className="relative overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/50 p-5 pt-4 shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-[0_1px_3px_rgba(0,0,0,0.25)] hover:shadow-lg hover:border-slate-300 dark:hover:border-slate-600 hover:-translate-y-0.5 transition-all duration-200">
+                  <div key={q.key} className="relative overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-5 pt-4 shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-[0_1px_3px_rgba(0,0,0,0.25)] hover:shadow-lg hover:border-slate-300 dark:hover:border-slate-600 hover:-translate-y-0.5 transition-all duration-200">
                     <span className={`absolute top-0 left-0 right-0 h-1 ${QUADRANT_ACCENT[m.status] || QUADRANT_ACCENT.unknown}`} />
                     <div className="flex items-start justify-between gap-2 mb-3 flex-wrap">
                       <div className="flex items-center gap-2.5 min-w-0">
@@ -321,7 +321,7 @@ export default function BusinessUnitDetailPage() {
                             ? 'bg-red-500/10 text-red-700 dark:text-red-300 font-medium'
                             : m.status === 'warning'
                             ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
-                            : 'bg-slate-100 dark:bg-slate-800/60 text-slate-500 dark:text-slate-400'
+                            : 'bg-slate-100 dark:bg-slate-900 text-slate-500 dark:text-slate-400'
                         }`}
                       >
                         {(m.status === 'critical' || m.status === 'warning') && (
@@ -476,19 +476,19 @@ export default function BusinessUnitDetailPage() {
                     </div>
                   </div>
                   <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs mb-3">
-                    <div className="rounded-lg bg-white/60 dark:bg-slate-800/40 px-3 py-2.5">
+                    <div className="rounded-lg bg-white dark:bg-slate-900 px-3 py-2.5">
                       <p className="text-slate-500">MTD Revenue</p>
                       <p className="font-bold text-slate-900 dark:text-slate-100 text-base">{money(data.cumulative_performance.mtd_revenue)}</p>
                     </div>
-                    <div className="rounded-lg bg-white/60 dark:bg-slate-800/40 px-3 py-2.5">
+                    <div className="rounded-lg bg-white dark:bg-slate-900 px-3 py-2.5">
                       <p className="text-slate-500">MTD Other Amount</p>
                       <p className="font-bold text-slate-900 dark:text-slate-100 text-base">{money(data.cumulative_performance.mtd_other_amount)}</p>
                     </div>
-                    <div className="rounded-lg bg-white/60 dark:bg-slate-800/40 px-3 py-2.5">
+                    <div className="rounded-lg bg-white dark:bg-slate-900 px-3 py-2.5">
                       <p className="text-slate-500">Cumulative Net Revenue</p>
                       <p className="font-bold text-slate-900 dark:text-slate-100 text-base">{money(data.cumulative_performance.cumulative_net_revenue)}</p>
                     </div>
-                    <div className="rounded-lg bg-white/60 dark:bg-slate-800/40 px-3 py-2.5">
+                    <div className="rounded-lg bg-white dark:bg-slate-900 px-3 py-2.5">
                       <p className="text-slate-500">Variance vs Monthly Target</p>
                       <p className={`font-bold text-base ${data.cumulative_performance.variance_amount > 0 ? 'text-emerald-600 dark:text-emerald-400' : data.cumulative_performance.variance_amount < 0 ? 'text-red-600 dark:text-red-400' : 'text-slate-800 dark:text-slate-200'}`}>
                         {formatVariance(data.cumulative_performance.variance_amount)}
@@ -526,7 +526,7 @@ export default function BusinessUnitDetailPage() {
             {data.financial_notes.length > 0 ? (
               <ul className="space-y-2.5">
                 {data.financial_notes.map((n, i) => (
-                  <li key={i} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/40 px-4 py-2.5">
+                  <li key={i} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-4 py-2.5">
                     <p className="text-sm text-slate-800 dark:text-slate-200 whitespace-pre-wrap">{n.note_text}</p>
                     <p className="text-[11px] text-slate-500 mt-1">{n.note_date} &middot; logged {n.created_at}</p>
                   </li>
@@ -580,7 +580,7 @@ export default function BusinessUnitDetailPage() {
             <div className="p-6">
               <p className="text-xs text-slate-500 mb-4">Submitted at {currentReview.submitted_at || '—'}</p>
               <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/40 p-4">
+                <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4">
                   <div className="flex items-center justify-between mb-3">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Business Performance</p>
                     {financialForDay && (
@@ -601,7 +601,7 @@ export default function BusinessUnitDetailPage() {
                     <p className="text-xs text-slate-500 italic">No submission this day</p>
                   )}
                   {financialForDay?.performance && (
-                    <div className="mt-3 pt-3 border-t border-slate-200/70 dark:border-slate-700/60">
+                    <div className="mt-3 pt-3 border-t border-slate-200/70 dark:border-slate-800">
                       <div className="flex items-center justify-between mb-1.5">
                         <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Cumulative vs Target</p>
                         <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE_CLASS[financialForDay.performance.status.toLowerCase()]} ${STATUS_TEXT_CLASS[financialForDay.performance.status.toLowerCase()]}`}>
@@ -621,7 +621,7 @@ export default function BusinessUnitDetailPage() {
                   )}
                 </div>
 
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/40 p-4">
+                <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4">
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-3">Social Activity</p>
                   {socialForDay ? (
                     <div className="space-y-1.5 text-xs">
@@ -640,7 +640,7 @@ export default function BusinessUnitDetailPage() {
                   )}
                 </div>
 
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/40 p-4">
+                <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4">
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-3">Daily Activities</p>
                   <div className="space-y-2 text-xs">
                     <div>
@@ -679,7 +679,7 @@ export default function BusinessUnitDetailPage() {
                   </div>
                 </div>
 
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/40 p-4">
+                <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4">
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-3">Health and Fitness</p>
                   {healthForDay ? (
                     <div className="space-y-1.5 text-xs">
@@ -717,7 +717,7 @@ export default function BusinessUnitDetailPage() {
           </p>
           <div className="overflow-x-auto max-h-96 overflow-y-auto">
             <table className="w-full min-w-max text-sm">
-              <thead className="sticky top-0 z-[5] bg-white/90 dark:bg-slate-800/80 backdrop-blur text-slate-600 dark:text-slate-400 text-xs uppercase tracking-wider">
+              <thead className="sticky top-0 z-[5] bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 text-xs uppercase tracking-wider">
                 <tr>
                   <th className="px-6 py-3 text-left">Date</th>
                   <th className="px-6 py-3 text-left">Submitted At</th>
@@ -731,7 +731,7 @@ export default function BusinessUnitDetailPage() {
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {data.financial_rows.map((f, i) => (
-                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors">
                     <td className="px-6 py-3 text-slate-700 dark:text-slate-300">{f.report_date}</td>
                     <td className="px-6 py-3 text-slate-500 dark:text-slate-400">{f.submitted_at || '—'}</td>
                     <td className="px-6 py-3 text-right font-medium tabular-nums text-slate-800 dark:text-slate-200">{f.revenue != null ? f.revenue.toLocaleString(undefined, { minimumFractionDigits: 2 }) : '—'}</td>
@@ -764,7 +764,7 @@ export default function BusinessUnitDetailPage() {
           </p>
           <div className="overflow-x-auto max-h-[32rem] overflow-y-auto">
             <table className="w-full min-w-max text-sm">
-              <thead className="sticky top-0 z-[5] bg-white/90 dark:bg-slate-800/80 backdrop-blur text-slate-600 dark:text-slate-400 text-xs uppercase tracking-wider">
+              <thead className="sticky top-0 z-[5] bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 text-xs uppercase tracking-wider">
                 <tr>
                   <th className="px-6 py-3 text-left">Date</th>
                   <th className="px-6 py-3 text-left">Submitted At</th>
@@ -775,7 +775,7 @@ export default function BusinessUnitDetailPage() {
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {data.activity_rows.map((a, i) => (
                   <Fragment key={i}>
-                    <tr className="hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer transition-colors" onClick={() => setExpandedRow(expandedRow === i ? null : i)}>
+                    <tr className="hover:bg-slate-50 dark:hover:bg-slate-900 cursor-pointer transition-colors" onClick={() => setExpandedRow(expandedRow === i ? null : i)}>
                       <td className="px-6 py-3 text-slate-700 dark:text-slate-300">{a.report_date}</td>
                       <td className="px-6 py-3 text-slate-500">{a.submitted_at || '—'}</td>
                       <td className="px-6 py-3 text-slate-500 max-w-sm truncate">{a.meetings_attended || '—'}</td>
@@ -787,7 +787,7 @@ export default function BusinessUnitDetailPage() {
                     </tr>
                     {expandedRow === i && (
                       <tr className="fade-in">
-                        <td colSpan={4} className="px-6 py-5 bg-white/60 dark:bg-slate-800/40">
+                        <td colSpan={4} className="px-6 py-5 bg-white dark:bg-slate-900">
                           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
                             <div>
                               <p className="text-slate-500 font-semibold uppercase tracking-wide text-[10px] mb-1">Meetings Attended</p>
@@ -840,7 +840,7 @@ export default function BusinessUnitDetailPage() {
           </p>
           <div className="overflow-x-auto max-h-96 overflow-y-auto">
             <table className="w-full min-w-max text-sm">
-              <thead className="sticky top-0 z-[5] bg-white/90 dark:bg-slate-800/80 backdrop-blur text-slate-600 dark:text-slate-400 text-xs uppercase tracking-wider">
+              <thead className="sticky top-0 z-[5] bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 text-xs uppercase tracking-wider">
                 <tr>
                   <th className="px-6 py-3 text-left">Date</th>
                   <th className="px-6 py-3 text-left">Submitted At</th>
@@ -852,7 +852,7 @@ export default function BusinessUnitDetailPage() {
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {data.health_rows.map((h, i) => (
-                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors">
                     <td className="px-6 py-3 text-slate-700 dark:text-slate-300">{h.report_date}</td>
                     <td className="px-6 py-3 text-slate-500 dark:text-slate-400">{h.submitted_at || '—'}</td>
                     <td className={`px-6 py-3 font-medium ${h.step_status === 'red' ? 'text-red-600 dark:text-red-400' : h.step_status === 'yellow' ? 'text-amber-600 dark:text-amber-400' : h.step_status === 'green' ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500'}`}>
@@ -881,7 +881,7 @@ export default function BusinessUnitDetailPage() {
           </p>
           <div className="overflow-x-auto max-h-96 overflow-y-auto">
             <table className="w-full min-w-max text-sm">
-              <thead className="sticky top-0 z-[5] bg-white/90 dark:bg-slate-800/80 backdrop-blur text-slate-600 dark:text-slate-400 text-xs uppercase tracking-wider">
+              <thead className="sticky top-0 z-[5] bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 text-xs uppercase tracking-wider">
                 <tr>
                   <th className="px-6 py-3 text-left">Date</th>
                   <th className="px-6 py-3 text-left">Submitted At</th>
@@ -892,7 +892,7 @@ export default function BusinessUnitDetailPage() {
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {data.social_rows.map((s, i) => (
-                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors">
                     <td className="px-6 py-3 text-slate-700 dark:text-slate-300">{s.report_date}</td>
                     <td className="px-6 py-3 text-slate-500 dark:text-slate-400">{s.submitted_at || '—'}</td>
                     <td className="px-6 py-3 text-center">

@@ -153,7 +153,7 @@ export default function ComparisonPage() {
               <select
                 value={trendBuId ?? ''}
                 onChange={(e) => setTrendBuId(Number(e.target.value))}
-                className="text-sm font-semibold text-slate-700 dark:text-slate-300 bg-white/70 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                className="text-sm font-semibold text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
               >
                 {data.trend_cash_flow_by_bu.map((b) => (
                   <option key={b.bu_id} value={b.bu_id}>
@@ -175,7 +175,7 @@ export default function ComparisonPage() {
         </section>
 
         <section className={`${GLASS} overflow-hidden`}>
-          <div className="p-6 border-b border-slate-200/70 dark:border-slate-700/70 flex items-center justify-between flex-wrap gap-4">
+          <div className="p-6 border-b border-slate-200/70 dark:border-slate-800 flex items-center justify-between flex-wrap gap-4">
             <div>
               <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">Comparative Analysis</p>
               <h2 className="font-bold text-slate-900 dark:text-slate-100 tracking-tight text-lg">Business Unit Performance Comparison</h2>
@@ -196,7 +196,7 @@ export default function ComparisonPage() {
             </div>
           </div>
           <div className="grid lg:grid-cols-5">
-            <div className="lg:col-span-3 p-6 border-b lg:border-b-0 lg:border-r border-slate-200/70 dark:border-slate-700/70">
+            <div className="lg:col-span-3 p-6 border-b lg:border-b-0 lg:border-r border-slate-200/70 dark:border-slate-800">
               <Chart options={rankingChart.options} series={rankingChart.series} type="bar" height={620} />
             </div>
             <div className="lg:col-span-2 flex flex-col min-h-0 min-w-0">
@@ -206,7 +206,7 @@ export default function ComparisonPage() {
               </p>
               <div className="max-h-[620px] overflow-y-auto overflow-x-auto">
               <table className="w-full min-w-max text-sm">
-                <thead className="sticky top-0 z-[5] bg-white/90 dark:bg-slate-800/90 backdrop-blur text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wider">
+                <thead className="sticky top-0 z-[5] bg-white dark:bg-slate-900 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wider">
                   <tr>
                     <th className="px-4 py-3 text-left">Rank</th>
                     <th className="px-4 py-3 text-left">BU</th>
@@ -221,7 +221,7 @@ export default function ComparisonPage() {
                     const delta = average !== 0 ? ((d[metric] - average) / Math.abs(average)) * 100 : 0;
                     const rankBadge = i === 0 ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400' : i === sorted.length - 1 ? 'bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-400' : 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400';
                     return (
-                      <tr key={d.bu_id} className="hover:bg-slate-50 dark:hover:bg-slate-800/60 cursor-pointer transition-colors" onClick={() => navigate(`/admin/business-unit/${d.bu_id}`)}>
+                      <tr key={d.bu_id} className="hover:bg-slate-50 dark:hover:bg-slate-900 cursor-pointer transition-colors" onClick={() => navigate(`/admin/business-unit/${d.bu_id}`)}>
                         <td className="px-4 py-3">
                           <span className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-[11px] font-bold ${rankBadge}`}>{i + 1}</span>
                         </td>

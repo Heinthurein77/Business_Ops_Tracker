@@ -133,12 +133,12 @@ export default function DatePicker({ value, onChange, min, max, placeholder = 'S
     ? `w-full flex items-center justify-between gap-2 rounded-lg border bg-slate-950 text-white px-4 py-2.5 text-sm transition-colors focus:outline-none ${
         open ? 'border-brand-500 ring-2 ring-brand-500/30' : 'border-slate-700 hover:border-slate-600'
       }`
-    : `w-full flex items-center justify-between gap-2 rounded-lg border bg-white/70 dark:bg-slate-800/60 text-slate-700 dark:text-slate-300 px-3.5 py-2.5 text-sm transition-colors focus:outline-none ${
+    : `w-full flex items-center justify-between gap-2 rounded-lg border bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 px-3.5 py-2.5 text-sm transition-colors focus:outline-none ${
         open ? 'border-brand-500 ring-2 ring-brand-500/30' : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'
       }`;
   const panelClass = isDark
     ? 'bg-slate-900 border border-slate-700/80 text-slate-200'
-    : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700/80 text-slate-700 dark:text-slate-300';
+    : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300';
   const mutedText = isDark ? 'text-slate-500' : 'text-slate-400 dark:text-slate-500';
   const selectClass = isDark
     ? 'bg-slate-800 border border-slate-700 text-slate-200 text-xs font-semibold rounded-lg pl-2.5 pr-1.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-brand-500 cursor-pointer'
@@ -163,7 +163,7 @@ export default function DatePicker({ value, onChange, min, max, placeholder = 'S
           <div
             ref={panelRef}
             style={{ position: 'fixed', top: coords?.top ?? -9999, left: coords?.left ?? -9999, width: PANEL_WIDTH, visibility: coords ? 'visible' : 'hidden' }}
-            className={`z-[999] rounded-2xl shadow-2xl shadow-slate-900/20 p-4 fade-in ${panelClass}`}
+            className={`z-[999] rounded-xl shadow-2xl shadow-slate-900/20 p-4 fade-in ${panelClass}`}
           >
             <div className="flex items-center justify-between gap-1.5 mb-3">
               <button type="button" onClick={() => goMonth(-1)} className={navBtnClass} aria-label="Previous month">

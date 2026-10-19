@@ -45,7 +45,7 @@ export default function CeoReportLogsPage() {
           </p>
           <div className="overflow-x-auto">
             <table className="w-full min-w-max text-sm">
-              <thead className="bg-white/90 backdrop-blur text-slate-500 text-xs uppercase tracking-wider">
+              <thead className="bg-white text-slate-500 text-xs uppercase tracking-wider">
                 <tr>
                   <th className="px-6 py-3 text-left">Report Date</th>
                   <th className="px-6 py-3 text-left">Submitted At</th>

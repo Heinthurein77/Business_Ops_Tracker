@@ -37,7 +37,7 @@ const PERFORMANCE_BADGE_CLASS = {
 const PERFORMANCE_LABEL = { RED: 'Critical', YELLOW: 'Warning', GREEN: 'On Track' };
 
 const inputClass =
-  'w-full rounded-lg border border-slate-200 bg-white/70 text-slate-800 placeholder:text-slate-400 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent';
+  'w-full rounded-lg border border-slate-200 bg-white text-slate-800 placeholder:text-slate-400 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent';
 
 const emptyForm = {
   revenue: '',
@@ -254,7 +254,7 @@ export default function CeoDashboardPage() {
           )}
         </div>
         {data.submission_events_today?.length > 1 && (
-          <div className="mb-6 rounded-xl border border-slate-200 bg-white/60 px-4 py-3">
+          <div className="mb-6 rounded-xl border border-slate-200 bg-white px-4 py-3">
             <p className="text-xs font-semibold text-slate-700 mb-2">Updated {data.submission_events_today.length}&times; today</p>
             <ul className="space-y-1.5">
               {data.submission_events_today.map((ev, i) => (
@@ -632,7 +632,7 @@ export default function CeoDashboardPage() {
                     min="0"
                     value={form.revenue}
                     onChange={(e) => updateField('revenue', e.target.value)}
-                    className="w-full rounded-lg border border-slate-200 bg-white/70 text-slate-800 pl-7 pr-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                    className="w-full rounded-lg border border-slate-200 bg-white text-slate-800 pl-7 pr-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
                     placeholder="0.00"
                   />
                 </div>
@@ -646,7 +646,7 @@ export default function CeoDashboardPage() {
                     step="0.01"
                     value={form.cash_flow}
                     onChange={(e) => updateField('cash_flow', e.target.value)}
-                    className="w-full rounded-lg border border-slate-200 bg-white/70 text-slate-800 pl-7 pr-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                    className="w-full rounded-lg border border-slate-200 bg-white text-slate-800 pl-7 pr-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
                     placeholder="0.00"
                   />
                 </div>
@@ -661,7 +661,7 @@ export default function CeoDashboardPage() {
                     min="0"
                     value={form.receivable}
                     onChange={(e) => updateField('receivable', e.target.value)}
-                    className="w-full rounded-lg border border-slate-200 bg-white/70 text-slate-800 pl-7 pr-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                    className="w-full rounded-lg border border-slate-200 bg-white text-slate-800 pl-7 pr-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
                     placeholder="0.00"
                   />
                 </div>
@@ -676,7 +676,7 @@ export default function CeoDashboardPage() {
                     min="0"
                     value={form.payable}
                     onChange={(e) => updateField('payable', e.target.value)}
-                    className="w-full rounded-lg border border-slate-200 bg-white/70 text-slate-800 pl-7 pr-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                    className="w-full rounded-lg border border-slate-200 bg-white text-slate-800 pl-7 pr-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
                     placeholder="0.00"
                   />
                 </div>
@@ -692,7 +692,7 @@ export default function CeoDashboardPage() {
                     step="0.01"
                     value={form.other_amount}
                     onChange={(e) => updateField('other_amount', e.target.value)}
-                    className="w-full rounded-lg border border-slate-200 bg-white/70 text-slate-800 pl-7 pr-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                    className="w-full rounded-lg border border-slate-200 bg-white text-slate-800 pl-7 pr-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
                     placeholder="0.00"
                   />
                 </div>
@@ -824,7 +824,7 @@ export default function CeoDashboardPage() {
                     value={form.heart_rate}
                     onChange={(e) => updateField('heart_rate', e.target.value)}
                     placeholder="e.g. 72"
-                    className="w-full rounded-lg border border-slate-200 bg-white/70 text-slate-800 pl-3 pr-14 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                    className="w-full rounded-lg border border-slate-200 bg-white text-slate-800 pl-3 pr-14 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
                   />
                   <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs font-medium">bpm</span>
                 </div>
@@ -842,7 +842,7 @@ export default function CeoDashboardPage() {
                     value={form.sleep_hours}
                     onChange={(e) => updateField('sleep_hours', e.target.value)}
                     placeholder="e.g. 7.5"
-                    className="w-full rounded-lg border border-slate-200 bg-white/70 text-slate-800 pl-3 pr-12 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                    className="w-full rounded-lg border border-slate-200 bg-white text-slate-800 pl-3 pr-12 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
                   />
                   <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs font-medium">hrs</span>
                 </div>
@@ -858,7 +858,7 @@ export default function CeoDashboardPage() {
                     value={form.bp_systolic}
                     onChange={(e) => updateField('bp_systolic', e.target.value)}
                     placeholder="120"
-                    className="w-full rounded-lg border border-slate-200 bg-white/70 text-slate-800 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                    className="w-full rounded-lg border border-slate-200 bg-white text-slate-800 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
                   />
                   <span className="text-slate-400 text-sm font-medium flex-shrink-0">/</span>
                   <input
@@ -867,7 +867,7 @@ export default function CeoDashboardPage() {
                     value={form.bp_diastolic}
                     onChange={(e) => updateField('bp_diastolic', e.target.value)}
                     placeholder="80"
-                    className="w-full rounded-lg border border-slate-200 bg-white/70 text-slate-800 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                    className="w-full rounded-lg border border-slate-200 bg-white text-slate-800 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
                   />
                 </div>
               </div>

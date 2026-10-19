@@ -12,7 +12,7 @@ const RISK_CARD_CLASS = {
   red: 'border-red-500/20 dark:border-red-500/30 bg-red-500/5 glow-red',
   yellow: 'border-amber-500/20 dark:border-amber-500/30 bg-amber-500/5 glow-yellow',
   green: 'border-emerald-500/20 dark:border-emerald-500/30 bg-emerald-500/5 glow-green',
-  unknown: 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 glow-slate',
+  unknown: 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 glow-slate',
 };
 const RISK_DOT = { red: 'bg-red-500 glow-red', yellow: 'bg-amber-500 glow-yellow', green: 'bg-emerald-500 glow-green', unknown: 'bg-slate-400' };
 
@@ -84,7 +84,7 @@ export default function HealthDashboardPage() {
 
         <div className="grid lg:grid-cols-12 gap-6">
           <section className={`lg:col-span-8 ${GLASS} overflow-hidden`}>
-            <div className="p-6 border-b border-slate-200/70 dark:border-slate-700/70 flex items-center justify-between flex-wrap gap-4">
+            <div className="p-6 border-b border-slate-200/70 dark:border-slate-800 flex items-center justify-between flex-wrap gap-4">
               <div>
                 <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">Today's Briefing</p>
                 <h1 className="font-bold text-slate-900 dark:text-slate-100 tracking-tight text-lg">CEO Well-being Check-in</h1>
@@ -98,7 +98,7 @@ export default function HealthDashboardPage() {
               {data.today_briefing.length > 0 ? (
                 <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-4">
                   {data.today_briefing.map((h, i) => (
-                    <Link key={i} to={`/admin/business-unit/${h.bu_id}`} className={`rounded-2xl border p-4 hover:-translate-y-0.5 transition-transform ${RISK_CARD_CLASS[h.risk]}`}>
+                    <Link key={i} to={`/admin/business-unit/${h.bu_id}`} className={`rounded-xl border p-4 hover:-translate-y-0.5 transition-transform ${RISK_CARD_CLASS[h.risk]}`}>
                       <div className="flex items-center justify-between mb-2.5">
                         <div>
                           <p className="text-sm font-bold text-slate-900 dark:text-slate-100">{h.bu_name}</p>
@@ -107,13 +107,13 @@ export default function HealthDashboardPage() {
                         <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">{h.submitted_at ? h.submitted_at.split(', ')[1] : ''}</span>
                       </div>
                       <div className="grid grid-cols-2 gap-2 text-xs">
-                        <div className="bg-white/70 dark:bg-slate-800/60 rounded-lg px-2.5 py-2"><p className="text-slate-500 dark:text-slate-400">Heart Rate</p><p className="font-semibold text-slate-800 dark:text-slate-200">{h.heart_rate != null ? `${h.heart_rate} bpm` : '—'}</p></div>
-                        <div className="bg-white/70 dark:bg-slate-800/60 rounded-lg px-2.5 py-2"><p className="text-slate-500 dark:text-slate-400">Sleep Time</p><p className="font-semibold text-slate-800 dark:text-slate-200">{h.sleep_hours != null ? `${h.sleep_hours} hrs` : '—'}</p></div>
-                        <div className="bg-white/70 dark:bg-slate-800/60 rounded-lg px-2.5 py-2 col-span-2">
+                        <div className="bg-white dark:bg-slate-900 rounded-lg px-2.5 py-2"><p className="text-slate-500 dark:text-slate-400">Heart Rate</p><p className="font-semibold text-slate-800 dark:text-slate-200">{h.heart_rate != null ? `${h.heart_rate} bpm` : '—'}</p></div>
+                        <div className="bg-white dark:bg-slate-900 rounded-lg px-2.5 py-2"><p className="text-slate-500 dark:text-slate-400">Sleep Time</p><p className="font-semibold text-slate-800 dark:text-slate-200">{h.sleep_hours != null ? `${h.sleep_hours} hrs` : '—'}</p></div>
+                        <div className="bg-white dark:bg-slate-900 rounded-lg px-2.5 py-2 col-span-2">
                           <p className="text-slate-500 dark:text-slate-400">Blood Pressure</p>
                           <p className="font-semibold text-slate-800 dark:text-slate-200">{h.bp_systolic != null && h.bp_diastolic != null ? `${h.bp_systolic}/${h.bp_diastolic} mmHg` : '—'}</p>
                         </div>
-                        <div className="bg-white/70 dark:bg-slate-800/60 rounded-lg px-2.5 py-2 col-span-2">
+                        <div className="bg-white dark:bg-slate-900 rounded-lg px-2.5 py-2 col-span-2">
                           <p className="text-slate-500 dark:text-slate-400">Step Counter</p>
                           <p className={`font-bold ${h.daily_steps == null ? 'text-slate-500 dark:text-slate-400' : h.step_status === 'red' ? 'text-red-600 dark:text-red-400' : h.step_status === 'yellow' ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
                             {h.daily_steps != null ? `${h.daily_steps.toLocaleString()} / ${DAILY_STEP_GOAL.toLocaleString()}` : '—'}
@@ -124,7 +124,7 @@ export default function HealthDashboardPage() {
                   ))}
                 </div>
               ) : (
-                <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 px-5 py-12 text-center">
+                <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 px-5 py-12 text-center">
                   <p className="text-sm font-semibold text-slate-600 dark:text-slate-400">No health check-ins submitted yet today</p>
                 </div>
               )}
@@ -146,7 +146,7 @@ export default function HealthDashboardPage() {
         </div>
 
         <section className={`${GLASS} overflow-hidden`}>
-          <div className="p-6 border-b border-slate-200/70 dark:border-slate-700/70 flex items-center justify-between flex-wrap gap-4">
+          <div className="p-6 border-b border-slate-200/70 dark:border-slate-800 flex items-center justify-between flex-wrap gap-4">
             <div>
               <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">Full Directory</p>
               <h2 className="font-bold text-slate-900 dark:text-slate-100 tracking-tight text-lg">CEO Well-being Directory</h2>
@@ -154,7 +154,7 @@ export default function HealthDashboardPage() {
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               <input type="text" placeholder="Search BU, CEO..." value={dirSearch} onChange={(e) => setDirSearch(e.target.value)}
-                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/60 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 px-3.5 py-2 text-sm w-full sm:w-56 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent" />
+                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 px-3.5 py-2 text-sm w-full sm:w-56 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent" />
               <button onClick={() => setDirFilter('all')} className={filterBtnClass('all')}>All</button>
               <button onClick={() => setDirFilter('red')} className={filterBtnClass('red')}>Critical</button>
               <button onClick={() => setDirFilter('yellow')} className={filterBtnClass('yellow')}>Fatigue Watch</button>
@@ -164,7 +164,7 @@ export default function HealthDashboardPage() {
           <div className="p-6">
             <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
               {filteredDirectory.map((w) => (
-                <Link key={w.bu_id} to={`/admin/business-unit/${w.bu_id}`} className={`rounded-2xl border p-4 hover:-translate-y-0.5 transition-transform ${RISK_CARD_CLASS[w.risk]}`}>
+                <Link key={w.bu_id} to={`/admin/business-unit/${w.bu_id}`} className={`rounded-xl border p-4 hover:-translate-y-0.5 transition-transform ${RISK_CARD_CLASS[w.risk]}`}>
                   <div className="flex items-center justify-between mb-2.5">
                     <div>
                       <p className="text-sm font-bold text-slate-900 dark:text-slate-100">{w.bu_name}</p>
@@ -194,14 +194,14 @@ export default function HealthDashboardPage() {
         </section>
 
         <section className={`${GLASS} overflow-hidden`}>
-          <div className="p-6 border-b border-slate-200/70 dark:border-slate-700/70 flex items-center justify-between flex-wrap gap-4">
+          <div className="p-6 border-b border-slate-200/70 dark:border-slate-800 flex items-center justify-between flex-wrap gap-4">
             <div>
               <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">Audit Trail</p>
               <h2 className="font-bold text-slate-900 dark:text-slate-100 tracking-tight text-lg">Health Submission History</h2>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Last 300 submissions across all business units</p>
             </div>
             <input type="text" placeholder="Search BU, CEO..." value={historySearch} onChange={(e) => setHistorySearch(e.target.value)}
-              className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/60 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 px-3.5 py-2 text-sm w-full sm:w-64 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent" />
+              className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 px-3.5 py-2 text-sm w-full sm:w-64 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent" />
           </div>
           <p className="lg:hidden px-6 pt-3 text-[11px] font-medium text-slate-400 dark:text-slate-500 flex items-center gap-1">
             <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5"><path strokeLinecap="round" strokeLinejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7" /></svg>
@@ -209,7 +209,7 @@ export default function HealthDashboardPage() {
           </p>
           <div className="overflow-x-auto max-h-[32rem] overflow-y-auto">
             <table className="w-full min-w-max text-sm">
-              <thead className="sticky top-0 z-[5] bg-white/90 dark:bg-slate-800/90 backdrop-blur text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wider">
+              <thead className="sticky top-0 z-[5] bg-white dark:bg-slate-900 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wider">
                 <tr>
                   <th className="px-6 py-3 text-left">Business Unit</th>
                   <th className="px-6 py-3 text-left">CEO</th>
@@ -223,7 +223,7 @@ export default function HealthDashboardPage() {
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {filteredHistory.map((h, i) => (
-                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-800/60 transition-colors">
+                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors">
                     <td className="px-6 py-3">
                       <p className="font-semibold text-slate-800 dark:text-slate-200">{h.bu_name}</p>
                     </td>

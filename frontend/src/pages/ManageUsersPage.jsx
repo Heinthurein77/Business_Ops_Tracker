@@ -218,7 +218,7 @@ export default function ManageUsersPage() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search users…"
-                className="w-full text-sm pl-9 pr-3 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/60 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                className="w-full text-sm pl-9 pr-3 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
               />
             </div>
             <button
@@ -288,7 +288,7 @@ export default function ManageUsersPage() {
                 <select
                   value={form.role}
                   onChange={(e) => setForm((f) => ({ ...f, role: e.target.value, business_unit_id: '' }))}
-                  className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/60 text-slate-800 dark:text-slate-200 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                  className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
                 >
                   <option value="CEO">CEO</option>
                   <option value="HO">Head Office Staff</option>
@@ -300,7 +300,7 @@ export default function ManageUsersPage() {
                   <select
                     value={form.business_unit_id}
                     onChange={(e) => setForm((f) => ({ ...f, business_unit_id: e.target.value }))}
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/60 text-slate-800 dark:text-slate-200 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
                   >
                     <option value="">Select a business unit…</option>
                     {businessUnits.map((bu) => (
@@ -316,7 +316,7 @@ export default function ManageUsersPage() {
                   value={form.username}
                   onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))}
                   placeholder="e.g. ceo_bu24"
-                  className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/60 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                  className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
                 />
               </div>
               <div>
@@ -326,7 +326,7 @@ export default function ManageUsersPage() {
                   value={form.full_name}
                   onChange={(e) => setForm((f) => ({ ...f, full_name: e.target.value }))}
                   placeholder="e.g. Daw Hla Hla"
-                  className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/60 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                  className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
                 />
               </div>
               {formError && <p className="sm:col-span-2 text-sm text-red-600 dark:text-red-400">{formError}</p>}
@@ -382,7 +382,7 @@ export default function ManageUsersPage() {
           )}
 
           {resets && pendingResets.length === 0 && (
-            <div className="text-center py-8 border-t border-slate-200/70 dark:border-slate-700/70">
+            <div className="text-center py-8 border-t border-slate-200/70 dark:border-slate-800">
               <svg xmlns="http://www.w3.org/2000/svg" className="w-7 h-7 text-slate-300 dark:text-slate-600 mx-auto mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
@@ -391,9 +391,9 @@ export default function ManageUsersPage() {
           )}
 
           {pendingResets.length > 0 && (
-            <div className="overflow-x-auto border-t border-slate-200/70 dark:border-slate-700/70">
+            <div className="overflow-x-auto border-t border-slate-200/70 dark:border-slate-800">
               <table className="w-full min-w-max text-sm">
-                <thead className="bg-white/90 dark:bg-slate-800/90 backdrop-blur text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wider">
+                <thead className="bg-white dark:bg-slate-900 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wider">
                   <tr>
                     <th className="px-6 py-3 text-left">User</th>
                     <th className="px-6 py-3 text-left">Business Unit</th>
@@ -403,7 +403,7 @@ export default function ManageUsersPage() {
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                   {pendingResets.map((r) => (
-                    <tr key={r.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/60 transition-colors">
+                    <tr key={r.id} className="hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors">
                       <td className="px-6 py-3.5">
                         <p className="font-semibold text-slate-800 dark:text-slate-200">{r.full_name || '—'}</p>
                         <p className="text-xs text-slate-500 dark:text-slate-400">{r.username}</p>
@@ -438,7 +438,7 @@ export default function ManageUsersPage() {
           )}
 
           {resolvedResets.length > 0 && (
-            <details className="border-t border-slate-200/70 dark:border-slate-700/70">
+            <details className="border-t border-slate-200/70 dark:border-slate-800">
               <summary className="px-6 py-3 text-xs font-semibold text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer select-none">
                 Recently resolved ({resolvedResets.length})
               </summary>
@@ -475,7 +475,7 @@ export default function ManageUsersPage() {
           </p>
           <div className="overflow-x-auto">
             <table className="w-full min-w-max text-sm">
-              <thead className="bg-white/90 dark:bg-slate-800/90 backdrop-blur text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wider">
+              <thead className="bg-white dark:bg-slate-900 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wider">
                 <tr>
                   <th className="px-6 py-3 text-left">User</th>
                   <th className="px-6 py-3 text-left">Role</th>
@@ -487,7 +487,7 @@ export default function ManageUsersPage() {
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {filtered.map((u) => (
-                  <tr key={u.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/60 transition-colors">
+                  <tr key={u.id} className="hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors">
                     <td className="px-6 py-3.5">
                       <p className="font-semibold text-slate-800 dark:text-slate-200">{u.full_name || '—'}</p>
                       <p className="text-xs text-slate-500 dark:text-slate-400">{u.username}</p>

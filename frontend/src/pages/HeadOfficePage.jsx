@@ -23,13 +23,13 @@ import { safeUrl } from '../utils/safeUrl';
 import { validateAttachment } from '../utils/attachmentValidation';
 
 const inputClass =
-  'w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800 text-slate-800 dark:text-slate-100 placeholder:text-slate-400 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent';
+  'w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 placeholder:text-slate-400 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent';
 
 const STATUS_BADGE_CLASS = {
   red: 'bg-red-500/10 border-red-500/20 dark:border-red-500/30 text-red-600 dark:text-red-400',
   yellow: 'bg-amber-500/10 border-amber-500/20 dark:border-amber-500/30 text-amber-600 dark:text-amber-400',
   green: 'bg-emerald-500/10 border-emerald-500/20 dark:border-emerald-500/30 text-emerald-600 dark:text-emerald-400',
-  grey: 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-500',
+  grey: 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-500',
 };
 const STATUS_LABEL = { red: 'Critical', yellow: 'Warning', green: 'Good', grey: 'No Data' };
 
@@ -475,7 +475,7 @@ export default function HeadOfficePage() {
           <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">{isHo ? 'Executive Snapshot' : 'HO Submitted Data'}</p>
           <h2 className="font-bold text-slate-900 dark:text-slate-100 tracking-tight text-lg mb-5">{isHo ? 'My Status at a Glance' : `4-Quadrant Snapshot — ${data.ho_username}`}</h2>
           <div className="grid lg:grid-cols-12 gap-6 items-start">
-            <div className="lg:col-span-3 flex flex-col items-center gap-5 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/50 p-6">
+            <div className="lg:col-span-3 flex flex-col items-center gap-5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-6">
               <QuadrantStatusCircle
                 financial={snapshot.financial_status}
                 social={snapshot.social_status}
@@ -505,7 +505,7 @@ export default function HeadOfficePage() {
                 const m = quadrantMetrics[q.key];
                 const badgeClass = QUADRANT_BADGE_CLASS[m.status] || QUADRANT_BADGE_CLASS.unknown;
                 return (
-                  <div key={q.key} className="relative overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/50 p-5 pt-4 shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-[0_1px_3px_rgba(0,0,0,0.25)] hover:shadow-lg hover:border-slate-300 dark:hover:border-slate-600 hover:-translate-y-0.5 transition-all duration-200">
+                  <div key={q.key} className="relative overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-5 pt-4 shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-[0_1px_3px_rgba(0,0,0,0.25)] hover:shadow-lg hover:border-slate-300 dark:hover:border-slate-600 hover:-translate-y-0.5 transition-all duration-200">
                     <span className={`absolute top-0 left-0 right-0 h-1 ${QUADRANT_ACCENT[m.status] || QUADRANT_ACCENT.unknown}`} />
                     <div className="flex items-start justify-between gap-2 mb-3 flex-wrap">
                       <div className="flex items-center gap-2.5 min-w-0">
@@ -528,7 +528,7 @@ export default function HeadOfficePage() {
                             ? 'bg-red-500/10 text-red-700 dark:text-red-300 font-medium'
                             : m.status === 'warning'
                             ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
-                            : 'bg-slate-100 dark:bg-slate-800/60 text-slate-500 dark:text-slate-400'
+                            : 'bg-slate-100 dark:bg-slate-900 text-slate-500 dark:text-slate-400'
                         }`}
                       >
                         {(m.status === 'critical' || m.status === 'warning') && (
@@ -561,7 +561,7 @@ export default function HeadOfficePage() {
             Chairman can always override, mirroring the business-unit
             benchmark pattern on Business Unit Detail. */}
         <section className={`${GLASS} overflow-hidden`}>
-          <div className="px-6 py-4 border-b border-slate-200/70 dark:border-slate-700/70 flex items-center justify-between flex-wrap gap-3">
+          <div className="px-6 py-4 border-b border-slate-200/70 dark:border-slate-800 flex items-center justify-between flex-wrap gap-3">
             <div>
               <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">{isHo ? 'Monthly Target' : 'HO-Set Benchmark'}</p>
               <h2 className="font-bold text-slate-900 dark:text-white tracking-tight text-lg">
@@ -698,19 +698,19 @@ export default function HeadOfficePage() {
                       </div>
                     </div>
                     <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs mb-3">
-                      <div className="rounded-lg bg-white/60 dark:bg-slate-800/40 px-3 py-2.5">
+                      <div className="rounded-lg bg-white dark:bg-slate-900 px-3 py-2.5">
                         <p className="text-slate-500">MTD Revenue</p>
                         <p className="font-bold text-slate-900 dark:text-slate-100 text-base">{money(perf.mtd_revenue)}</p>
                       </div>
-                      <div className="rounded-lg bg-white/60 dark:bg-slate-800/40 px-3 py-2.5">
+                      <div className="rounded-lg bg-white dark:bg-slate-900 px-3 py-2.5">
                         <p className="text-slate-500">MTD Other Amount</p>
                         <p className="font-bold text-slate-900 dark:text-slate-100 text-base">{money(perf.mtd_other_amount)}</p>
                       </div>
-                      <div className="rounded-lg bg-white/60 dark:bg-slate-800/40 px-3 py-2.5">
+                      <div className="rounded-lg bg-white dark:bg-slate-900 px-3 py-2.5">
                         <p className="text-slate-500">Cumulative Net Revenue</p>
                         <p className="font-bold text-slate-900 dark:text-slate-100 text-base">{money(perf.cumulative_net_revenue)}</p>
                       </div>
-                      <div className="rounded-lg bg-white/60 dark:bg-slate-800/40 px-3 py-2.5">
+                      <div className="rounded-lg bg-white dark:bg-slate-900 px-3 py-2.5">
                         <p className="text-slate-500">Variance vs Monthly Target</p>
                         <p className={`font-bold text-base ${perf.variance_amount > 0 ? 'text-emerald-600 dark:text-emerald-400' : perf.variance_amount < 0 ? 'text-red-600 dark:text-red-400' : 'text-slate-800 dark:text-slate-200'}`}>
                           {formatVariance(perf.variance_amount)}
@@ -743,7 +743,7 @@ export default function HeadOfficePage() {
           <form id="daily-report-form" onSubmit={handleSubmit} className="space-y-8">
             {/* BUSINESS PERFORMANCE BLOCK */}
             <section className={`${GLASS} overflow-hidden`}>
-              <div className="px-6 py-4 border-b border-slate-200/70 dark:border-slate-700/70 flex items-center justify-between">
+              <div className="px-6 py-4 border-b border-slate-200/70 dark:border-slate-800 flex items-center justify-between">
                 <div className="flex items-center gap-2.5">
                   <div className="w-8 h-8 rounded-lg bg-brand-500/10 flex items-center justify-center">
                     <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 text-brand-600 dark:text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
@@ -802,7 +802,7 @@ export default function HeadOfficePage() {
             </section>
 
             <section className={`${GLASS} overflow-hidden`}>
-              <div className="px-6 py-4 border-b border-slate-200/70 dark:border-slate-700/70 flex items-center gap-2.5">
+              <div className="px-6 py-4 border-b border-slate-200/70 dark:border-slate-800 flex items-center gap-2.5">
                 <div className="w-8 h-8 rounded-lg bg-brand-500/10 flex items-center justify-center">
                   <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 text-brand-600 dark:text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
@@ -853,7 +853,7 @@ export default function HeadOfficePage() {
             </section>
 
             <section className={`${GLASS} overflow-hidden`}>
-              <div className="px-6 py-4 border-b border-slate-200/70 dark:border-slate-700/70 flex items-center gap-2.5">
+              <div className="px-6 py-4 border-b border-slate-200/70 dark:border-slate-800 flex items-center gap-2.5">
                 <div className="w-8 h-8 rounded-lg bg-brand-500/10 flex items-center justify-center">
                   <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 text-brand-600 dark:text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
@@ -901,7 +901,7 @@ export default function HeadOfficePage() {
             </section>
 
             <section className={`${GLASS} overflow-hidden`}>
-              <div className="px-6 py-4 border-b border-slate-200/70 dark:border-slate-700/70 flex items-center gap-2.5">
+              <div className="px-6 py-4 border-b border-slate-200/70 dark:border-slate-800 flex items-center gap-2.5">
                 <div className="w-8 h-8 rounded-lg bg-brand-500/10 flex items-center justify-center">
                   <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 text-brand-600 dark:text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-2.13a4 4 0 10-4-4 4 4 0 004 4zm6 0a4 4 0 10-4-4" />
@@ -987,7 +987,7 @@ export default function HeadOfficePage() {
               <div className="p-6">
                 <p className="text-xs text-slate-500 mb-4">Submitted at {currentReview.submitted_at || '—'}</p>
                 <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                  <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/40 p-4">
+                  <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4">
                     <div className="flex items-center justify-between mb-3">
                       <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Business Performance</p>
                       {financialForDay && (
@@ -1008,7 +1008,7 @@ export default function HeadOfficePage() {
                       <p className="text-xs text-slate-500 italic">No submission this day</p>
                     )}
                     {financialForDay?.performance && (
-                      <div className="mt-3 pt-3 border-t border-slate-200/70 dark:border-slate-700/60">
+                      <div className="mt-3 pt-3 border-t border-slate-200/70 dark:border-slate-800">
                         <div className="flex items-center justify-between mb-1.5">
                           <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Cumulative vs Target</p>
                           <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE_CLASS[financialForDay.performance.status.toLowerCase()]}`}>
@@ -1028,7 +1028,7 @@ export default function HeadOfficePage() {
                     )}
                   </div>
 
-                  <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/40 p-4">
+                  <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-3">Social Activity</p>
                     {socialForDay ? (
                       <div className="space-y-1.5 text-xs">
@@ -1047,7 +1047,7 @@ export default function HeadOfficePage() {
                     )}
                   </div>
 
-                  <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/40 p-4">
+                  <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-3">Daily Activities</p>
                     <div className="space-y-2 text-xs">
                       <div>
@@ -1086,7 +1086,7 @@ export default function HeadOfficePage() {
                     </div>
                   </div>
 
-                  <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/40 p-4">
+                  <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-3">Health and Fitness</p>
                     {healthForDay ? (
                       <div className="space-y-1.5 text-xs">
@@ -1124,7 +1124,7 @@ export default function HeadOfficePage() {
           </p>
           <div className="overflow-x-auto max-h-96 overflow-y-auto">
             <table className="w-full min-w-max text-sm">
-              <thead className="sticky top-0 z-[5] bg-white/90 dark:bg-slate-800/80 backdrop-blur text-slate-600 dark:text-slate-400 text-xs uppercase tracking-wider">
+              <thead className="sticky top-0 z-[5] bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 text-xs uppercase tracking-wider">
                 <tr>
                   <th className="px-6 py-3 text-left">Date</th>
                   <th className="px-6 py-3 text-left">Submitted At</th>
@@ -1138,7 +1138,7 @@ export default function HeadOfficePage() {
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {data.financial_rows.map((f, i) => (
-                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors">
                     <td className="px-6 py-3 text-slate-700 dark:text-slate-300">{f.report_date}</td>
                     <td className="px-6 py-3 text-slate-500 dark:text-slate-400">{f.submitted_at || '—'}</td>
                     <td className="px-6 py-3 text-right font-medium tabular-nums text-slate-800 dark:text-slate-200">{f.revenue != null ? f.revenue.toLocaleString(undefined, { minimumFractionDigits: 2 }) : '—'}</td>
@@ -1171,7 +1171,7 @@ export default function HeadOfficePage() {
           </p>
           <div className="overflow-x-auto max-h-[32rem] overflow-y-auto">
             <table className="w-full min-w-max text-sm">
-              <thead className="sticky top-0 z-[5] bg-white/90 dark:bg-slate-800/80 backdrop-blur text-slate-600 dark:text-slate-400 text-xs uppercase tracking-wider">
+              <thead className="sticky top-0 z-[5] bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 text-xs uppercase tracking-wider">
                 <tr>
                   <th className="px-6 py-3 text-left">Date</th>
                   <th className="px-6 py-3 text-left">Submitted At</th>
@@ -1201,7 +1201,7 @@ export default function HeadOfficePage() {
           </p>
           <div className="overflow-x-auto max-h-96 overflow-y-auto">
             <table className="w-full min-w-max text-sm">
-              <thead className="sticky top-0 z-[5] bg-white/90 dark:bg-slate-800/80 backdrop-blur text-slate-600 dark:text-slate-400 text-xs uppercase tracking-wider">
+              <thead className="sticky top-0 z-[5] bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 text-xs uppercase tracking-wider">
                 <tr>
                   <th className="px-6 py-3 text-left">Date</th>
                   <th className="px-6 py-3 text-left">Submitted At</th>
@@ -1213,7 +1213,7 @@ export default function HeadOfficePage() {
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {data.health_rows.map((h, i) => (
-                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors">
                     <td className="px-6 py-3 text-slate-700 dark:text-slate-300">{h.report_date}</td>
                     <td className="px-6 py-3 text-slate-500 dark:text-slate-400">{h.submitted_at || '—'}</td>
                     <td className="px-6 py-3 text-slate-700 dark:text-slate-300">{h.daily_steps != null ? h.daily_steps.toLocaleString() : '—'}</td>
@@ -1240,7 +1240,7 @@ export default function HeadOfficePage() {
           </p>
           <div className="overflow-x-auto max-h-96 overflow-y-auto">
             <table className="w-full min-w-max text-sm">
-              <thead className="sticky top-0 z-[5] bg-white/90 dark:bg-slate-800/80 backdrop-blur text-slate-600 dark:text-slate-400 text-xs uppercase tracking-wider">
+              <thead className="sticky top-0 z-[5] bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 text-xs uppercase tracking-wider">
                 <tr>
                   <th className="px-6 py-3 text-left">Date</th>
                   <th className="px-6 py-3 text-left">Submitted At</th>
@@ -1251,7 +1251,7 @@ export default function HeadOfficePage() {
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {data.social_rows.map((s, i) => (
-                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors">
                     <td className="px-6 py-3 text-slate-700 dark:text-slate-300">{s.report_date}</td>
                     <td className="px-6 py-3 text-slate-500 dark:text-slate-400">{s.submitted_at || '—'}</td>
                     <td className="px-6 py-3 text-center">
@@ -1280,7 +1280,7 @@ function HistoryRow({ a }) {
   const [expanded, setExpanded] = useState(false);
   return (
     <Fragment>
-      <tr className="hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer transition-colors" onClick={() => setExpanded((v) => !v)}>
+      <tr className="hover:bg-slate-50 dark:hover:bg-slate-900 cursor-pointer transition-colors" onClick={() => setExpanded((v) => !v)}>
         <td className="px-6 py-3 text-slate-700 dark:text-slate-300">{a.report_date}</td>
         <td className="px-6 py-3 text-slate-500">{a.submitted_at || '—'}</td>
         <td className="px-6 py-3 text-slate-500 max-w-sm truncate">{a.meetings_attended || '—'}</td>
@@ -1292,7 +1292,7 @@ function HistoryRow({ a }) {
       </tr>
       {expanded && (
         <tr className="fade-in">
-          <td colSpan={4} className="px-6 py-5 bg-white/60 dark:bg-slate-800/40">
+          <td colSpan={4} className="px-6 py-5 bg-white dark:bg-slate-900">
             <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
               <div><p className="text-slate-500 font-semibold uppercase tracking-wide text-[10px] mb-1">Meetings Attended</p><p className="text-slate-700 dark:text-slate-300">{a.meetings_attended || '—'}</p></div>
               <div><p className="text-slate-500 font-semibold uppercase tracking-wide text-[10px] mb-1">Site Visits / Travel</p><p className="text-slate-700 dark:text-slate-300">{a.site_visits || '—'}</p></div>

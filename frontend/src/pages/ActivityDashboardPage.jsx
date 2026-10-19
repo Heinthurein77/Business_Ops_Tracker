@@ -10,14 +10,14 @@ const STATUS_CARD_CLASS = {
   green: 'border-emerald-500/20 dark:border-emerald-500/30 bg-emerald-500/5 glow-green',
   yellow: 'border-amber-500/20 dark:border-amber-500/30 bg-amber-500/5 glow-yellow',
   red: 'border-red-500/20 dark:border-red-500/30 bg-red-500/5 glow-red',
-  grey: 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 glow-slate',
+  grey: 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 glow-slate',
 };
 const STATUS_DOT = { green: 'bg-emerald-500 glow-green', yellow: 'bg-amber-500 glow-yellow', red: 'bg-red-500 glow-red', grey: 'bg-slate-400' };
 const STATUS_LABEL = { green: 'Active', yellow: 'Moderate', red: 'Low Activity', grey: 'No Data' };
 
 function ActivityCard({ a }) {
   return (
-    <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/50 p-5 hover:border-brand-200 dark:hover:border-brand-500/30 hover:shadow-sm transition-all">
+    <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-5 hover:border-brand-200 dark:hover:border-brand-500/30 hover:shadow-sm transition-all">
       <div className="flex items-center justify-between mb-3">
         <div>
           <p className="text-sm font-bold text-slate-900 dark:text-slate-100">{a.bu_name}</p>
@@ -45,15 +45,15 @@ function ActivityCard({ a }) {
           <dd className="text-slate-600 dark:text-slate-400">{a.next_day_schedule || '—'}</dd>
         </div>
         <div className="grid grid-cols-3 gap-2 pt-1">
-          <div className="bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-800 rounded-lg px-2 py-1.5 text-center">
+          <div className="bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-lg px-2 py-1.5 text-center">
             <p className="text-slate-500 dark:text-slate-400 text-[10px] uppercase tracking-wide">Gym</p>
             <p className="font-bold text-slate-800 dark:text-slate-200">{a.gym_percent != null ? `${a.gym_percent}%` : '—'}</p>
           </div>
-          <div className="bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-800 rounded-lg px-2 py-1.5 text-center">
+          <div className="bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-lg px-2 py-1.5 text-center">
             <p className="text-slate-500 dark:text-slate-400 text-[10px] uppercase tracking-wide">Swim</p>
             <p className="font-bold text-slate-800 dark:text-slate-200">{a.swimming_percent != null ? `${a.swimming_percent}%` : '—'}</p>
           </div>
-          <div className="bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-800 rounded-lg px-2 py-1.5 text-center">
+          <div className="bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-lg px-2 py-1.5 text-center">
             <p className="text-slate-500 dark:text-slate-400 text-[10px] uppercase tracking-wide">Cycle</p>
             <p className="font-bold text-slate-800 dark:text-slate-200">{a.cycle_percent != null ? `${a.cycle_percent}%` : '—'}</p>
           </div>
@@ -124,7 +124,7 @@ export default function ActivityDashboardPage() {
         </header>
 
         <section className={`${GLASS} overflow-hidden`}>
-          <div className="p-6 border-b border-slate-200/70 dark:border-slate-700/70 flex items-center justify-between flex-wrap gap-4">
+          <div className="p-6 border-b border-slate-200/70 dark:border-slate-800 flex items-center justify-between flex-wrap gap-4">
             <div>
               <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">Executive Briefing</p>
               <h1 className="font-bold text-slate-900 dark:text-slate-100 tracking-tight text-lg">Today's CEO Activity</h1>
@@ -142,7 +142,7 @@ export default function ActivityDashboardPage() {
                 ))}
               </div>
             ) : (
-              <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 px-5 py-12 text-center">
+              <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 px-5 py-12 text-center">
                 <p className="text-sm font-semibold text-slate-600 dark:text-slate-400">No activity submitted yet today</p>
                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">CEO activity reports will appear here as they come in.</p>
               </div>
@@ -151,7 +151,7 @@ export default function ActivityDashboardPage() {
         </section>
 
         <section className={`${GLASS} overflow-hidden`}>
-          <div className="p-6 border-b border-slate-200/70 dark:border-slate-700/70 flex items-center justify-between flex-wrap gap-4">
+          <div className="p-6 border-b border-slate-200/70 dark:border-slate-800 flex items-center justify-between flex-wrap gap-4">
             <div>
               <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">Full Directory</p>
               <h2 className="font-bold text-slate-900 dark:text-slate-100 tracking-tight text-lg">CEO Activity Directory</h2>
@@ -159,7 +159,7 @@ export default function ActivityDashboardPage() {
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               <input type="text" placeholder="Search BU, CEO..." value={dirSearch} onChange={(e) => setDirSearch(e.target.value)}
-                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/60 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 px-3.5 py-2 text-sm w-full sm:w-56 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent" />
+                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 px-3.5 py-2 text-sm w-full sm:w-56 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent" />
               <button onClick={() => setDirFilter('all')} className={filterBtnClass('all')}>All</button>
               <button onClick={() => setDirFilter('green')} className={filterBtnClass('green')}>Active</button>
               <button onClick={() => setDirFilter('yellow')} className={filterBtnClass('yellow')}>Moderate</button>
@@ -169,7 +169,7 @@ export default function ActivityDashboardPage() {
           <div className="p-6">
             <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
               {filteredDirectory.map((d) => (
-                <Link key={d.bu_id} to={`/admin/business-unit/${d.bu_id}`} className={`rounded-2xl border p-4 hover:-translate-y-0.5 transition-transform ${STATUS_CARD_CLASS[d.status]}`}>
+                <Link key={d.bu_id} to={`/admin/business-unit/${d.bu_id}`} className={`rounded-xl border p-4 hover:-translate-y-0.5 transition-transform ${STATUS_CARD_CLASS[d.status]}`}>
                   <div className="flex items-center justify-between mb-2.5">
                     <div>
                       <p className="text-sm font-bold text-slate-900 dark:text-slate-100">{d.bu_name}</p>
@@ -200,7 +200,7 @@ export default function ActivityDashboardPage() {
         </section>
 
         <section className={`${GLASS} overflow-hidden`}>
-          <div className="p-6 border-b border-slate-200/70 dark:border-slate-700/70 flex items-center justify-between flex-wrap gap-4">
+          <div className="p-6 border-b border-slate-200/70 dark:border-slate-800 flex items-center justify-between flex-wrap gap-4">
             <div>
               <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">Audit Trail</p>
               <h2 className="font-bold text-slate-900 dark:text-slate-100 tracking-tight text-lg">Daily Activities History</h2>
@@ -211,7 +211,7 @@ export default function ActivityDashboardPage() {
               placeholder="Search BU, CEO, or content..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/60 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 px-3.5 py-2 text-sm w-full sm:w-72 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+              className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 px-3.5 py-2 text-sm w-full sm:w-72 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
             />
           </div>
           <p className="lg:hidden px-6 pt-3 text-[11px] font-medium text-slate-400 dark:text-slate-500 flex items-center gap-1">
@@ -220,7 +220,7 @@ export default function ActivityDashboardPage() {
           </p>
           <div className="overflow-x-auto max-h-[70vh] overflow-y-auto">
             <table className="w-full min-w-max text-sm">
-              <thead className="sticky top-0 z-[5] bg-white/90 dark:bg-slate-800/90 backdrop-blur text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wider">
+              <thead className="sticky top-0 z-[5] bg-white dark:bg-slate-900 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wider">
                 <tr>
                   <th className="px-6 py-3 text-left">Business Unit</th>
                   <th className="px-6 py-3 text-left">CEO</th>
@@ -233,7 +233,7 @@ export default function ActivityDashboardPage() {
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {filteredHistory.map((a, i) => (
                   <Fragment key={i}>
-                    <tr className="hover:bg-slate-50 dark:hover:bg-slate-800/60 transition-colors cursor-pointer" onClick={() => setExpanded(expanded === i ? null : i)}>
+                    <tr className="hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors cursor-pointer" onClick={() => setExpanded(expanded === i ? null : i)}>
                       <td className="px-6 py-3.5">
                         <p className="font-semibold text-slate-800 dark:text-slate-200">{a.bu_name}</p>
                       </td>
@@ -249,7 +249,7 @@ export default function ActivityDashboardPage() {
                     </tr>
                     {expanded === i && (
                       <tr className="fade-in">
-                        <td colSpan={6} className="px-6 py-5 bg-slate-50 dark:bg-slate-800/60">
+                        <td colSpan={6} className="px-6 py-5 bg-slate-50 dark:bg-slate-900">
                           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
                             <div>
                               <p className="text-slate-500 dark:text-slate-400 font-semibold uppercase tracking-wide text-[10px] mb-1">Meetings Attended</p>

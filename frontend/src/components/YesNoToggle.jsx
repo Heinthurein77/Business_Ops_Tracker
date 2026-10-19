@@ -6,14 +6,14 @@ export default function YesNoToggle({ label, value, onChange }) {
         <button
           type="button"
           onClick={() => onChange(true)}
-          className={`flex-1 px-4 py-2.5 text-sm font-semibold transition-colors ${value ? 'bg-emerald-600 text-white' : 'bg-white/70 dark:bg-slate-800/60 text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'}`}
+          className={`flex-1 px-4 py-2.5 text-sm font-semibold transition-colors ${value ? 'bg-emerald-600 text-white' : 'bg-white dark:bg-slate-900 text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'}`}
         >
           Yes
         </button>
         <button
           type="button"
           onClick={() => onChange(false)}
-          className={`flex-1 px-4 py-2.5 text-sm font-semibold transition-colors border-l border-slate-200 dark:border-slate-700 ${!value ? 'bg-slate-600 text-white' : 'bg-white/70 dark:bg-slate-800/60 text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'}`}
+          className={`flex-1 px-4 py-2.5 text-sm font-semibold transition-colors border-l border-slate-200 dark:border-slate-700 ${!value ? 'bg-slate-600 text-white' : 'bg-white dark:bg-slate-900 text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'}`}
         >
           No
         </button>

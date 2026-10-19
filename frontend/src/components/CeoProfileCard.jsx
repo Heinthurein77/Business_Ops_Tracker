@@ -41,9 +41,9 @@ export default function CeoProfileCard({ ceoProfile, subtitle, glassClass }) {
       <div className="px-5 sm:px-6 py-5 flex flex-col lg:flex-row lg:items-center gap-5">
         <div className="flex items-center gap-4 min-w-0 lg:flex-1">
           {safeUrl(ceoProfile.profile_pic_url) ? (
-            <img src={safeUrl(ceoProfile.profile_pic_url)} alt="" className="w-16 h-16 rounded-2xl object-cover border-2 border-white dark:border-slate-700 shadow-sm ring-1 ring-slate-200 dark:ring-slate-700 flex-shrink-0" />
+            <img src={safeUrl(ceoProfile.profile_pic_url)} alt="" className="w-16 h-16 rounded-xl object-cover border-2 border-white dark:border-slate-700 shadow-sm ring-1 ring-slate-200 dark:ring-slate-700 flex-shrink-0" />
           ) : (
-            <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-brand-500 to-indigo-500 flex items-center justify-center flex-shrink-0 shadow-sm">
+            <div className="w-16 h-16 rounded-xl bg-gradient-to-br from-brand-500 to-indigo-500 flex items-center justify-center flex-shrink-0 shadow-sm">
               <span className="text-lg font-bold text-white tracking-wide">{initials(ceoProfile.full_name)}</span>
             </div>
           )}
@@ -80,7 +80,7 @@ export default function CeoProfileCard({ ceoProfile, subtitle, glassClass }) {
 
       {ceoProfile.is_profile_completed && ceoProfile.business_details && (
         <div className="px-5 sm:px-6 pb-4 pt-0.5 -mt-1">
-          <div className="rounded-xl border border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 px-4 py-2.5">
+          <div className="rounded-xl border border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900 px-4 py-2.5">
             <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500 mb-0.5">About the Business</p>
             <p className="text-xs text-slate-600 dark:text-slate-400 line-clamp-2">{ceoProfile.business_details}</p>
           </div>

@@ -39,7 +39,7 @@ export default function MiniCalendar({ calendarWeeks, monthLabel, prevMonth, nex
       </button>
 
       {open && (
-        <div className="absolute z-30 right-0 mt-2 w-[min(18rem,90vw)] bg-white border border-slate-200 rounded-2xl shadow-2xl shadow-slate-900/10 p-4">
+        <div className="absolute z-30 right-0 mt-2 w-[min(18rem,90vw)] bg-white border border-slate-200 rounded-xl shadow-2xl shadow-slate-900/10 p-4">
           <div className="flex items-center justify-center gap-1 mb-3">
             <button
               type="button"

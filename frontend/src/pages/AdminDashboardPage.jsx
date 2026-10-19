@@ -281,7 +281,7 @@ export default function AdminDashboardPage() {
                   if (e.key === 'Escape') setSearchOpen(false);
                 }}
                 placeholder="Search business or CEO…"
-                className="pl-9 pr-3 py-2.5 text-sm rounded-xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/60 text-slate-700 dark:text-slate-300 placeholder:text-slate-400 dark:placeholder:text-slate-500 w-full sm:w-56 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                className="pl-9 pr-3 py-2.5 text-sm rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 placeholder:text-slate-400 dark:placeholder:text-slate-500 w-full sm:w-56 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
               />
               {searchOpen && searchQuery.trim() !== '' && (
                 <div className={`${GLASS} absolute z-50 top-full left-0 mt-2 w-full sm:w-72 max-w-[85vw] overflow-hidden fade-in`}>
@@ -308,7 +308,7 @@ export default function AdminDashboardPage() {
                 onClick={() => selectedBuIndex > 0 && selectBu(ov.operations[selectedBuIndex - 1].bu_id)}
                 disabled={selectedBuIndex <= 0}
                 aria-label="Previous business unit"
-                className="flex items-center justify-center w-9 h-9 rounded-xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/60 text-slate-500 dark:text-slate-400 hover:border-brand-300 dark:hover:border-brand-500/40 hover:text-slate-800 dark:hover:text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex-shrink-0"
+                className="flex items-center justify-center w-9 h-9 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-500 dark:text-slate-400 hover:border-brand-300 dark:hover:border-brand-500/40 hover:text-slate-800 dark:hover:text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex-shrink-0"
               >
                 <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" /></svg>
               </button>
@@ -316,7 +316,7 @@ export default function AdminDashboardPage() {
               <button
                 type="button"
                 onClick={() => setBuSelectorOpen((v) => !v)}
-                className="flex items-center gap-2 text-sm font-bold text-slate-800 dark:text-slate-200 bg-white/70 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-2.5 hover:border-brand-300 dark:hover:border-brand-500/40 transition-colors"
+                className="flex items-center gap-2 text-sm font-bold text-slate-800 dark:text-slate-200 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-2.5 hover:border-brand-300 dark:hover:border-brand-500/40 transition-colors"
               >
                 {selectedBuMeta ? selectedBuMeta.bu_name : 'Select Business'}
                 <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>
@@ -344,7 +344,7 @@ export default function AdminDashboardPage() {
                 onClick={() => selectedBuIndex < ov.operations.length - 1 && selectBu(ov.operations[selectedBuIndex + 1].bu_id)}
                 disabled={selectedBuIndex < 0 || selectedBuIndex >= ov.operations.length - 1}
                 aria-label="Next business unit"
-                className="flex items-center justify-center w-9 h-9 rounded-xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/60 text-slate-500 dark:text-slate-400 hover:border-brand-300 dark:hover:border-brand-500/40 hover:text-slate-800 dark:hover:text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex-shrink-0"
+                className="flex items-center justify-center w-9 h-9 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-500 dark:text-slate-400 hover:border-brand-300 dark:hover:border-brand-500/40 hover:text-slate-800 dark:hover:text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex-shrink-0"
               >
                 <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" /></svg>
               </button>
@@ -492,7 +492,7 @@ export default function AdminDashboardPage() {
                                 ? 'bg-red-500/10 text-red-700 dark:text-red-300 font-medium'
                                 : m.status === 'warning'
                                 ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
-                                : 'bg-slate-100 dark:bg-slate-800/60 text-slate-500 dark:text-slate-400'
+                                : 'bg-slate-100 dark:bg-slate-900 text-slate-500 dark:text-slate-400'
                             }`}
                           >
                             {(m.status === 'critical' || m.status === 'warning') && (
@@ -545,7 +545,7 @@ export default function AdminDashboardPage() {
             {/* DAILY LOG + QUICK ACTIONS */}
             <section className="grid lg:grid-cols-5 gap-6">
               <div className={`${GLASS} lg:col-span-3 overflow-hidden`}>
-                <div className="px-6 py-4 border-b border-slate-200/70 dark:border-slate-700/70">
+                <div className="px-6 py-4 border-b border-slate-200/70 dark:border-slate-800">
                   <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">Daily Log</p>
                   <h2 className="font-bold text-slate-900 dark:text-slate-100 text-base">Recent Entries</h2>
                 </div>
@@ -555,7 +555,7 @@ export default function AdminDashboardPage() {
                 </p>
                 <div className="overflow-x-auto max-h-96 overflow-y-auto">
                   <table className="w-full min-w-max text-sm">
-                    <thead className="sticky top-0 bg-white/90 dark:bg-slate-800/90 backdrop-blur text-slate-500 dark:text-slate-400 text-[11px] uppercase tracking-wide">
+                    <thead className="sticky top-0 bg-white dark:bg-slate-900 text-slate-500 dark:text-slate-400 text-[11px] uppercase tracking-wide">
                       <tr>
                         <th className="px-5 py-2.5 text-left">Date</th>
                         <th className="px-5 py-2.5 text-right">Revenue</th>
@@ -570,7 +570,7 @@ export default function AdminDashboardPage() {
                         const rowStatus = (r.performance?.status || 'grey').toLowerCase();
                         const note = detail.financial_notes.find((n) => formatIsoShort(n.note_date) === r.report_date);
                         return (
-                          <tr key={i} onClick={() => setDateIndex(i)} className={`cursor-pointer transition-colors ${i === dateIndex ? 'bg-brand-50/70 dark:bg-brand-500/10' : 'hover:bg-slate-50 dark:hover:bg-slate-800/60'}`}>
+                          <tr key={i} onClick={() => setDateIndex(i)} className={`cursor-pointer transition-colors ${i === dateIndex ? 'bg-brand-50/70 dark:bg-brand-500/10' : 'hover:bg-slate-50 dark:hover:bg-slate-900'}`}>
                             <td className="px-5 py-3 text-slate-700 dark:text-slate-300 font-medium">{r.report_date}</td>
                             <td className="px-5 py-3 text-right text-slate-700 dark:text-slate-300">{money(r.revenue)}</td>
                             <td className="px-5 py-3 text-right text-slate-500 dark:text-slate-400">{money(r.other_amount)}</td>

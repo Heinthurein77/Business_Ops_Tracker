@@ -153,7 +153,7 @@ export default function ProfileSetupPage() {
   return (
     <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6">
       <div className="w-full max-w-2xl">
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-8">
+        <div className="bg-slate-900 border border-slate-800 rounded-xl shadow-2xl p-8">
           <div className="flex items-center justify-between gap-3 mb-6">
             <div className="flex items-center gap-3 min-w-0">
               <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-brand-500 to-indigo-400 flex items-center justify-center flex-shrink-0">
@@ -244,7 +244,7 @@ export default function ProfileSetupPage() {
                     </div>
                   </div>
 
-                  <div className="rounded-lg border border-slate-800 bg-slate-800/30 p-4">
+                  <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
                     <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">About the Business</p>
                     <p className="text-sm text-slate-300 whitespace-pre-wrap">{profile.business_details || '—'}</p>
                   </div>

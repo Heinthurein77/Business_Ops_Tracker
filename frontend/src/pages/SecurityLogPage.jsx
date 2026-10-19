@@ -70,7 +70,7 @@ export default function SecurityLogPage() {
 
       <main className="flex-1 min-w-0 px-4 sm:px-6 py-6 sm:py-8 space-y-6 fade-in">
         <section className={`${GLASS} overflow-hidden`}>
-          <div className="p-6 border-b border-slate-200/70 dark:border-slate-700/70 flex items-center justify-between flex-wrap gap-4">
+          <div className="p-6 border-b border-slate-200/70 dark:border-slate-800 flex items-center justify-between flex-wrap gap-4">
             <div>
               <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">Chairman Only</p>
               <h1 className="font-bold text-slate-900 dark:text-slate-100 tracking-tight text-lg">Security Log</h1>
@@ -88,12 +88,12 @@ export default function SecurityLogPage() {
                 placeholder="Search user, detail, IP..."
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/60 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 px-3.5 py-2 text-sm w-full sm:w-56 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 px-3.5 py-2 text-sm w-full sm:w-56 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
               />
               <select
                 value={eventFilter}
                 onChange={(e) => setEventFilter(e.target.value)}
-                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/60 text-slate-700 dark:text-slate-300 px-3.5 py-2.5 text-sm w-full sm:w-52 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 px-3.5 py-2.5 text-sm w-full sm:w-52 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
               >
                 {EVENT_FILTERS.map((f) => (
                   <option key={f.key} value={f.key}>{f.label}</option>
@@ -116,7 +116,7 @@ export default function SecurityLogPage() {
           </p>
           <div className="overflow-x-auto max-h-[70vh] overflow-y-auto">
             <table className="w-full min-w-max text-sm">
-              <thead className="sticky top-0 z-[5] bg-white/90 dark:bg-slate-800/90 backdrop-blur text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wider">
+              <thead className="sticky top-0 z-[5] bg-white dark:bg-slate-900 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wider">
                 <tr>
                   <th className="px-6 py-3 text-left">Time</th>
                   <th className="px-6 py-3 text-left">User</th>
@@ -127,7 +127,7 @@ export default function SecurityLogPage() {
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {filtered.map((log, i) => (
-                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-800/60 transition-colors">
+                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors">
                     <td className="px-6 py-3.5 font-medium tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">{log.timestamp_display}</td>
                     <td className="px-6 py-3.5 text-slate-600 dark:text-slate-400">{log.username}</td>
                     <td className="px-6 py-3.5">

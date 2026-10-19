@@ -105,7 +105,7 @@ export default function OperationsPage() {
         </section>
 
         <section className={`${GLASS} overflow-hidden`}>
-          <div className="p-6 border-b border-slate-200/70 dark:border-slate-700/70 flex items-center justify-between flex-wrap gap-4">
+          <div className="p-6 border-b border-slate-200/70 dark:border-slate-800 flex items-center justify-between flex-wrap gap-4">
             <div>
               <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">Live Dataset</p>
               <h1 className="font-bold text-slate-900 dark:text-slate-100 tracking-tight text-lg">Interactive Operations Grid</h1>
@@ -125,7 +125,7 @@ export default function OperationsPage() {
                 placeholder="Search BU, CEO..."
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/60 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 px-3.5 py-2 text-sm w-full sm:w-56 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 px-3.5 py-2 text-sm w-full sm:w-56 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
               />
               <button onClick={() => setFilter('all')} className={filterBtnClass('all')}>View All</button>
               <button onClick={() => setFilter('red')} className={filterBtnClass('red')}>View Critical</button>
@@ -138,7 +138,7 @@ export default function OperationsPage() {
           </p>
           <div className="overflow-x-auto">
             <table className="w-full min-w-max text-sm">
-              <thead className="sticky top-0 z-[5] bg-white/90 dark:bg-slate-800/90 backdrop-blur text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wider">
+              <thead className="sticky top-0 z-[5] bg-white dark:bg-slate-900 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wider">
                 <tr>
                   <th className="px-6 py-3 text-left">Business Unit</th>
                   <th className="px-6 py-3 text-left">CEO</th>
@@ -157,7 +157,7 @@ export default function OperationsPage() {
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {filtered.map((op) => (
-                  <tr key={op.bu_id} className="hover:bg-slate-50 dark:hover:bg-slate-800/60 transition-colors cursor-pointer" onClick={() => navigate(`/admin/business-unit/${op.bu_id}`)}>
+                  <tr key={op.bu_id} className="hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors cursor-pointer" onClick={() => navigate(`/admin/business-unit/${op.bu_id}`)}>
                     <td className="px-6 py-3.5">
                       <p className="font-semibold text-slate-800 dark:text-slate-200">{op.bu_name}</p>
                     </td>

@@ -102,7 +102,7 @@ export default function CeoHistoryPage() {
                 <select
                   value={reviewIndex}
                   onChange={(e) => setReviewIndex(Number(e.target.value))}
-                  className="rounded-lg border border-slate-200 bg-white/70 px-3 py-2 text-sm font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
                 >
                   {reviewDates.map((r, i) => (
                     <option key={i} value={i}>{r.report_date}</option>
@@ -124,7 +124,7 @@ export default function CeoHistoryPage() {
             <div className="p-6">
               <p className="text-xs text-slate-500 mb-4">Submitted at {currentReview.submitted_at || '—'}</p>
               <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                <div className="rounded-xl border border-slate-200 bg-white/60 p-4">
+                <div className="rounded-xl border border-slate-200 bg-white p-4">
                   <div className="flex items-center justify-between mb-3">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Business Performance</p>
                     {financialForDay && (
@@ -165,7 +165,7 @@ export default function CeoHistoryPage() {
                   )}
                 </div>
 
-                <div className="rounded-xl border border-slate-200 bg-white/60 p-4">
+                <div className="rounded-xl border border-slate-200 bg-white p-4">
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-3">Social Activity</p>
                   {socialForDay ? (
                     <div className="space-y-1.5 text-xs">
@@ -184,7 +184,7 @@ export default function CeoHistoryPage() {
                   )}
                 </div>
 
-                <div className="rounded-xl border border-slate-200 bg-white/60 p-4">
+                <div className="rounded-xl border border-slate-200 bg-white p-4">
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-3">Daily Activities</p>
                   <div className="space-y-2 text-xs">
                     <div>
@@ -223,7 +223,7 @@ export default function CeoHistoryPage() {
                   </div>
                 </div>
 
-                <div className="rounded-xl border border-slate-200 bg-white/60 p-4">
+                <div className="rounded-xl border border-slate-200 bg-white p-4">
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-3">Health and Fitness</p>
                   {healthForDay ? (
                     <div className="space-y-1.5 text-xs">
@@ -260,7 +260,7 @@ export default function CeoHistoryPage() {
             </p>
             <div className="overflow-x-auto">
               <table className="w-full min-w-max text-sm">
-                <thead className="bg-white/90 backdrop-blur text-slate-500 text-xs uppercase tracking-wider">
+                <thead className="bg-white text-slate-500 text-xs uppercase tracking-wider">
                   <tr>
                     <th className="px-6 py-3 text-left">Date</th>
                     <th className="px-6 py-3 text-right">Revenue</th>
