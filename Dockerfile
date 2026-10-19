@@ -3,7 +3,7 @@
 # proposes digest bumps, which is how they stay patched. Node 20 reached
 # end-of-life in April 2026, so the (build-stage-only) Node image is 22.
 # --- Stage 1: build the React (Vite) frontend ---
-FROM node:22-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS frontend-build
+FROM node:26-slim@sha256:0d1e33586362bb9e608c4e751e7a9e7edb55c9ac11461ed5666af696cc461dd4 AS frontend-build
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 # `npm ci` (not `npm install`): installs exactly what package-lock.json pins
