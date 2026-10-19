@@ -8,7 +8,7 @@
 fastapi==0.141.1
 starlette==1.7.0
 uvicorn[standard]==0.34.0
-SQLAlchemy==2.0.36
+SQLAlchemy==2.1.4
 alembic==1.14.0
 psycopg2-binary==2.9.10
 # python-multipart: 0.0.20 has several pre-authentication parsing DoS advisories
