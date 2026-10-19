@@ -397,6 +397,36 @@ export default function AdminDashboardPage() {
           </div>
         </section>
 
+        {/* MISSING REPORTS — weekly gaps the backend already computes. */}
+        {ov.missing_submissions?.length > 0 && (
+          <section className={`${GLASS} p-5 border-l-4 border-l-amber-500`}>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 tracking-tight">
+                Missing Reports This Week
+              </h2>
+              <span className="text-xs font-bold px-2.5 py-1 rounded-full border bg-amber-500/10 border-amber-500/20 text-amber-600 dark:text-amber-400">
+                {ov.missing_submissions.length} BU{ov.missing_submissions.length !== 1 ? 's' : ''}
+              </span>
+            </div>
+            <ul className="space-y-2">
+              {ov.missing_submissions.map((m) => (
+                <li key={m.bu_id} className="flex items-center justify-between gap-3 text-[13px]">
+                  <button
+                    type="button"
+                    onClick={() => selectBu(m.bu_id)}
+                    className="font-semibold text-slate-700 dark:text-slate-300 hover:text-brand-600 dark:hover:text-brand-400 truncate"
+                  >
+                    {m.bu_name}
+                  </button>
+                  <span className="text-slate-400 dark:text-slate-500 tabular-nums flex-shrink-0">
+                    {m.missing_count}/{m.days_in_week_so_far} days · {m.missing_dates.join(', ')}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
         {/* KPI CARDS ROW */}
         <section className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {kpiCards.map((card) => (
