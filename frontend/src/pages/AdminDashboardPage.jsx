@@ -354,16 +354,18 @@ export default function AdminDashboardPage() {
         />
 
         {/* KPI CARDS ROW */}
-        <section className="grid sm:grid-cols-2 lg:grid-cols-4 gap-5">
+        <section className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {kpiCards.map((card) => (
-            <div key={card.label} className={`${GLASS} p-5`}>
-              <p className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide">{card.label}</p>
-              <p className="font-bold text-slate-900 dark:text-slate-100 text-2xl mt-2">{card.value}</p>
-              <p className={`text-[11px] font-medium mt-1.5 text-${card.color}-600 dark:text-${card.color}-400`}>{card.sub}</p>
+            <div key={card.label} className={`${GLASS} p-5 relative overflow-hidden`}>
+              <span className={`absolute top-0 left-0 right-0 h-[3px] bg-${card.color}-500`} />
+              <p className="text-[11px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-[0.08em]">{card.label}</p>
+              <p className="font-bold text-slate-900 dark:text-slate-100 text-[26px] leading-tight mt-1.5 tabular-nums">{card.value}</p>
+              <p className={`text-[11px] font-medium mt-1 text-${card.color}-600 dark:text-${card.color}-400`}>{card.sub}</p>
             </div>
           ))}
-          <div className={`${GLASS} p-5 flex flex-col justify-between`}>
-            <p className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide">Cumulative Health</p>
+          <div className={`${GLASS} p-5 relative overflow-hidden flex flex-col justify-between`}>
+            <span className="absolute top-0 left-0 right-0 h-[3px]" style={{ backgroundColor: STATUS_COLOR[status] }} />
+            <p className="text-[11px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-[0.08em]">Cumulative Health</p>
             <span className={`inline-flex items-center gap-1.5 text-sm font-bold px-3 py-1.5 rounded-full border mt-2 w-fit ${STATUS_PILL[status]}`}>
               <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: STATUS_COLOR[status] }} />
               {perf ? `${perf.achievement_pct}%` : '—'} · {STATUS_LABEL[status]}
@@ -386,7 +388,7 @@ export default function AdminDashboardPage() {
               <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">CEO Submitted Data</p>
               <h2 className="font-bold text-slate-900 dark:text-slate-100 text-base mb-5">4-Quadrant Snapshot — {selectedBuMeta?.bu_name}</h2>
               <div className="grid lg:grid-cols-12 gap-6 items-start">
-                <div className="lg:col-span-3 flex flex-col items-center gap-5 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/50 p-6">
+                <div className="lg:col-span-3 flex flex-col items-center gap-5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6">
                   <QuadrantStatusCircle
                     financial={detail.financial_status}
                     social={detail.social_status}
@@ -418,7 +420,7 @@ export default function AdminDashboardPage() {
                     const m = quadrantMetrics[q.key];
                     const badgeClass = QUADRANT_BADGE_CLASS[m.status] || QUADRANT_BADGE_CLASS.unknown;
                     return (
-                      <div key={q.key} className="relative overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/50 p-5 pt-4 shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-[0_1px_3px_rgba(0,0,0,0.25)] hover:shadow-lg hover:border-slate-300 dark:hover:border-slate-600 hover:-translate-y-0.5 transition-all duration-200">
+                      <div key={q.key} className="relative overflow-hidden rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 pt-4 shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-[0_1px_3px_rgba(0,0,0,0.25)] hover:shadow-lg hover:border-slate-300 dark:hover:border-slate-600 hover:-translate-y-0.5 transition-all duration-200">
                         <span className={`absolute top-0 left-0 right-0 h-1 ${QUADRANT_ACCENT[m.status] || QUADRANT_ACCENT.unknown}`} />
                         <div className="flex items-start justify-between gap-2 mb-3 flex-wrap">
                           <div className="flex items-center gap-2.5 min-w-0">

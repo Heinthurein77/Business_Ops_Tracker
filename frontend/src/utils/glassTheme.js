@@ -1,9 +1,22 @@
-// Shared glassmorphism card treatment for the admin section's theme
-// (PayFlow-style redesign) — kept as one constant so every admin page's
-// "glass card" look stays in sync in both light and dark mode. Also used by
-// the shared AdminSidebar nav. Dark variants activate via the `dark` class
-// ThemeContext toggles on <html>.
-export const GLASS = 'bg-white/80 dark:bg-slate-900/70 backdrop-blur-md rounded-[20px] shadow-[0_10px_30px_rgba(0,0,0,0.03)] dark:shadow-[0_10px_30px_rgba(0,0,0,0.35)] border border-white/60 dark:border-slate-700/60';
+// "Command" design language — crisp executive surfaces.
+//
+// Replaces the old frosted-glass look (backdrop-blur, 20px radii, gradient
+// page backgrounds) with solid surfaces, hairline borders and tight radii,
+// in the spirit of Linear / Stripe dashboards: calmer, sharper, denser.
+// Export names (GLASS, PAGE_BG) are kept so the 15 files importing them need
+// no changes — only the values changed.
+export const GLASS =
+  'bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 ' +
+  'shadow-[0_1px_2px_rgba(16,24,40,0.06)]';
 
-// Page-background gradient used behind the glass cards.
-export const PAGE_BG = 'bg-gradient-to-br from-[#eef2f3] to-brand-100 dark:from-slate-950 dark:to-slate-900';
+// Flat page background — no gradients. Light: cool slate tint; dark: near-black.
+export const PAGE_BG = 'bg-slate-100 dark:bg-slate-950';
+
+// Shared page header: title block + actions row.
+export const PAGE_HEADER = 'flex items-start justify-between flex-wrap gap-4 mb-6';
+
+// Section title inside cards.
+export const CARD_TITLE = 'text-sm font-bold text-slate-900 dark:text-slate-100 tracking-tight';
+
+// Muted description text.
+export const MUTED = 'text-[13px] text-slate-500 dark:text-slate-400';

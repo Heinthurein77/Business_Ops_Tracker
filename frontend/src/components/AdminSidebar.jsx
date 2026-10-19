@@ -2,27 +2,46 @@ import { useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import ThemeToggle from './ThemeToggle';
-import { GLASS } from '../utils/glassTheme';
 
-const ADMIN_NAV_LINKS = [
-  { to: '/admin', label: 'Executive Dashboard', end: true },
-  { to: '/admin/comparison', label: 'Comparison' },
-  { to: '/admin/activity-dashboard', label: 'Daily Activities' },
-  { to: '/admin/health-dashboard', label: 'Health and Fitness' },
-  { to: '/admin/operations', label: 'Operations' },
-  { to: '/admin/ceo-profiles', label: 'CEO Profiles' },
-  { to: '/admin/head-office', label: 'Head Office' },
-  { to: '/admin/report-logs', label: 'Report Logs' },
-  { to: '/admin/users', label: 'User Management', chairmanOnly: true },
-  { to: '/admin/security-log', label: 'Security Log', chairmanOnly: true },
+const ADMIN_NAV_GROUPS = [
+  {
+    label: 'Overview',
+    links: [
+      { to: '/admin', label: 'Executive Dashboard', end: true },
+      { to: '/admin/comparison', label: 'Comparison' },
+    ],
+  },
+  {
+    label: 'Track',
+    links: [
+      { to: '/admin/activity-dashboard', label: 'Daily Activities' },
+      { to: '/admin/health-dashboard', label: 'Health and Fitness' },
+      { to: '/admin/operations', label: 'Operations' },
+      { to: '/admin/report-logs', label: 'Report Logs' },
+    ],
+  },
+  {
+    label: 'Manage',
+    links: [
+      { to: '/admin/ceo-profiles', label: 'CEO Profiles' },
+      { to: '/admin/head-office', label: 'Head Office' },
+      { to: '/admin/users', label: 'User Management', chairmanOnly: true },
+      { to: '/admin/security-log', label: 'Security Log', chairmanOnly: true },
+    ],
+  },
 ];
 
 // CEO's own section — same sidebar shell as Chairman/HO, its own small link
 // set (mirrors what CeoNav used to offer as a horizontal bar).
-const CEO_NAV_LINKS = [
-  { to: '/ceo', label: 'Dashboard', end: true },
-  { to: '/ceo/history', label: 'History' },
-  { to: '/ceo/report-logs', label: 'Report Logs' },
+const CEO_NAV_GROUPS = [
+  {
+    label: 'My Workspace',
+    links: [
+      { to: '/ceo', label: 'Dashboard', end: true },
+      { to: '/ceo/history', label: 'History' },
+      { to: '/ceo/report-logs', label: 'Report Logs' },
+    ],
+  },
 ];
 
 const ICONS = {
@@ -87,68 +106,72 @@ export default function AdminSidebar() {
   // roles currently share identical admin permissions — this is display-only.
   const reportsTo = user?.role === 'HO' ? 'Reports to Chairman' : null;
   const isCeo = user?.role === 'CEO';
-  const visibleLinks = isCeo
-    ? CEO_NAV_LINKS
-    : ADMIN_NAV_LINKS.filter((link) => !link.chairmanOnly || user?.role === 'Chairman');
+  const visibleGroups = (isCeo ? CEO_NAV_GROUPS : ADMIN_NAV_GROUPS)
+    .map((g) => ({
+      ...g,
+      links: g.links.filter((link) => !link.chairmanOnly || user?.role === 'Chairman'),
+    }))
+    .filter((g) => g.links.length > 0);
+
+  const navLinkClass = ({ isActive }) =>
+    `flex items-center gap-3 text-[13px] font-medium px-3 py-2 rounded-lg transition-colors ${
+      isActive
+        ? 'bg-brand-600 text-white shadow-sm'
+        : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-slate-100'
+    }`;
 
   return (
     <>
-      {/* DESKTOP SIDEBAR */}
-      <aside className="hidden lg:flex flex-col w-64 flex-shrink-0 h-screen sticky top-0 p-5 gap-6">
-        <div className="flex items-center gap-2.5 px-1">
-          <BrandMark />
+      {/* DESKTOP SIDEBAR — solid surface, hairline right border, grouped nav */}
+      <aside className="hidden lg:flex flex-col w-60 flex-shrink-0 h-screen sticky top-0 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800">
+        <div className="flex items-center gap-2.5 px-5 pt-5 pb-4">
+          <BrandMark size="w-8 h-8" rounding="rounded-lg" textClass="text-[13px]" shadow="shadow-sm" />
           <div className="min-w-0">
-            <p className="text-sm font-bold text-slate-900 dark:text-slate-100 leading-none truncate">abcMIB</p>
-            <p className="text-[10px] text-slate-500 mt-1 truncate">Business Ops Tracker</p>
+            <p className="text-sm font-bold text-slate-900 dark:text-slate-100 leading-none truncate tracking-tight">abcMIB</p>
+            <p className="text-[10px] text-slate-400 mt-1 truncate">Business Ops Tracker</p>
           </div>
         </div>
 
-        <nav className={`${GLASS} p-2 flex flex-col gap-1 overflow-y-auto`}>
-          {visibleLinks.map((link) => (
-            <NavLink
-              key={link.to}
-              to={link.to}
-              end={link.end}
-              className={({ isActive }) =>
-                `flex items-center gap-3 text-[13px] font-semibold px-3.5 py-2.5 rounded-xl transition-colors ${
-                  isActive ? 'bg-brand-600 text-white shadow-md shadow-brand-600/30' : 'text-slate-500 dark:text-slate-400 hover:bg-slate-900/5 dark:hover:bg-white/5 hover:text-slate-800 dark:hover:text-slate-200'
-                }`
-              }
-            >
-              <NavIcon d={ICONS[link.to]} />
-              <span className="truncate">{link.label}</span>
-            </NavLink>
+        <nav className="flex-1 overflow-y-auto px-3 pb-4 space-y-5">
+          {visibleGroups.map((group) => (
+            <div key={group.label}>
+              <p className="px-3 mb-1.5 text-[10px] font-bold uppercase tracking-[0.12em] text-slate-400 dark:text-slate-500">
+                {group.label}
+              </p>
+              <div className="space-y-0.5">
+                {group.links.map((link) => (
+                  <NavLink key={link.to} to={link.to} end={link.end} className={navLinkClass}>
+                    <NavIcon d={ICONS[link.to]} />
+                    <span className="truncate">{link.label}</span>
+                  </NavLink>
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
 
-        <div className="flex-1" />
-
-        <div className={`${GLASS} p-3 flex items-center gap-2.5`}>
-          <span className="w-8 h-8 rounded-full bg-gradient-to-br from-brand-500 to-indigo-400 flex items-center justify-center text-[11px] font-bold text-white flex-shrink-0">
-            {initials}
-          </span>
-          <div className="min-w-0">
-            <p className="text-[12px] font-bold text-slate-800 dark:text-slate-200 truncate">{displayName}</p>
-            <p className="text-[10px] text-slate-500 truncate capitalize">{user?.role}</p>
-            {reportsTo && <p className="text-[10px] text-slate-400 truncate">{reportsTo}</p>}
+        <div className="border-t border-slate-200 dark:border-slate-800 p-4 space-y-3">
+          <div className="flex items-center gap-2.5">
+            <span className="w-8 h-8 rounded-full bg-brand-600 flex items-center justify-center text-[11px] font-bold text-white flex-shrink-0">
+              {initials}
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="text-[12px] font-semibold text-slate-800 dark:text-slate-200 truncate">{displayName}</p>
+              <p className="text-[10px] text-slate-400 truncate capitalize">{user?.role}</p>
+            </div>
+            {!isCeo && <ThemeToggle className="flex-shrink-0" />}
           </div>
+          <button
+            onClick={() => logout()}
+            className="w-full text-xs font-medium text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 border border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600 rounded-lg px-3 py-2 transition-colors"
+          >
+            Sign Out
+          </button>
         </div>
-
-        {/* CEO-facing pages aren't styled for dark mode yet, so the toggle
-            would flip the sidebar dark while the page content stayed light —
-            hidden here rather than shipping that half-dark result. */}
-        {!isCeo && <ThemeToggle className={`${GLASS} px-4 py-2.5`} />}
-
-        <button
-          onClick={() => logout()}
-          className={`${GLASS} text-xs font-semibold text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 px-4 py-2.5 transition-colors`}
-        >
-          Sign Out
-        </button>
       </aside>
 
       {/* MOBILE TOP BAR */}
-      <header className="lg:hidden w-full bg-white/80 dark:bg-slate-900/80 backdrop-blur-md sticky top-0 z-40 shadow-sm border-b border-white/60 dark:border-slate-700/60 px-4 py-2.5">
+      <header className="lg:hidden w-full bg-white dark:bg-slate-900 sticky top-0 z-40 border-b border-slate-200 dark:border-slate-800 px-4 py-2.5">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2.5 min-w-0">
             <BrandMark size="w-8 h-8" rounding="rounded-lg" textClass="text-[13px]" shadow="shadow-md" />
@@ -164,25 +187,28 @@ export default function AdminSidebar() {
         </div>
 
         {mobileOpen && (
-          <div className="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700 space-y-3 fade-in">
-            <nav className="flex flex-col gap-1">
-              {visibleLinks.map((link) => (
-                <NavLink
-                  key={link.to}
-                  to={link.to}
-                  end={link.end}
-                  onClick={() => setMobileOpen(false)}
-                  className={({ isActive }) =>
-                    `flex items-center gap-3 text-sm font-semibold px-3.5 py-2.5 rounded-xl transition-colors ${
-                      isActive ? 'bg-brand-600 text-white shadow-md shadow-brand-600/30' : 'text-slate-500 dark:text-slate-400 hover:bg-slate-900/5 dark:hover:bg-white/5 hover:text-slate-800 dark:hover:text-slate-200'
-                    }`
-                  }
-                >
-                  <NavIcon d={ICONS[link.to]} />
-                  <span className="truncate">{link.label}</span>
-                </NavLink>
-              ))}
-            </nav>
+          <div className="mt-3 pt-3 border-t border-slate-200 dark:border-slate-800 space-y-4 fade-in">
+            {visibleGroups.map((group) => (
+              <div key={group.label}>
+                <p className="px-3 mb-1 text-[10px] font-bold uppercase tracking-[0.12em] text-slate-400 dark:text-slate-500">
+                  {group.label}
+                </p>
+                <nav className="flex flex-col gap-0.5">
+                  {group.links.map((link) => (
+                    <NavLink
+                      key={link.to}
+                      to={link.to}
+                      end={link.end}
+                      onClick={() => setMobileOpen(false)}
+                      className={navLinkClass}
+                    >
+                      <NavIcon d={ICONS[link.to]} />
+                      <span className="truncate">{link.label}</span>
+                    </NavLink>
+                  ))}
+                </nav>
+              </div>
+            ))}
             {!isCeo && <ThemeToggle className="w-full justify-center bg-slate-900/5 dark:bg-white/5 px-3.5 py-2 rounded-lg" />}
             <div className="flex items-center justify-between gap-3 pt-3 border-t border-slate-200 dark:border-slate-700">
               <span className="flex items-center gap-2 text-xs font-semibold text-slate-700 dark:text-slate-300 bg-slate-900/5 dark:bg-white/5 px-3 py-1.5 rounded-full">
