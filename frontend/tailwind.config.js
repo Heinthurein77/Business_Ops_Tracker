@@ -7,7 +7,7 @@ export default {
   // static file scanner can't see — safelisted explicitly instead. Scoped to
   // only the colors/shades actually used that way, to avoid bloating the CSS
   // bundle with every color/shade combination.
-  safelist: [{ pattern: /(bg|text)-(red|amber|emerald|brand)-(400|500|600)(\/10)?/, variants: ['dark'] }],
+  safelist: [{ pattern: /(bg|text)-(red|amber|emerald|brand|sky)-(400|500|600)(\/10)?/, variants: ['dark'] }],
   theme: {
     extend: {
       fontFamily: { sans: ['Inter', 'sans-serif'] },
