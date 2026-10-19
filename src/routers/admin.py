@@ -345,22 +345,45 @@ def gather_admin_overview(db: Session) -> dict:
     trend_labels = [d.strftime("%d %b") for d in chart_days]
 
     trend_rows = (
-        db.query(DailyFinancial.business_unit_id, DailyFinancial.report_date, DailyFinancial.cash_flow)
+        db.query(
+            DailyFinancial.business_unit_id,
+            DailyFinancial.report_date,
+            DailyFinancial.revenue,
+            DailyFinancial.cash_flow,
+            DailyFinancial.receivable,
+            DailyFinancial.payable,
+        )
         .filter(DailyFinancial.report_date >= chart_days[0], DailyFinancial.report_date <= chart_days[-1])
         .all()
     )
-    cash_flow_by_bu_date: dict = defaultdict(dict)
-    for bu_id, report_date, cash_flow in trend_rows:
-        cash_flow_by_bu_date[bu_id][report_date] = float(cash_flow) if cash_flow is not None else 0.0
+    vals_by_bu_date: dict = defaultdict(dict)
+    for bu_id, report_date, revenue, cash_flow, receivable, payable in trend_rows:
+        vals_by_bu_date[bu_id][report_date] = {
+            "revenue": float(revenue) if revenue is not None else 0.0,
+            "cash_flow": float(cash_flow) if cash_flow is not None else 0.0,
+            "receivable": float(receivable) if receivable is not None else 0.0,
+            "payable": float(payable) if payable is not None else 0.0,
+        }
 
-    trend_cash_flow_by_bu = [
+    def _series(bu_id, key):
+        return [round(vals_by_bu_date.get(bu_id, {}).get(d, {}).get(key, 0.0), 2) for d in chart_days]
+
+    trend_by_bu = [
         {
             "bu_id": bu.id,
             "bu_code": bu.code,
             "bu_name": bu.name,
-            "cash_flow": [round(cash_flow_by_bu_date.get(bu.id, {}).get(d, 0.0), 2) for d in chart_days],
+            "revenue": _series(bu.id, "revenue"),
+            "cash_flow": _series(bu.id, "cash_flow"),
+            "receivable": _series(bu.id, "receivable"),
+            "payable": _series(bu.id, "payable"),
         }
         for bu in business_units
+    ]
+    # Kept for backwards compatibility; new clients use trend_by_bu.
+    trend_cash_flow_by_bu = [
+        {"bu_id": b["bu_id"], "bu_code": b["bu_code"], "bu_name": b["bu_name"], "cash_flow": b["cash_flow"]}
+        for b in trend_by_bu
     ]
 
     # --- Chart 2: grouped bar chart, latest receivable vs payable per BU ---
@@ -547,6 +570,7 @@ def gather_admin_overview(db: Session) -> dict:
         "missing_submissions": missing_submissions,
         "trend_labels": trend_labels,
         "trend_cash_flow_by_bu": trend_cash_flow_by_bu,
+        "trend_by_bu": trend_by_bu,
         "bar_categories": bar_categories,
         "bar_receivable": bar_receivable,
         "bar_payable": bar_payable,
@@ -576,6 +600,7 @@ def admin_comparison(user: User = Depends(require_admin), db: Session = Depends(
         "today_display": ov["today_display"],
         "trend_labels": ov["trend_labels"],
         "trend_cash_flow_by_bu": ov["trend_cash_flow_by_bu"],
+        "trend_by_bu": ov["trend_by_bu"],
         "bar_categories": ov["bar_categories"],
         "bar_receivable": ov["bar_receivable"],
         "bar_payable": ov["bar_payable"],

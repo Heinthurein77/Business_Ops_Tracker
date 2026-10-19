@@ -7,12 +7,12 @@ import { GLASS, PAGE_BG } from '../utils/glassTheme';
 import { safeUrl } from '../utils/safeUrl';
 
 const STATUS_CARD_CLASS = {
-  green: 'border-emerald-500/20 dark:border-emerald-500/30 bg-emerald-500/5 glow-green',
-  yellow: 'border-amber-500/20 dark:border-amber-500/30 bg-amber-500/5 glow-yellow',
-  red: 'border-red-500/20 dark:border-red-500/30 bg-red-500/5 glow-red',
-  grey: 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 glow-slate',
+  green: 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 border-l-4 border-l-emerald-500',
+  yellow: 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 border-l-4 border-l-amber-500',
+  red: 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 border-l-4 border-l-red-500',
+  grey: 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 border-l-4 border-l-slate-300 dark:border-l-slate-600',
 };
-const STATUS_DOT = { green: 'bg-emerald-500 glow-green', yellow: 'bg-amber-500 glow-yellow', red: 'bg-red-500 glow-red', grey: 'bg-slate-400' };
+const STATUS_DOT = { green: 'bg-emerald-500', yellow: 'bg-amber-500', red: 'bg-red-500', grey: 'bg-slate-400' };
 const STATUS_LABEL = { green: 'Active', yellow: 'Moderate', red: 'Low Activity', grey: 'No Data' };
 
 function ActivityCard({ a }) {

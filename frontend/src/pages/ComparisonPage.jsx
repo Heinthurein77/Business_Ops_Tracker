@@ -30,7 +30,8 @@ export default function ComparisonPage() {
   useEffect(() => {
     api.adminComparison().then((d) => {
       setData(d);
-      setTrendBuId((prev) => prev ?? d.trend_cash_flow_by_bu[0]?.bu_id ?? null);
+      const bus = d.trend_by_bu || d.trend_cash_flow_by_bu || [];
+      setTrendBuId((prev) => prev ?? bus[0]?.bu_id ?? null);
     });
   }, []);
 
@@ -52,13 +53,15 @@ export default function ComparisonPage() {
     );
   }
 
-  const trendBu = data.trend_cash_flow_by_bu.find((b) => b.bu_id === trendBuId) || data.trend_cash_flow_by_bu[0] || null;
+  const trendBus = data.trend_by_bu || data.trend_cash_flow_by_bu || [];
+  const trendBu = trendBus.find((b) => b.bu_id === trendBuId) || trendBus[0] || null;
+  const trendSeries = trendBu ? (trendBu[metric] || trendBu.cash_flow || []) : [];
 
   const trendChart = {
-    series: [{ name: 'Cash Flow', data: trendBu?.cash_flow || [] }],
+    series: [{ name: METRICS[metric].label, data: trendSeries }],
     options: {
       chart: { type: 'area', height: 300, toolbar: { show: false }, fontFamily: 'Inter, sans-serif' },
-      colors: ['#8b5cf6'],
+      colors: [METRICS[metric].color],
       stroke: { curve: 'smooth', width: 2.5 },
       fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.35, opacityTo: 0.02, stops: [0, 90, 100] } },
       dataLabels: { enabled: false },
@@ -138,7 +141,20 @@ export default function ComparisonPage() {
         <header className={`${GLASS} px-5 sm:px-6 py-4 flex items-center justify-between flex-wrap gap-4`}>
           <div>
             <h1 className="font-bold text-slate-900 dark:text-slate-100 text-lg">Comparison & Analytics</h1>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{data.today_display}</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{data.today_display} &middot; metric applies to trend &amp; ranking</p>
+          </div>
+          <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 rounded-lg p-1 flex-wrap">
+            {Object.entries(METRICS).map(([key, meta]) => (
+              <button
+                key={key}
+                onClick={() => setMetric(key)}
+                className={`text-xs font-semibold px-3.5 py-1.5 rounded-md transition-colors whitespace-nowrap ${
+                  metric === key ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300'
+                }`}
+              >
+                {meta.label}
+              </button>
+            ))}
           </div>
         </header>
 
@@ -147,15 +163,15 @@ export default function ComparisonPage() {
             <div className="mb-4 flex items-center justify-between flex-wrap gap-3">
               <div>
                 <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">Performance Trend</p>
-                <h2 className="font-bold text-slate-900 dark:text-slate-100 tracking-tight text-lg">Cash Flow Trend</h2>
-                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Last 14 days &middot; one business unit at a time</p>
+                <h2 className="font-bold text-slate-900 dark:text-slate-100 tracking-tight text-lg">{METRICS[metric].label} Trend</h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Last 14 days &middot; one business unit at a time &middot; follows the selected metric</p>
               </div>
               <select
                 value={trendBuId ?? ''}
                 onChange={(e) => setTrendBuId(Number(e.target.value))}
                 className="text-sm font-semibold text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
               >
-                {data.trend_cash_flow_by_bu.map((b) => (
+                {trendBus.map((b) => (
                   <option key={b.bu_id} value={b.bu_id}>
                     {b.bu_name}
                   </option>
@@ -179,20 +195,7 @@ export default function ComparisonPage() {
             <div>
               <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">Comparative Analysis</p>
               <h2 className="font-bold text-slate-900 dark:text-slate-100 tracking-tight text-lg">Business Unit Performance Comparison</h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">All business units ranked by the selected metric &middot; click a row for full details</p>
-            </div>
-            <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 rounded-lg p-1 flex-wrap">
-              {Object.entries(METRICS).map(([key, meta]) => (
-                <button
-                  key={key}
-                  onClick={() => setMetric(key)}
-                  className={`text-xs font-semibold px-3.5 py-1.5 rounded-md transition-colors whitespace-nowrap ${
-                    metric === key ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300'
-                  }`}
-                >
-                  {meta.label}
-                </button>
-              ))}
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">All business units ranked by {METRICS[metric].label} &middot; click a row for full details</p>
             </div>
           </div>
           <div className="grid lg:grid-cols-5">

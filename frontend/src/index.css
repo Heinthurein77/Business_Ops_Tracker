@@ -86,18 +86,6 @@ body {
   box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
   transform: translateY(-1px);
 }
-.glow-red {
-  box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.35), 0 0 16px rgba(239, 68, 68, 0.35);
-}
-.glow-yellow {
-  box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.35), 0 0 16px rgba(245, 158, 11, 0.3);
-}
-.glow-green {
-  box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.35), 0 0 16px rgba(16, 185, 129, 0.28);
-}
-.glow-slate {
-  box-shadow: 0 0 0 1px rgba(100, 116, 139, 0.25);
-}
 .app-bg {
   min-height: 100vh;
   background: #f1f5f9;

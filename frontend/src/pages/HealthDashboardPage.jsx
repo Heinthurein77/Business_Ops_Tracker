@@ -9,12 +9,12 @@ import { DAILY_STEP_GOAL } from '../constants';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
 
 const RISK_CARD_CLASS = {
-  red: 'border-red-500/20 dark:border-red-500/30 bg-red-500/5 glow-red',
-  yellow: 'border-amber-500/20 dark:border-amber-500/30 bg-amber-500/5 glow-yellow',
-  green: 'border-emerald-500/20 dark:border-emerald-500/30 bg-emerald-500/5 glow-green',
-  unknown: 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 glow-slate',
+  red: 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 border-l-4 border-l-red-500',
+  yellow: 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 border-l-4 border-l-amber-500',
+  green: 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 border-l-4 border-l-emerald-500',
+  unknown: 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 border-l-4 border-l-slate-300 dark:border-l-slate-600',
 };
-const RISK_DOT = { red: 'bg-red-500 glow-red', yellow: 'bg-amber-500 glow-yellow', green: 'bg-emerald-500 glow-green', unknown: 'bg-slate-400' };
+const RISK_DOT = { red: 'bg-red-500', yellow: 'bg-amber-500', green: 'bg-emerald-500', unknown: 'bg-slate-400' };
 
 export default function HealthDashboardPage() {
   const { theme } = useTheme();
