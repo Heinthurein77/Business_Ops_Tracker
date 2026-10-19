@@ -1,0 +1,43 @@
+# Production compose for Neon Postgres.
+# Usage (on the server):
+#   1. Create the database in Neon (new database in your existing project, or a new project)
+#   2. Copy the connection string from the Neon dashboard
+#   3. export DATABASE_URL='<redacted>'  # pooled URL works fine
+#      export JWT_SECRET_KEY='<a long random secret, 32+ chars>'
+#   4. docker compose -f docker-compose.prod.yml up -d --build
+#
+# Migrations run automatically on container startup (RUN_MIGRATIONS_ON_STARTUP=true).
+# The local postgres/pgadmin services from docker-compose.yml are NOT started here —
+# Neon is the database.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bot_app
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: production
+      PORT: 8000
+      APP_TIMEZONE: Asia/Yangon
+      APP_NAME: Business Operations & CEO Tracking System
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set to the Neon connection string}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+      JWT_ALGORITHM: HS256
+      JWT_EXPIRE_MINUTES: "480"
+      TOTAL_BUSINESS_UNITS: "23"
+      RUN_MIGRATIONS_ON_STARTUP: "true"
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      R2_BUCKET_NAME: ${R2_BUCKET_NAME:-business-ops-tracker}
+      R2_ENDPOINT_URL: ${R2_ENDPOINT_URL:-}
+      R2_PUBLIC_BASE_URL: ${R2_PUBLIC_BASE_URL:-}
+    volumes:
+      - bot_uploads_data:/app/uploads
+    ports:
+      - "127.0.0.1:8123:8000"
+
+volumes:
+  bot_uploads_data:
