@@ -1,0 +1,66 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: bot_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: botuser
+      POSTGRES_PASSWORD: botpass123
+      POSTGRES_DB: business_ops
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - bot_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U botuser -d business_ops"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: bot_pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "127.0.0.1:5050:80"
+    depends_on:
+      - db
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bot_app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: development
+      PORT: 8000
+      APP_TIMEZONE: Asia/Yangon
+      APP_NAME: Business Operations & CEO Tracking System
+      DATABASE_URL: postgresql://botuser:botpass123@db:5432/business_ops
+      JWT_SECRET_KEY: local-dev-secret-not-for-production
+      JWT_ALGORITHM: HS256
+      JWT_EXPIRE_MINUTES: "480"
+      TOTAL_BUSINESS_UNITS: "23"
+      # Blank by default — R2_ACCESS_KEY_ID/SECRET are unset too, so
+      # is_configured() (src/r2_storage.py) stays false regardless and
+      # uploads fall back to local disk in dev either way. Fill in your own
+      # R2 credentials here only if you want to test against a real bucket.
+      R2_ACCOUNT_ID: ""
+      R2_ACCESS_KEY_ID: ""
+      R2_SECRET_ACCESS_KEY: ""
+      R2_BUCKET_NAME: business-ops-tracker
+      R2_ENDPOINT_URL: ""
+      R2_PUBLIC_BASE_URL: ""
+    volumes:
+      - bot_uploads_data:/app/uploads
+    ports:
+      - "127.0.0.1:8123:8000"
+
+volumes:
+  bot_postgres_data:
+  bot_uploads_data:

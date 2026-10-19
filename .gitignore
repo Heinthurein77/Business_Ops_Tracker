@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+# Covers local_dev.db (config.py's fallback name) and local_sqlite_dev.db
+# (this repo's actual .env override) by pattern instead of exact name, so
+# renaming/adding a local sqlite file can't silently slip past this again.
+*.db
+*.db-journal
+.env
+.env.*
+!.env.example
+# Local-disk upload fallback (src/r2_storage.py) — only ever used outside
+# production, but may contain real uploaded files (profile photos,
+# attachments) from local testing.
+/uploads/
+*.log
+frontend/node_modules/
+frontend/dist/

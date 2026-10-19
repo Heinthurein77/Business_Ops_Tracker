@@ -1,0 +1,471 @@
+from datetime import datetime, date
+
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
+from sqlalchemy.orm import relationship
+
+from src.crypto import EncryptedDate, EncryptedText
+from src.database import Base
+
+# Database-level integrity rules. The API validates all of this too
+# (schemas.py and the submit-report routes); these are the last line of
+# defence and are created by migration b1c5d9e3a7f2 (Postgres). They live here
+# as well so the models remain the single description of the schema.
+_MONEY_LIMIT = 10**13
+
+
+def _pg_check(sqltext, name):
+    """A CHECK constraint that is only emitted on Postgres. The rules use
+    Postgres syntax (extract(), btrim()) and SQLite — local development only —
+    can't alter constraints after the fact anyway, so it relies on the API's
+    validation; production integrity is Postgres."""
+    return CheckConstraint(sqltext, name=name).ddl_if(dialect="postgresql")
+
+
+def _money_range(*columns):
+    return " AND ".join(f"{c} BETWEEN -{_MONEY_LIMIT} AND {_MONEY_LIMIT}" for c in columns)
+
+
+_TARGETS_RANGE = (
+    f"monthly_revenue_target BETWEEN 0 AND {_MONEY_LIMIT} "
+    f"AND monthly_cash_flow_target BETWEEN -{_MONEY_LIMIT} AND {_MONEY_LIMIT} "
+    f"AND monthly_max_receivable BETWEEN 0 AND {_MONEY_LIMIT} "
+    f"AND monthly_max_payable BETWEEN 0 AND {_MONEY_LIMIT}"
+)
+_VITALS_RANGE = (
+    "daily_steps BETWEEN 0 AND 200000 AND heart_rate BETWEEN 20 AND 300 AND sleep_hours BETWEEN 0 AND 24 "
+    "AND bp_systolic BETWEEN 40 AND 300 AND bp_diastolic BETWEEN 20 AND 200 "
+    "AND (bp_systolic IS NULL OR bp_diastolic IS NULL OR bp_diastolic < bp_systolic)"
+)
+_PERCENT_RANGE = "gym_percent BETWEEN 0 AND 100 AND swimming_percent BETWEEN 0 AND 100 AND cycle_percent BETWEEN 0 AND 100"
+
+
+class BusinessUnit(Base):
+    __tablename__ = "business_units"
+
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String(20), unique=True, nullable=False, index=True)
+    name = Column(String(120), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    users = relationship("User", back_populates="business_unit")
+    financials = relationship("DailyFinancial", back_populates="business_unit")
+    activity_logs = relationship("ActivityLog", back_populates="business_unit")
+    health_statuses = relationship("HealthStatus", back_populates="business_unit")
+    social_logs = relationship("SocialLog", back_populates="business_unit")
+
+
+class User(Base):
+    __tablename__ = "users"
+    __table_args__ = (
+        # At most one ACTIVE CEO per business unit — every dashboard lookup
+        # assumes it. (Partial unique index: works on Postgres and SQLite.)
+        Index(
+            "uq_users_one_active_ceo_per_bu",
+            "business_unit_id",
+            unique=True,
+            postgresql_where=text("role = 'CEO' AND is_active"),
+            sqlite_where=text("role = 'CEO' AND is_active = 1"),
+        ),
+        _pg_check("role IN ('Chairman', 'HO', 'CEO')", name="ck_users_role"),
+        _pg_check("(role = 'CEO') = (business_unit_id IS NOT NULL)", name="ck_users_ceo_has_bu"),
+        _pg_check("username = lower(username)", name="ck_users_username_lower"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(80), unique=True, nullable=False, index=True)
+    hashed_password = Column(String(255), nullable=False)
+    full_name = Column(String(150), nullable=True)
+    role = Column(String(20), nullable=False)  # Chairman | HO | CEO
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=True)
+    require_password_change = Column(Boolean, default=False, nullable=False)
+    # Only meaningful for role == "CEO" — Chairman/HO have no profile to
+    # complete, so this stays True (irrelevant) for them. Checked on every
+    # authenticated request (same pattern as require_password_change) so a
+    # CEO can't bypass the mandatory profile-setup gate by calling API
+    # routes directly instead of going through the frontend redirect.
+    is_profile_completed = Column(Boolean, default=True, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    # Bumped on logout and on every password change (self-service or
+    # admin-issued). Embedded in each issued JWT so a token minted before the
+    # bump reads as stale and is rejected, even though it hasn't expired yet
+    # — the only revocation mechanism available for these otherwise-stateless
+    # tokens.
+    token_version = Column(Integer, default=0, nullable=False)
+    # Set only while the account's password is a Chairman-issued temporary
+    # one; login treats an expired temporary password like a wrong one, so an
+    # unclaimed credential can't stay live indefinitely. Cleared as soon as
+    # the owner sets their own password.
+    temp_password_expires_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_login_at = Column(DateTime, nullable=True)
+
+    business_unit = relationship("BusinessUnit", back_populates="users")
+
+
+class DailyFinancial(Base):
+    __tablename__ = "daily_financials"
+    __table_args__ = (
+        UniqueConstraint("business_unit_id", "report_date", name="uq_financial_bu_date"),
+        _pg_check(
+            _money_range("revenue", "cash_flow", "receivable", "payable", "other_amount"),
+            name="ck_daily_financials_amount_range",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    report_date = Column(Date, nullable=False, default=date.today, index=True)
+    revenue = Column(Numeric(16, 2), nullable=False, default=0)
+    expenses = Column(Numeric(16, 2), nullable=False, default=0)
+    net_profit = Column(Numeric(16, 2), nullable=False, default=0)
+    cash_in_hand = Column(Numeric(16, 2), nullable=False, default=0)
+    cash_flow = Column(Numeric(16, 2), nullable=True)
+    receivable = Column(Numeric(16, 2), nullable=True)
+    payable = Column(Numeric(16, 2), nullable=True)
+    # Any additional day's income outside the main Revenue figure (e.g. a
+    # one-off sale, refund, or side income) — folded into Cumulative Net
+    # Revenue for the MTD-vs-target evaluation, but tracked separately from
+    # Revenue so the two can still be reported on individually.
+    other_amount = Column(Numeric(16, 2), nullable=True)
+    # Free-text catch-all for anything not covered by the fields above —
+    # mirrors ActivityLog/HealthStatus/SocialLog's own other_notes column.
+    other_notes = Column(Text, nullable=True)
+    submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit", back_populates="financials")
+
+
+class ActivityLog(Base):
+    __tablename__ = "activity_logs"
+    __table_args__ = (
+        UniqueConstraint("business_unit_id", "report_date", name="uq_activity_bu_date"),
+        _pg_check(_PERCENT_RANGE, name="ck_activity_logs_percent_range"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    report_date = Column(Date, nullable=False, default=date.today, index=True)
+    meetings_attended = Column(Text, nullable=True)
+    site_visits = Column(Text, nullable=True)
+    key_decisions = Column(Text, nullable=True)
+    next_day_schedule = Column(Text, nullable=True)
+    document_url = Column(String(500), nullable=True)
+    gym_percent = Column(Integer, nullable=True)  # 0-100
+    swimming_percent = Column(Integer, nullable=True)  # 0-100
+    cycle_percent = Column(Integer, nullable=True)  # 0-100
+    # Free-text catch-all for anything not covered by the fields above.
+    other_notes = Column(Text, nullable=True)
+    submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit", back_populates="activity_logs")
+
+
+class HealthStatus(Base):
+    __tablename__ = "health_statuses"
+    __table_args__ = (
+        UniqueConstraint("business_unit_id", "report_date", name="uq_health_bu_date"),
+        _pg_check(_VITALS_RANGE, name="ck_health_statuses_vitals_range"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    report_date = Column(Date, nullable=False, default=date.today, index=True)
+    physical_health = Column(String(20), nullable=True)  # Healthy | Tired | Sick (legacy, no longer collected)
+    stress_level = Column(String(20), nullable=True)  # Low | Medium | High (legacy, no longer collected)
+    energy_mood = Column(String(20), nullable=True)  # Energetic | Normal | Drained (legacy, no longer collected)
+    sleep_quality = Column(String(20), nullable=True)  # Good | Average | Poor (legacy, no longer collected)
+    daily_steps = Column(Integer, nullable=True)  # <3000 red | 3000-6999 yellow | >=7000 green
+    heart_rate = Column(Integer, nullable=True)  # bpm
+    sleep_hours = Column(Numeric(4, 1), nullable=True)
+    bp_systolic = Column(Integer, nullable=True)
+    bp_diastolic = Column(Integer, nullable=True)
+    # Free-text catch-all for anything not covered by the fields above.
+    other_notes = Column(EncryptedText, nullable=True)  # health free text — encrypted at rest
+    submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit", back_populates="health_statuses")
+
+
+class SocialLog(Base):
+    __tablename__ = "social_logs"
+    __table_args__ = (
+        UniqueConstraint("business_unit_id", "report_date", name="uq_social_bu_date"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    report_date = Column(Date, nullable=False, default=date.today, index=True)
+    event_flag = Column(Boolean, default=False, nullable=False)
+    meeting_flag = Column(Boolean, default=False, nullable=False)
+    golf_flag = Column(Boolean, default=False, nullable=False)
+    # Free-text catch-all for anything not covered by the fields above.
+    other_notes = Column(Text, nullable=True)
+    submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit", back_populates="social_logs")
+
+
+class HeadOfficeActivityLog(Base):
+    """HO Staff's own daily Activity submission — mirrors ActivityLog but for
+    Head Office itself rather than a business unit, so it's kept on its own
+    table entirely separate from the 23 BUs' data (no business_unit_id at
+    all) instead of reusing ActivityLog with a special BU row, which would
+    otherwise leak into every "for bu in business_units" admin loop
+    (Comparison, Operations, Excel export). One row per calendar day."""
+
+    __tablename__ = "ho_activity_logs"
+    __table_args__ = (_pg_check(_PERCENT_RANGE, name="ck_ho_activity_logs_percent_range"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    report_date = Column(Date, nullable=False, unique=True, index=True, default=date.today)
+    meetings_attended = Column(Text, nullable=True)
+    site_visits = Column(Text, nullable=True)
+    key_decisions = Column(Text, nullable=True)
+    next_day_schedule = Column(Text, nullable=True)
+    document_url = Column(String(500), nullable=True)
+    gym_percent = Column(Integer, nullable=True)  # 0-100
+    swimming_percent = Column(Integer, nullable=True)  # 0-100
+    cycle_percent = Column(Integer, nullable=True)  # 0-100
+    other_notes = Column(Text, nullable=True)
+    submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class HeadOfficeDailyFinancial(Base):
+    """HO Staff's own daily Business Performance submission — mirrors
+    DailyFinancial's mandatory fields (Revenue/Cash Flow/Receivable/Payable/
+    Other Amount), kept on its own table for the same reason as
+    HeadOfficeActivityLog above. Deliberately excludes MonthlyTarget-style
+    cumulative-vs-target tracking — HO has no monthly target, just the plain
+    daily figures, unlike a business unit's CEO-set benchmark."""
+
+    __tablename__ = "ho_daily_financials"
+    __table_args__ = (
+        _pg_check(
+            _money_range("revenue", "cash_flow", "receivable", "payable", "other_amount"),
+            name="ck_ho_daily_financials_amount_range",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    report_date = Column(Date, nullable=False, unique=True, index=True, default=date.today)
+    revenue = Column(Numeric(16, 2), nullable=False, default=0)
+    # Never collected from the form — build_financial_rows() (shared with
+    # DailyFinancial) reads these unconditionally, so they exist here purely
+    # for that compatibility, always zero, same as DailyFinancial's own
+    # legacy columns.
+    expenses = Column(Numeric(16, 2), nullable=False, default=0)
+    net_profit = Column(Numeric(16, 2), nullable=False, default=0)
+    cash_in_hand = Column(Numeric(16, 2), nullable=False, default=0)
+    cash_flow = Column(Numeric(16, 2), nullable=True)
+    receivable = Column(Numeric(16, 2), nullable=True)
+    payable = Column(Numeric(16, 2), nullable=True)
+    other_amount = Column(Numeric(16, 2), nullable=True)
+    other_notes = Column(Text, nullable=True)
+    submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class HeadOfficeHealthStatus(Base):
+    """HO Staff's own daily Health submission — mirrors HealthStatus, kept on
+    its own table for the same reason as HeadOfficeActivityLog above."""
+
+    __tablename__ = "ho_health_statuses"
+    __table_args__ = (_pg_check(_VITALS_RANGE, name="ck_ho_health_statuses_vitals_range"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    report_date = Column(Date, nullable=False, unique=True, index=True, default=date.today)
+    physical_health = Column(String(20), nullable=True)  # legacy, no longer collected
+    stress_level = Column(String(20), nullable=True)  # legacy, no longer collected
+    energy_mood = Column(String(20), nullable=True)  # legacy, no longer collected
+    sleep_quality = Column(String(20), nullable=True)  # legacy, no longer collected
+    daily_steps = Column(Integer, nullable=True)
+    heart_rate = Column(Integer, nullable=True)
+    sleep_hours = Column(Numeric(4, 1), nullable=True)
+    bp_systolic = Column(Integer, nullable=True)
+    bp_diastolic = Column(Integer, nullable=True)
+    other_notes = Column(EncryptedText, nullable=True)  # health free text — encrypted at rest
+    submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class HeadOfficeSocialLog(Base):
+    """HO Staff's own daily Social submission — mirrors SocialLog, kept on its
+    own table for the same reason as HeadOfficeActivityLog above."""
+
+    __tablename__ = "ho_social_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    report_date = Column(Date, nullable=False, unique=True, index=True, default=date.today)
+    event_flag = Column(Boolean, default=False, nullable=False)
+    meeting_flag = Column(Boolean, default=False, nullable=False)
+    golf_flag = Column(Boolean, default=False, nullable=False)
+    other_notes = Column(Text, nullable=True)
+    submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class HeadOfficeMonthlyTarget(Base):
+    """HO Staff's own once-a-month target — mirrors MonthlyTarget, kept on its
+    own table for the same reason as HeadOfficeActivityLog above. Unique on
+    target_month alone (no business_unit_id) since there's only ever one
+    Head Office to set a target for."""
+
+    __tablename__ = "ho_monthly_targets"
+    __table_args__ = (
+        _pg_check(_TARGETS_RANGE, name="ck_ho_monthly_targets_targets_range"),
+        _pg_check("extract(day from target_month) = 1", name="ck_ho_monthly_targets_month_first"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    target_month = Column(Date, nullable=False, unique=True, index=True)  # always the 1st of the target month
+    monthly_revenue_target = Column(Numeric(16, 2), nullable=False)
+    monthly_cash_flow_target = Column(Numeric(16, 2), nullable=False)
+    monthly_max_receivable = Column(Numeric(16, 2), nullable=False)
+    monthly_max_payable = Column(Numeric(16, 2), nullable=False)
+    set_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class MonthlyTarget(Base):
+    __tablename__ = "monthly_targets"
+    __table_args__ = (
+        UniqueConstraint("business_unit_id", "target_month", name="uq_target_bu_month"),
+        _pg_check(_TARGETS_RANGE, name="ck_monthly_targets_targets_range"),
+        _pg_check("extract(day from target_month) = 1", name="ck_monthly_targets_month_first"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    target_month = Column(Date, nullable=False, index=True)  # always the 1st of the target month
+    monthly_revenue_target = Column(Numeric(16, 2), nullable=False)
+    monthly_cash_flow_target = Column(Numeric(16, 2), nullable=False)
+    monthly_max_receivable = Column(Numeric(16, 2), nullable=False)
+    monthly_max_payable = Column(Numeric(16, 2), nullable=False)
+    set_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+
+
+class FinancialNote(Base):
+    """Free-text log entries a CEO can add throughout the month (e.g. "big
+    client paid early", "power outage cut two days of trading") — shown as a
+    running "Record Notes" list on the CEO's own dashboard and every admin
+    view of that business unit, giving qualitative context alongside the
+    Cumulative Net Revenue figures. Multiple notes per day are allowed since
+    this is an append-only log, not a single per-day field like the other
+    daily report tables."""
+
+    __tablename__ = "financial_notes"
+    __table_args__ = (
+        Index("ix_financial_notes_bu_date", "business_unit_id", "note_date"),
+        _pg_check("length(btrim(note_text)) > 0", name="ck_financial_notes_text"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    note_date = Column(Date, nullable=False, default=date.today, index=True)
+    note_text = Column(Text, nullable=False)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+
+
+class CeoProfile(Base):
+    __tablename__ = "ceo_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False, index=True)
+    # full_name lives on User (already existed pre-profile-setup) — this
+    # table only holds the fields specific to the mandatory profile.
+    executive_title = Column(String(120), nullable=False, default="Chief Executive Officer")
+    phone_number = Column(EncryptedText, nullable=False)
+    # Optional — added after the original mandatory fields, so it doesn't
+    # block profile completion for CEOs who already finished setup before
+    # this existed (same reasoning as business_details below).
+    email = Column(EncryptedText, nullable=True)
+    date_of_birth = Column(EncryptedDate, nullable=False)
+    address = Column(EncryptedText, nullable=False)
+    profile_pic_url = Column(String(500), nullable=True)
+    # Optional free-text "About the Business" — added after the original
+    # mandatory fields, so it doesn't block profile completion for CEOs who
+    # already finished setup before this existed.
+    business_details = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    user = relationship("User")
+
+
+class PasswordResetRequest(Base):
+    __tablename__ = "password_reset_requests"
+    __table_args__ = (
+        # A user has at most one open request (enforced here, not just in code,
+        # so two simultaneous "forgot password" calls can't both insert one).
+        Index(
+            "uq_pwreset_one_pending_per_user",
+            "user_id",
+            unique=True,
+            postgresql_where=text("status = 'Pending'"),
+            sqlite_where=text("status = 'Pending'"),
+        ),
+        _pg_check("status IN ('Pending', 'Approved', 'Rejected')", name="ck_pwreset_status"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    username = Column(String(80), nullable=False)
+    status = Column(String(20), default="Pending", nullable=False)  # Pending | Approved | Rejected
+    requested_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    resolved_at = Column(DateTime, nullable=True)
+    resolved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+    __table_args__ = (
+        # The sign-in / password-reset throttles count recent rows by
+        # (action, username) and (action, ip); the Security Log and
+        # per-user history read by (user, action, time).
+        Index("ix_audit_action_username_ts", "action", "username", "timestamp"),
+        Index("ix_audit_action_ip_ts", "action", "ip_address", "timestamp"),
+        Index("ix_audit_user_action_ts", "user_id", "action", "timestamp"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    username = Column(String(80), nullable=True)
+    action = Column(String(120), nullable=False)
+    details = Column(Text, nullable=True)
+    ip_address = Column(String(64), nullable=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)

@@ -1,0 +1,33 @@
+# Build context hygiene — none of this belongs in the image, and several of
+# these (env files, local databases, uploads) can hold secrets or real data.
+.git
+.gitignore
+.vscode/
+.claude/
+.do/
+
+# Python: local venv + bytecode + dev databases + local upload fallback dir
+.venv/
+**/__pycache__/
+**/*.pyc
+*.db
+*.db-journal
+/uploads/
+*.log
+tests/
+
+# Secrets — the image gets its config from the platform's env vars, never a file
+.env
+.env.*
+!.env.example
+
+# Frontend: node_modules must be installed fresh *inside* the Linux build
+# stage (the host's is Windows-built — `COPY frontend/ ./` would otherwise
+# overwrite the container's correct one with it), and dist/ is rebuilt there.
+frontend/node_modules/
+frontend/dist/
+
+# Deploy files themselves
+Dockerfile
+docker-compose.yml
+.dockerignore

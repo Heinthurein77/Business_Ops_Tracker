@@ -1,0 +1,183 @@
+# DigitalOcean App Platform spec.
+# Deploy/update with: doctl apps create --spec .do/app.yaml
+#                  or: doctl apps update <APP_ID> --spec .do/app.yaml
+#
+# Before deploying:
+#   1. Replace github.repo / github.branch below (web service AND migrate job).
+#   2. Set the SECRET-type values (JWT_SECRET_KEY, DATA_ENCRYPTION_KEY, R2_*) via
+#      `doctl apps update` or the DO dashboard — the values below are placeholders
+#      and are not stored in git. The app refuses to start with the placeholders.
+#      Generate them:
+#        JWT_SECRET_KEY      python -c "import secrets; print(secrets.token_urlsafe(48))"
+#        DATA_ENCRYPTION_KEY python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+#      DATA_ENCRYPTION_KEY encrypts personal data inside the database. KEEP A COPY
+#      OUTSIDE DIGITALOCEAN (password manager): if every copy is lost, those
+#      fields (CEO phone/email/address/date of birth, health notes) are
+#      unrecoverable.
+#   3. Optional but recommended: run deploy/db_roles.sql once, then point the web
+#      service's DATABASE_URL at the bot_app role and the migrate job's
+#      MIGRATION_DATABASE_URL at bot_migrator (see the comments below).
+#   4. Database > Settings > Trusted Sources: allow only this app, so the
+#      database is not reachable from the internet at all.
+#
+# FIRST LOGIN: with ENVIRONMENT=production the app seeds exactly one account,
+# "chairman", on first boot, with a random password printed ONCE to the web
+# service's runtime logs (look for the line starting "First boot: seeded the
+# 'chairman' account" — DO dashboard > Runtime Logs). It is never shown again;
+# you'll be forced to set your own password at first sign-in. To choose the
+# password yourself instead, set a BOOTSTRAP_CHAIRMAN_PASSWORD secret (never
+# logged). Create every other account afterwards from User Management.
+name: business-ops-tracker
+region: sgp1
+
+# Shared by every component. src/config.py validates these at import, so the
+# migrate job needs them as much as the web service does.
+envs:
+  - key: ENVIRONMENT
+    value: "production"
+    scope: RUN_TIME
+  - key: APP_TIMEZONE
+    value: "Asia/Yangon"
+    scope: RUN_TIME
+  - key: APP_NAME
+    value: "Business Operations & CEO Tracking System"
+    scope: RUN_TIME
+  - key: TOTAL_BUSINESS_UNITS
+    value: "23"
+    scope: RUN_TIME
+  - key: JWT_SECRET_KEY
+    value: "replace-with-a-long-random-secret"
+    scope: RUN_TIME
+    type: SECRET
+  - key: JWT_EXPIRE_MINUTES
+    value: "480"
+    scope: RUN_TIME
+  - key: DATA_ENCRYPTION_KEY
+    value: "replace-with-a-fernet-key"
+    scope: RUN_TIME
+    type: SECRET
+  # Database TLS. verify-ca checks the server's certificate against DO's CA (a
+  # plain `require` only encrypts, it doesn't prove who you're talking to). Once
+  # a deploy is healthy you can tighten this to verify-full (also checks the
+  # hostname).
+  - key: DATABASE_SSLMODE
+    value: "verify-ca"
+    scope: RUN_TIME
+  - key: DATABASE_CA_CERT
+    value: ${db.CA_CERT}
+    scope: RUN_TIME
+
+services:
+  - name: web
+    dockerfile_path: Dockerfile
+    source_dir: /
+    github:
+      repo: your-github-username/business_ops_tracker
+      branch: main
+      deploy_on_push: true
+    http_port: 8000
+    instance_size_slug: apps-s-1vcpu-1gb
+    # Sign-in and password-reset throttling is stored in the database, so it is
+    # shared across instances and survives restarts; only the report-submit
+    # limiter (a convenience guard, not a security control) is per-process. 1
+    # instance is plenty for ~25 users, and the pool sizes in src/database.py
+    # assume a small managed database.
+    instance_count: 1
+    health_check:
+      http_path: /healthz
+      initial_delay_seconds: 20
+      period_seconds: 10
+      timeout_seconds: 5
+      failure_threshold: 3
+    envs:
+      # Runtime connection. Initially the database's own (owner) URL; after
+      # running deploy/db_roles.sql switch this to the bot_app role's URL (a
+      # SECRET), which cannot alter the schema or touch the audit trail.
+      - key: DATABASE_URL
+        value: ${db.DATABASE_URL}
+        scope: RUN_TIME
+      # Migrations are applied by the migrate job below, before this service
+      # starts, so the web process never needs schema-owner credentials.
+      - key: RUN_MIGRATIONS_ON_STARTUP
+        value: "false"
+        scope: RUN_TIME
+      # Where the real client IP comes from. Without a trusted source every
+      # visitor looks like the platform proxy, and the per-IP sign-in throttle
+      # and the Security Log's IP column would be useless. After the first
+      # sign-in, check the Security Log: it should show YOUR public IP. If it
+      # shows a private 10.x/172.x address, this header isn't being sent —
+      # remove it and set TRUSTED_PROXY_HOPS instead (X-Forwarded-For).
+      - key: CLIENT_IP_HEADER
+        value: "do-connecting-ip"
+        scope: RUN_TIME
+      # CSRF/Host hardening. The app already rejects cross-site state-changing
+      # requests by comparing Origin with Host. If you serve it under several
+      # hostnames, or want to pin them, also set:
+      #   ALLOWED_HOSTS    your-domain.com,your-app.ondigitalocean.app
+      #   ALLOWED_ORIGINS  https://your-domain.com
+      # Content-Security-Policy: `enforce` (default), `report-only` to trial it
+      # while watching the browser console, or `off`.
+      - key: CSP_MODE
+        value: "enforce"
+        scope: RUN_TIME
+      # R2_ACCOUNT_ID/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY/R2_ENDPOINT_URL
+      # are all placeholders — set the real values via `doctl apps update` or
+      # the DO dashboard before deploy (same as JWT_SECRET_KEY above), not by
+      # editing them in here. Uploads stay disabled (fail loud, not silently)
+      # until they're set — see is_configured() in src/r2_storage.py.
+      - key: R2_ACCOUNT_ID
+        value: "replace-with-your-r2-account-id"
+        scope: RUN_TIME
+        type: SECRET
+      - key: R2_ACCESS_KEY_ID
+        value: ""
+        scope: RUN_TIME
+        type: SECRET
+      - key: R2_SECRET_ACCESS_KEY
+        value: ""
+        scope: RUN_TIME
+        type: SECRET
+      - key: R2_BUCKET_NAME
+        value: "business-ops-tracker"
+        scope: RUN_TIME
+      - key: R2_ENDPOINT_URL
+        value: ""
+        scope: RUN_TIME
+      - key: R2_PUBLIC_BASE_URL
+        value: ""
+        scope: RUN_TIME
+
+jobs:
+  # Applies schema migrations before each deploy goes live. A failed migration
+  # fails the deploy and leaves the previous version running, instead of the new
+  # web process crashing (or two of them racing) at startup.
+  - name: migrate
+    kind: PRE_DEPLOY
+    dockerfile_path: Dockerfile
+    source_dir: /
+    github:
+      repo: your-github-username/business_ops_tracker
+      branch: main
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    run_command: alembic upgrade head
+    envs:
+      - key: DATABASE_URL
+        value: ${db.DATABASE_URL}
+        scope: RUN_TIME
+      # After running deploy/db_roles.sql, set this (SECRET) to the bot_migrator
+      # role's URL. Unset, migrations use DATABASE_URL above.
+      # - key: MIGRATION_DATABASE_URL
+      #   value: "replace-with-the-bot_migrator-url"
+      #   scope: RUN_TIME
+      #   type: SECRET
+
+databases:
+  - name: db
+    engine: PG
+    version: "16"
+    # `false` provisions DigitalOcean's dev-tier database: fine to get
+    # started, but it's a single shared node with no standby or point-in-time
+    # recovery, and DO doesn't recommend it for production data. Flip to
+    # `true` (a managed cluster — extra cost) before real business data goes in.
+    production: false
+    cluster_name: business-ops-tracker-db

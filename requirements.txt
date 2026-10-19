@@ -1,0 +1,33 @@
+# Every runtime dependency is pinned; CI (.github/workflows/security.yml) runs
+# pip-audit against this file weekly, and Dependabot proposes bumps.
+#
+# fastapi/starlette: fastapi 0.115.x caps starlette below 0.42, which is exposed
+# to a Range-header CPU DoS (CVE-2025-62727, reachable by anyone via the SPA/asset
+# routes) and a multipart-upload DoS (CVE-2025-54121). starlette is pinned
+# explicitly because fastapi leaves it unbounded.
+fastapi==0.141.1
+starlette==1.7.0
+uvicorn[standard]==0.34.0
+SQLAlchemy==2.0.36
+alembic==1.14.0
+psycopg2-binary==2.9.10
+# python-multipart: 0.0.20 has several pre-authentication parsing DoS advisories
+# (FastAPI parses the body before it checks the session).
+python-multipart==0.0.32
+# bcrypt pinned below 4.1: passlib 1.7.4 (last release, project is
+# unmaintained) reads bcrypt.__about__.__version__ to detect the backend
+# version, a submodule bcrypt>=4.1 removed — that raised a caught-but-logged
+# AttributeError on every single hash/verify call. 4.0.1 is the newest
+# release that still has __about__; hash format/compatibility is unaffected
+# either way, only this version-string lookup.
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+# PyJWT replaces python-jose (unmaintained, with open advisories) — HS256 only,
+# see src/auth.py. `cryptography` is pinned because src/crypto.py uses it directly
+# (Fernet) and it used to arrive only as a transitive dependency of python-jose.
+PyJWT==2.15.0
+cryptography==50.0.1
+boto3==1.35.90
+openpyxl==3.1.5
+python-dotenv==1.2.3
+tzdata==2025.2

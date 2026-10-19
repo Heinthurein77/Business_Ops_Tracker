@@ -1,0 +1,41 @@
+name: security
+
+# Fails the build on known-vulnerable dependencies and on a Dockerfile that no
+# longer builds cleanly. Runs on every push/PR and weekly, because new
+# advisories appear against dependencies that haven't changed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Python dependencies (known vulnerabilities)
+        run: pip install pip-audit && pip-audit -r requirements.txt --strict
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Frontend runtime dependencies (known vulnerabilities)
+        working-directory: frontend
+        # --omit=dev: vite/esbuild/postcss advisories concern the dev server and
+        # build tooling, none of which ships to production.
+        run: npm ci --ignore-scripts && npm audit --omit=dev --audit-level=high
+
+      - name: Dockerfile lint + build
+        run: docker build --check . && docker build -t business-ops-tracker:ci .
