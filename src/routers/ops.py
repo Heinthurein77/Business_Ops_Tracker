@@ -11,6 +11,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.auth import get_current_user, require_roles
@@ -1328,16 +1329,20 @@ def delete_sales_customer(customer_id: int, user: User = Depends(get_current_use
     return {"ok": True}
 
 
-def invoice_amounts(inv: SalesInvoice) -> dict:
+def invoice_amounts(db: Session, inv: SalesInvoice) -> dict:
     subtotal = sum((Decimal(str(l.quantity)) * Decimal(str(l.unit_price)) for l in inv.lines), Decimal("0"))
     tax = (subtotal * Decimal(str(inv.tax_rate or 0)) / Decimal("100")).quantize(Decimal("0.01"))
     total = subtotal + tax
-    paid = sum((Decimal(str(p.amount)) for p in inv.payments), Decimal("0"))
+    # Query payments directly: the inv.payments relationship collection can
+    # be stale within a session right after adding a payment row.
+    paid = db.query(func.coalesce(func.sum(InvoicePayment.amount), 0)).filter(
+        InvoicePayment.invoice_id == inv.id).scalar()
+    paid = Decimal(str(paid or 0))
     return {"subtotal": subtotal, "tax": tax, "total": total, "paid": paid, "balance": total - paid}
 
 
 def serialize_invoice(db: Session, inv: SalesInvoice) -> dict:
-    a = invoice_amounts(inv)
+    a = invoice_amounts(db, inv)
     overdue = (inv.status in ("sent", "partial") and inv.due_date is not None
                and inv.due_date < date.today() and a["balance"] > 0)
     return {
@@ -1427,7 +1432,7 @@ def _post_invoice_journal(db: Session, inv: SalesInvoice, user_id: int, kind: st
         from src.routers.accounting import account_by_code, create_entry
         bu = inv.business_unit_id
         if kind == "send":
-            a = invoice_amounts(inv)
+            a = invoice_amounts(db, inv)
             ar = account_by_code(db, bu, "1130")
             sales = account_by_code(db, bu, "4100")
             tax_acc = account_by_code(db, bu, "2130")
@@ -1482,13 +1487,13 @@ def record_payment(invoice_id: int, payload: PaymentIn, user: User = Depends(get
     if inv.status not in ("sent", "partial"):
         raise HTTPException(400, f"Cannot take payment on a {inv.status} invoice")
     amt = Decimal(str(payload.amount))
-    a = invoice_amounts(inv)
+    a = invoice_amounts(db, inv)
     if amt > a["balance"]:
         raise HTTPException(400, f"Payment {amt} exceeds balance {a['balance']}")
     db.add(InvoicePayment(invoice_id=inv.id, amount=amt, payment_date=payload.payment_date,
                           method=payload.method, notes=payload.notes, received_by_id=user.id))
     db.flush()
-    a2 = invoice_amounts(inv)
+    a2 = invoice_amounts(db, inv)
     inv.status = "paid" if a2["balance"] <= 0 else "partial"
     db.commit()
     _post_invoice_journal(db, inv, user.id, "payment", amt)
@@ -1532,7 +1537,7 @@ def aging_report(business_unit_id: Optional[int] = None, user: User = Depends(ge
     if business_unit_id:
         q = q.filter(SalesInvoice.business_unit_id == business_unit_id)
     for inv in q.all():
-        a = invoice_amounts(inv)
+        a = invoice_amounts(db, inv)
         if a["balance"] <= 0:
             continue
         days = (today_d - inv.due_date).days if inv.due_date else 0
