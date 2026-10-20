@@ -842,3 +842,229 @@ async def opening_balance(business_unit_id: int, as_of: date,
     db.commit()
     db.refresh(e)
     return serialize_entry(db, e)
+
+
+# ------------------------------------------------------- Phase 6: fixed assets & banking
+
+from src.models import BankAccount, BankTransaction, FixedAsset
+
+
+def serialize_asset(a: FixedAsset) -> dict:
+    book = Decimal(str(a.cost or 0)) - Decimal(str(a.accumulated_depreciation or 0))
+    monthly = ZERO
+    if a.useful_life_months:
+        monthly = (Decimal(str(a.cost or 0)) - Decimal(str(a.salvage_value or 0))) / Decimal(a.useful_life_months)
+    return {
+        "id": a.id, "business_unit_id": a.business_unit_id, "name": a.name,
+        "category": a.category,
+        "purchase_date": a.purchase_date.isoformat() if a.purchase_date else None,
+        "cost": fmt(a.cost), "salvage_value": fmt(a.salvage_value),
+        "useful_life_months": a.useful_life_months,
+        "accumulated_depreciation": fmt(a.accumulated_depreciation),
+        "book_value": fmt(book), "monthly_depreciation": fmt(monthly),
+        "last_depreciated_period": a.last_depreciated_period, "status": a.status,
+    }
+
+
+class FixedAssetIn(BaseModel):
+    business_unit_id: int
+    name: str = Field(min_length=1, max_length=150)
+    category: Optional[str] = None
+    purchase_date: date
+    cost: float = Field(gt=0)
+    salvage_value: float = 0
+    useful_life_months: int = Field(gt=0)
+
+
+@router.get("/fixed-assets")
+def list_fixed_assets(business_unit_id: int, user: User = Depends(require_accounting),
+                      db: Session = Depends(get_db)):
+    rows = db.query(FixedAsset).filter(
+        FixedAsset.business_unit_id == business_unit_id).order_by(FixedAsset.purchase_date).all()
+    return {"items": [serialize_asset(a) for a in rows]}
+
+
+@router.post("/fixed-assets")
+def create_fixed_asset(payload: FixedAssetIn, user: User = Depends(require_accounting),
+                       db: Session = Depends(get_db)):
+    bu_or_404(db, payload.business_unit_id)
+    a = FixedAsset(**payload.model_dump(), created_by_id=user.id)
+    db.add(a)
+    db.commit()
+    db.refresh(a)
+    return serialize_asset(a)
+
+
+@router.post("/fixed-assets/{asset_id}/dispose")
+def dispose_fixed_asset(asset_id: int, user: User = Depends(require_accounting),
+                        db: Session = Depends(get_db)):
+    a = db.query(FixedAsset).filter(FixedAsset.id == asset_id).first()
+    if not a:
+        raise HTTPException(404, "Asset not found")
+    a.status = "disposed"
+    db.commit()
+    return serialize_asset(a)
+
+
+class DepreciateIn(BaseModel):
+    business_unit_id: int
+    period: str = Field(pattern=r"^\d{4}-\d{2}$")
+
+
+@router.post("/fixed-assets/depreciate")
+def run_depreciation(payload: DepreciateIn, user: User = Depends(require_accounting),
+                     db: Session = Depends(get_db)):
+    """One month of straight-line depreciation for every active asset that
+    has not been depreciated for this period yet. Idempotent per period."""
+    assets = db.query(FixedAsset).filter(
+        FixedAsset.business_unit_id == payload.business_unit_id,
+        FixedAsset.status == "active").all()
+    total = ZERO
+    count = 0
+    for a in assets:
+        if a.last_depreciated_period == payload.period:
+            continue
+        depreciable = Decimal(str(a.cost or 0)) - Decimal(str(a.salvage_value or 0))
+        remaining = depreciable - Decimal(str(a.accumulated_depreciation or 0))
+        if remaining <= 0:
+            continue
+        monthly = depreciable / Decimal(a.useful_life_months)
+        dep = min(monthly, remaining).quantize(Decimal("0.01"))
+        a.accumulated_depreciation = Decimal(str(a.accumulated_depreciation or 0)) + dep
+        a.last_depreciated_period = payload.period
+        total += dep
+        count += 1
+    db.commit()
+    journal_posted = False
+    if total > 0:
+        try:
+            dep_acc = account_by_code(db, payload.business_unit_id, "6900")
+            acc_acc = account_by_code(db, payload.business_unit_id, "1290")
+            if dep_acc and acc_acc:
+                y, m = payload.period.split("-")
+                create_entry(db, payload.business_unit_id, date(int(y), int(m), 1),
+                             f"Depreciation {payload.period}", "depreciation", user.id,
+                             [{"account_id": dep_acc.id, "debit": total, "credit": 0},
+                              {"account_id": acc_acc.id, "debit": 0, "credit": total}],
+                             post=True)
+                db.commit()
+                journal_posted = True
+        except Exception:
+            db.rollback()
+    return {"ok": True, "assets_depreciated": count, "total": fmt(total),
+            "journal_posted": journal_posted}
+
+
+def serialize_bank_account(db: Session, b: BankAccount) -> dict:
+    stmt_balance = sum(((Decimal(str(t.deposit or 0)) - Decimal(str(t.withdrawal or 0)))
+                        for t in b.transactions), ZERO)
+    return {
+        "id": b.id, "business_unit_id": b.business_unit_id, "bank_name": b.bank_name,
+        "account_name": b.account_name, "account_number": b.account_number,
+        "account_id": b.account_id,
+        "account_code": b.account.code if b.account else None,
+        "statement_balance": fmt(stmt_balance),
+        "unreconciled_count": sum(1 for t in b.transactions if not t.is_reconciled),
+    }
+
+
+class BankAccountIn(BaseModel):
+    business_unit_id: int
+    bank_name: str = Field(min_length=1, max_length=120)
+    account_name: Optional[str] = None
+    account_number: Optional[str] = None
+    account_id: Optional[int] = None
+
+
+@router.get("/bank-accounts")
+def list_bank_accounts(business_unit_id: int, user: User = Depends(require_accounting),
+                       db: Session = Depends(get_db)):
+    rows = db.query(BankAccount).filter(
+        BankAccount.business_unit_id == business_unit_id,
+        BankAccount.is_active == True).all()  # noqa: E712
+    return {"items": [serialize_bank_account(db, b) for b in rows]}
+
+
+@router.post("/bank-accounts")
+def create_bank_account(payload: BankAccountIn, user: User = Depends(require_accounting),
+                        db: Session = Depends(get_db)):
+    bu_or_404(db, payload.business_unit_id)
+    b = BankAccount(**payload.model_dump(), created_by_id=user.id)
+    db.add(b)
+    db.commit()
+    db.refresh(b)
+    return serialize_bank_account(db, b)
+
+
+class BankTxnIn(BaseModel):
+    txn_date: date
+    description: Optional[str] = None
+    deposit: float = 0
+    withdrawal: float = 0
+
+
+@router.get("/bank-accounts/{bank_id}/transactions")
+def list_bank_txns(bank_id: int, user: User = Depends(require_accounting),
+                   db: Session = Depends(get_db)):
+    b = db.query(BankAccount).filter(BankAccount.id == bank_id).first()
+    if not b:
+        raise HTTPException(404, "Bank account not found")
+    rows = sorted(b.transactions, key=lambda t: (t.txn_date, t.id))
+    return {"items": [{"id": t.id, "txn_date": t.txn_date.isoformat(),
+                       "description": t.description, "deposit": fmt(t.deposit),
+                       "withdrawal": fmt(t.withdrawal),
+                       "is_reconciled": t.is_reconciled} for t in rows]}
+
+
+@router.post("/bank-accounts/{bank_id}/transactions")
+def add_bank_txn(bank_id: int, payload: BankTxnIn, user: User = Depends(require_accounting),
+                 db: Session = Depends(get_db)):
+    b = db.query(BankAccount).filter(BankAccount.id == bank_id).first()
+    if not b:
+        raise HTTPException(404, "Bank account not found")
+    t = BankTransaction(bank_account_id=bank_id, txn_date=payload.txn_date,
+                        description=payload.description,
+                        deposit=Decimal(str(payload.deposit)),
+                        withdrawal=Decimal(str(payload.withdrawal)),
+                        created_by_id=user.id)
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+    return {"id": t.id, "ok": True}
+
+
+class ReconcileIn(BaseModel):
+    is_reconciled: bool
+
+
+@router.patch("/bank-transactions/{txn_id}")
+def set_reconciled(txn_id: int, payload: ReconcileIn, user: User = Depends(require_accounting),
+                   db: Session = Depends(get_db)):
+    t = db.query(BankTransaction).filter(BankTransaction.id == txn_id).first()
+    if not t:
+        raise HTTPException(404, "Transaction not found")
+    t.is_reconciled = payload.is_reconciled
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/bank-accounts/{bank_id}/reconciliation")
+def bank_reconciliation(bank_id: int, user: User = Depends(require_accounting),
+                        db: Session = Depends(get_db)):
+    """Statement balance vs the linked ledger account balance."""
+    b = db.query(BankAccount).filter(BankAccount.id == bank_id).first()
+    if not b:
+        raise HTTPException(404, "Bank account not found")
+    info = serialize_bank_account(db, b)
+    ledger_balance = None
+    if b.account_id:
+        total = ZERO
+        for line, acc, _e in _posted_lines(db, b.business_unit_id):
+            if acc.id == b.account_id:
+                total += (line.debit or ZERO) - (line.credit or ZERO)
+        ledger_balance = fmt(total)
+    return {
+        **info, "ledger_balance": ledger_balance,
+        "difference": (fmt(Decimal(str(ledger_balance)) - Decimal(str(info["statement_balance"])))
+                       if ledger_balance is not None else None),
+    }

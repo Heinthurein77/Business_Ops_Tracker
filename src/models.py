@@ -932,3 +932,64 @@ class PayrollLine(Base):
 
     run = relationship("PayrollRun", back_populates="lines")
     employee = relationship("Employee")
+
+
+# ------------------------------------------------------------------ fixed assets & banking (ERP Phase 6)
+
+class FixedAsset(Base):
+    """Asset register. Straight-line depreciation:
+    monthly = (cost - salvage) / useful_life_months, posted by run to
+    Dr 6900 Depreciation Expense / Cr 1290 Accumulated Depreciation."""
+    __tablename__ = "fixed_assets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    name = Column(String(150), nullable=False)
+    category = Column(String(80), nullable=True)
+    purchase_date = Column(Date, nullable=False)
+    cost = Column(Numeric(16, 2), nullable=False)
+    salvage_value = Column(Numeric(16, 2), default=0, nullable=False)
+    useful_life_months = Column(Integer, nullable=False)
+    accumulated_depreciation = Column(Numeric(16, 2), default=0, nullable=False)
+    last_depreciated_period = Column(String(7), nullable=True)  # YYYY-MM
+    status = Column(String(20), default="active", nullable=False)  # active/disposed
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+
+
+class BankAccount(Base):
+    """A real bank account, linked to the CoA account it reconciles against."""
+    __tablename__ = "bank_accounts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    bank_name = Column(String(120), nullable=False)
+    account_name = Column(String(150), nullable=True)
+    account_number = Column(String(60), nullable=True)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+    account = relationship("Account")
+    transactions = relationship("BankTransaction", back_populates="bank_account", cascade="all, delete-orphan")
+
+
+class BankTransaction(Base):
+    """One line of a bank statement, entered/imported for reconciliation."""
+    __tablename__ = "bank_transactions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=False, index=True)
+    txn_date = Column(Date, nullable=False)
+    description = Column(String(300), nullable=True)
+    deposit = Column(Numeric(16, 2), default=0, nullable=False)
+    withdrawal = Column(Numeric(16, 2), default=0, nullable=False)
+    is_reconciled = Column(Boolean, default=False, nullable=False)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    bank_account = relationship("BankAccount", back_populates="transactions")

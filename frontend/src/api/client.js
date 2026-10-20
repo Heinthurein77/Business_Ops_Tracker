@@ -257,6 +257,19 @@ export const api = {
   accConsolidatedPL: (period) => getJson(`/api/accounting/reports/consolidated-pl${period ? `?period=${period}` : ''}`),
   accConsolidatedBS: (period) => getJson(`/api/accounting/reports/consolidated-bs${period ? `?period=${period}` : ''}`),
   accBuComparison: (period) => getJson(`/api/accounting/reports/bu-comparison${period ? `?period=${period}` : ''}`),
+  // ---- Fixed assets & banking (ERP Phase 6) ----
+  accFixedAssets: (buId) => getJson(`/api/accounting/fixed-assets?business_unit_id=${buId}`),
+  accCreateAsset: (payload) => postJson('/api/accounting/fixed-assets', payload),
+  accDisposeAsset: (id) => postJson(`/api/accounting/fixed-assets/${id}/dispose`),
+  accDepreciate: (payload) => postJson('/api/accounting/fixed-assets/depreciate', payload),
+  accBankAccounts: (buId) => getJson(`/api/accounting/bank-accounts?business_unit_id=${buId}`),
+  accCreateBankAccount: (payload) => postJson('/api/accounting/bank-accounts', payload),
+  accBankTxns: (bankId) => getJson(`/api/accounting/bank-accounts/${bankId}/transactions`),
+  accAddBankTxn: (bankId, payload) => postJson(`/api/accounting/bank-accounts/${bankId}/transactions`, payload),
+  accSetReconciled: (txnId, isReconciled) => fetch(`/api/accounting/bank-transactions/${txnId}`, {
+    method: 'PATCH', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify({ is_reconciled: isReconciled }),
+  }).then(handle),
+  accReconciliation: (bankId) => getJson(`/api/accounting/bank-accounts/${bankId}/reconciliation`),
 };
 
 export { ApiError };

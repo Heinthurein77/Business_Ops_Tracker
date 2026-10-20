@@ -10,6 +10,8 @@ const TABS = [
   { key: 'journal', label: 'Journal' },
   { key: 'coa', label: 'Chart of Accounts' },
   { key: 'ledger', label: 'Ledger' },
+  { key: 'assets', label: 'Fixed Assets' },
+  { key: 'bank', label: 'Bank' },
   { key: 'periods', label: 'Periods' },
 ];
 
@@ -62,6 +64,14 @@ export default function AccountingPage() {
   const [gpl, setGpl] = useState(null);
   const [gbs, setGbs] = useState(null);
   const [gcomp, setGcomp] = useState([]);
+  const [assets, setAssets] = useState([]);
+  const [assetForm, setAssetForm] = useState({ name: '', category: '', purchase_date: today(), cost: '', salvage_value: 0, useful_life_months: 60 });
+  const [bankAccounts, setBankAccounts] = useState([]);
+  const [bankForm, setBankForm] = useState({ bank_name: '', account_number: '', account_id: '' });
+  const [selectedBank, setSelectedBank] = useState('');
+  const [bankTxns, setBankTxns] = useState([]);
+  const [recon, setRecon] = useState(null);
+  const [txnForm, setTxnForm] = useState({ txn_date: today(), description: '', deposit: '', withdrawal: '' });
 
   useEffect(() => {
     api.adminOverview().then((d) => {
@@ -96,9 +106,18 @@ export default function AccountingPage() {
       }
       if (tab === 'journal') setJournal((await api.accJournal(bu, {})).items);
       if (tab === 'periods') setPeriods((await api.accPeriods(bu)).items);
+      if (tab === 'assets') setAssets((await api.accFixedAssets(bu)).items);
+      if (tab === 'bank') {
+        const list = (await api.accBankAccounts(bu)).items;
+        setBankAccounts(list);
+        if (selectedBank) {
+          setBankTxns((await api.accBankTxns(Number(selectedBank))).items);
+          setRecon(await api.accReconciliation(Number(selectedBank)));
+        }
+      }
       if (tab === 'ledger' && ledgerAcc) setLedger(await api.accLedger(Number(ledgerAcc), period));
     } catch (e) { setError(e.message); }
-  }, [tab, buId, period, ledgerAcc]);
+  }, [tab, buId, period, ledgerAcc, selectedBank]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -143,6 +162,44 @@ export default function AccountingPage() {
   async function postEntry(id) { try { await api.accPostJournal(id); load(); } catch (e) { setError(e.message); } }
   async function reverseEntry(id) { try { await api.accReverseJournal(id); flash('Entry reversed.'); load(); } catch (e) { setError(e.message); } }
   async function deleteEntry(id) { try { await api.accDeleteJournal(id); load(); } catch (e) { setError(e.message); } }
+
+  async function addAsset(e) {
+    e.preventDefault();
+    if (!assetForm.name.trim() || !assetForm.cost) return;
+    try {
+      await api.accCreateAsset({ business_unit_id: Number(buId), name: assetForm.name.trim(), category: assetForm.category || undefined, purchase_date: assetForm.purchase_date, cost: Number(assetForm.cost), salvage_value: Number(assetForm.salvage_value) || 0, useful_life_months: Number(assetForm.useful_life_months) || 60 });
+      setAssetForm({ name: '', category: '', purchase_date: today(), cost: '', salvage_value: 0, useful_life_months: 60 });
+      load();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function runDepreciation() {
+    try {
+      const d = await api.accDepreciate({ business_unit_id: Number(buId), period });
+      flash(`Depreciation ${period}: ${d.assets_depreciated} asset(s), ${money(d.total)}${d.journal_posted ? ' — journal posted' : ''}.`);
+      load();
+    } catch (e) { setError(e.message); }
+  }
+
+  async function addBankAccount(e) {
+    e.preventDefault();
+    if (!bankForm.bank_name.trim()) return;
+    try {
+      await api.accCreateBankAccount({ business_unit_id: Number(buId), bank_name: bankForm.bank_name.trim(), account_number: bankForm.account_number || undefined, account_id: bankForm.account_id ? Number(bankForm.account_id) : undefined });
+      setBankForm({ bank_name: '', account_number: '', account_id: '' });
+      load();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function addTxn(e) {
+    e.preventDefault();
+    if (!selectedBank) return;
+    try {
+      await api.accAddBankTxn(Number(selectedBank), { txn_date: txnForm.txn_date, description: txnForm.description || undefined, deposit: Number(txnForm.deposit) || 0, withdrawal: Number(txnForm.withdrawal) || 0 });
+      setTxnForm({ txn_date: today(), description: '', deposit: '', withdrawal: '' });
+      load();
+    } catch (err) { setError(err.message); }
+  }
 
   async function closePeriod() {
     try { await api.accClosePeriod({ business_unit_id: Number(buId), period }); flash(`Period ${period} closed.`); load(); }
@@ -438,6 +495,107 @@ export default function AccountingPage() {
               </tbody>
             </table>
           </section>
+        )}
+
+        {tab === 'assets' && (
+          <section className={`${GLASS} p-6`}>
+            <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
+              <h2 className="font-bold text-slate-900 dark:text-slate-100">Fixed Assets — {buName}</h2>
+              <button onClick={runDepreciation} className="whitespace-nowrap text-xs font-semibold bg-violet-500/10 border border-violet-500/20 text-violet-600 dark:text-violet-400 px-3.5 py-2 rounded-lg hover:bg-violet-500/20 transition-colors">Run depreciation — {period}</button>
+            </div>
+            <form onSubmit={addAsset} className="flex flex-wrap gap-3 mb-5">
+              <input value={assetForm.name} onChange={(e) => setAssetForm({ ...assetForm, name: e.target.value })} placeholder="Asset name (e.g. Delivery Truck)" className="flex-1 min-w-[200px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3.5 py-2.5 text-sm" />
+              <input value={assetForm.category} onChange={(e) => setAssetForm({ ...assetForm, category: e.target.value })} placeholder="Category" className="w-36 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+              <input type="date" value={assetForm.purchase_date} onChange={(e) => setAssetForm({ ...assetForm, purchase_date: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+              <input type="number" value={assetForm.cost} onChange={(e) => setAssetForm({ ...assetForm, cost: e.target.value })} placeholder="Cost" className="w-36 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+              <input type="number" value={assetForm.useful_life_months} onChange={(e) => setAssetForm({ ...assetForm, useful_life_months: e.target.value })} title="Useful life (months)" className="w-28 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+              <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Add asset</button>
+            </form>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm min-w-[680px]">
+                <thead className="text-left text-xs uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                  <tr><th className="py-2 pr-3">Asset</th><th className="py-2 pr-3 text-right">Cost</th><th className="py-2 pr-3 text-right">Accum. Depr.</th><th className="py-2 pr-3 text-right">Book Value</th><th className="py-2 pr-3 text-right">Monthly</th><th className="py-2 pr-3">Last Run</th><th className="py-2" /></tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {assets.map((a) => (
+                    <tr key={a.id} className={a.status !== 'active' ? 'opacity-50' : ''}>
+                      <td className="py-2 pr-3 font-medium">{a.name} <span className="text-xs text-slate-400 font-normal">{a.category || ''} · {a.purchase_date}</span></td>
+                      <td className="py-2 pr-3 text-right tabular-nums">{money(a.cost)}</td>
+                      <td className="py-2 pr-3 text-right tabular-nums">{money(a.accumulated_depreciation)}</td>
+                      <td className="py-2 pr-3 text-right tabular-nums font-semibold">{money(a.book_value)}</td>
+                      <td className="py-2 pr-3 text-right tabular-nums">{money(a.monthly_depreciation)}</td>
+                      <td className="py-2 pr-3 text-slate-500">{a.last_depreciated_period || '—'}</td>
+                      <td className="py-2 text-right">{a.status === 'active' && <button onClick={async () => { await api.accDisposeAsset(a.id); load(); }} className="text-xs font-semibold text-red-500 hover:underline">Dispose</button>}</td>
+                    </tr>
+                  ))}
+                  {assets.length === 0 && <tr><td colSpan={7} className="py-8 text-center text-slate-400">No fixed assets yet</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
+        {tab === 'bank' && (
+          <div className="space-y-6">
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-4">Bank Accounts — {buName}</h2>
+              <form onSubmit={addBankAccount} className="flex flex-wrap gap-3 mb-5">
+                <input value={bankForm.bank_name} onChange={(e) => setBankForm({ ...bankForm, bank_name: e.target.value })} placeholder="Bank name (e.g. KBZ)" className="flex-1 min-w-[180px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3.5 py-2.5 text-sm" />
+                <input value={bankForm.account_number} onChange={(e) => setBankForm({ ...bankForm, account_number: e.target.value })} placeholder="Account number" className="w-48 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <select value={bankForm.account_id} onChange={(e) => setBankForm({ ...bankForm, account_id: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                  <option value="">Ledger account…</option>
+                  {postable.filter((a) => a.account_type === 'asset').map((a) => <option key={a.id} value={a.id}>{a.code} — {a.name}</option>)}
+                </select>
+                <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Add account</button>
+              </form>
+              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {bankAccounts.map((b) => (
+                  <button key={b.id} onClick={() => setSelectedBank(String(b.id))} className={`text-left p-4 rounded-xl border transition-colors ${selectedBank === String(b.id) ? 'border-brand-500 bg-brand-500/5' : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'}`}>
+                    <p className="text-sm font-bold text-slate-900 dark:text-slate-100">{b.bank_name}</p>
+                    <p className="text-xs text-slate-400">{b.account_number || '—'}{b.account_code ? ` · ledger ${b.account_code}` : ''}</p>
+                    <p className="text-sm font-semibold tabular-nums mt-2">{money(b.statement_balance)}</p>
+                    <p className="text-xs text-slate-400">{b.unreconciled_count} unreconciled</p>
+                  </button>
+                ))}
+                {bankAccounts.length === 0 && <p className="text-sm text-slate-400">No bank accounts yet</p>}
+              </div>
+            </section>
+            {selectedBank && (
+              <section className={`${GLASS} p-6`}>
+                {recon && (
+                  <div className="flex flex-wrap gap-x-6 gap-y-1 mb-4 text-sm">
+                    <p>Statement: <span className="font-bold tabular-nums">{money(recon.statement_balance)}</span></p>
+                    <p>Ledger: <span className="font-bold tabular-nums">{recon.ledger_balance !== null ? money(recon.ledger_balance) : '—'}</span></p>
+                    <p>Difference: <span className={`font-bold tabular-nums ${recon.difference === 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>{recon.difference !== null ? money(recon.difference) : '—'}</span></p>
+                  </div>
+                )}
+                <form onSubmit={addTxn} className="flex flex-wrap gap-2 mb-4">
+                  <input type="date" value={txnForm.txn_date} onChange={(e) => setTxnForm({ ...txnForm, txn_date: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm" />
+                  <input value={txnForm.description} onChange={(e) => setTxnForm({ ...txnForm, description: e.target.value })} placeholder="Description" className="flex-1 min-w-[160px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm" />
+                  <input type="number" value={txnForm.deposit} onChange={(e) => setTxnForm({ ...txnForm, deposit: e.target.value })} placeholder="Deposit" className="w-32 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm" />
+                  <input type="number" value={txnForm.withdrawal} onChange={(e) => setTxnForm({ ...txnForm, withdrawal: e.target.value })} placeholder="Withdrawal" className="w-32 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm" />
+                  <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors">Add line</button>
+                </form>
+                <table className="w-full text-sm min-w-[540px]">
+                  <thead className="text-left text-xs uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                    <tr><th className="py-2 pr-3">Date</th><th className="py-2 pr-3">Description</th><th className="py-2 pr-3 text-right">Deposit</th><th className="py-2 pr-3 text-right">Withdrawal</th><th className="py-2 text-center">Reconciled</th></tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {bankTxns.map((t) => (
+                      <tr key={t.id}>
+                        <td className="py-2 pr-3 tabular-nums">{t.txn_date}</td>
+                        <td className="py-2 pr-3">{t.description || '—'}</td>
+                        <td className="py-2 pr-3 text-right tabular-nums">{t.deposit ? money(t.deposit) : '—'}</td>
+                        <td className="py-2 pr-3 text-right tabular-nums">{t.withdrawal ? money(t.withdrawal) : '—'}</td>
+                        <td className="py-2 text-center"><input type="checkbox" checked={t.is_reconciled} onChange={async (e) => { await api.accSetReconciled(t.id, e.target.checked); load(); }} className="accent-emerald-600 w-4 h-4" /></td>
+                      </tr>
+                    ))}
+                    {bankTxns.length === 0 && <tr><td colSpan={5} className="py-6 text-center text-slate-400">No statement lines yet</td></tr>}
+                  </tbody>
+                </table>
+              </section>
+            )}
+          </div>
         )}
 
         {tab === 'periods' && (
