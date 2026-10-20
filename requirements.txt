@@ -30,5 +30,5 @@ cryptography==50.0.1
 boto3==1.35.90
 openpyxl==3.1.5
 python-dotenv==1.2.3
-tzdata==2025.2
+tzdata==2026.5
 fpdf2>=2.7.9
