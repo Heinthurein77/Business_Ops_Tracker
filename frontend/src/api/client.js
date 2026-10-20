@@ -205,6 +205,20 @@ export const api = {
   cancelInvoice: (id) => postJson(`/api/ops/invoices/${id}/cancel`),
   recordInvoicePayment: (id, payload) => postJson(`/api/ops/invoices/${id}/payments`, payload),
   aging: (buId) => getJson(`/api/ops/aging${buId ? `?business_unit_id=${buId}` : ''}`),
+  // ---- HR & payroll (ERP Phase 5) ----
+  listEmployees: (buId) => getJson(`/api/ops/employees${buId ? `?business_unit_id=${buId}` : ''}`),
+  createEmployee: (payload) => postJson('/api/ops/employees', payload),
+  deleteEmployee: (id) => fetch(`/api/ops/employees/${id}`, { method: 'DELETE', credentials: 'include' }).then(handle),
+  listLeave: (buId) => getJson(`/api/ops/leave-requests${buId ? `?business_unit_id=${buId}` : ''}`),
+  createLeave: (payload) => postJson('/api/ops/leave-requests', payload),
+  reviewLeave: (id, payload) => postJson(`/api/ops/leave-requests/${id}/review`, payload),
+  listPayroll: (buId) => getJson(`/api/ops/payroll-runs${buId ? `?business_unit_id=${buId}` : ''}`),
+  createPayroll: (payload) => postJson('/api/ops/payroll-runs', payload),
+  updatePayrollLine: (runId, lineId, payload) => fetch(`/api/ops/payroll-runs/${runId}/lines/${lineId}`, {
+    method: 'PATCH', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
+  }).then(handle),
+  approvePayroll: (id) => postJson(`/api/ops/payroll-runs/${id}/approve`),
+  payPayroll: (id) => postJson(`/api/ops/payroll-runs/${id}/pay`),
   monthlyReportUrl: (month) => `/api/ops/monthly-report${month ? `?month=${month}` : ''}`,
   opsExportUrl: (tab, buId) => {
     const q = new URLSearchParams({ tab: tab || 'actions' });

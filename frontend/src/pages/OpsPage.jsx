@@ -10,6 +10,7 @@ const TABS = [
   { key: 'purchasing', label: 'Purchasing' },
   { key: 'suppliers', label: 'Suppliers' },
   { key: 'invoices', label: 'Invoices' },
+  { key: 'hr', label: 'HR & Payroll' },
   { key: 'expenses', label: 'Expenses' },
   { key: 'documents', label: 'Documents' },
   { key: 'staff', label: 'Staff' },
@@ -70,6 +71,13 @@ export default function OpsPage() {
   const [invCreate, setInvCreate] = useState({ customer_id: '', invoice_date: new Date().toISOString().slice(0, 10), due_date: '', tax_rate: 5, lines: [{ description: '', quantity: 1, unit_price: '' }] });
   const [payAmt, setPayAmt] = useState({});
   const [agingData, setAgingData] = useState(null);
+  const [employees, setEmployees] = useState([]);
+  const [empForm, setEmpForm] = useState({ name: '', position: '', base_salary: '' });
+  const [leaveList, setLeaveList] = useState([]);
+  const [leaveForm, setLeaveForm] = useState({ employee_id: '', leave_type: 'annual', start_date: '', end_date: '' });
+  const [payrollRuns, setPayrollRuns] = useState([]);
+  const [payrollPeriod, setPayrollPeriod] = useState(new Date().toISOString().slice(0, 7));
+  const [lineEdits, setLineEdits] = useState({});
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
@@ -102,12 +110,47 @@ export default function OpsPage() {
         setSalesCustomers((await api.listSalesCustomers(bu)).items);
         setAgingData(await api.aging(bu));
       }
+      if (tab === 'hr') {
+        setEmployees((await api.listEmployees(bu)).items);
+        setLeaveList((await api.listLeave(bu)).items);
+        setPayrollRuns((await api.listPayroll(bu)).items);
+      }
     } catch (e) {
       setError(e.message || 'Failed to load');
     }
   }, [tab, buId]);
 
   useEffect(() => { load(); }, [load]);
+
+  async function addEmployee(e) {
+    e.preventDefault();
+    if (!empForm.name.trim() || !buId) return;
+    try {
+      await api.createEmployee({ business_unit_id: Number(buId), name: empForm.name.trim(), position: empForm.position || undefined, base_salary: Number(empForm.base_salary) || 0 });
+      setEmpForm({ name: '', position: '', base_salary: '' });
+      load();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function submitLeave(e) {
+    e.preventDefault();
+    if (!leaveForm.employee_id || !leaveForm.start_date || !leaveForm.end_date) return;
+    try {
+      await api.createLeave({ employee_id: Number(leaveForm.employee_id), leave_type: leaveForm.leave_type, start_date: leaveForm.start_date, end_date: leaveForm.end_date });
+      setLeaveForm({ employee_id: '', leave_type: 'annual', start_date: '', end_date: '' });
+      load();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function generatePayroll() {
+    if (!buId) return;
+    try {
+      await api.createPayroll({ business_unit_id: Number(buId), period: payrollPeriod });
+      setNotice(`Payroll draft for ${payrollPeriod} generated.`);
+      setTimeout(() => setNotice(''), 4000);
+      load();
+    } catch (err) { setError(err.message); }
+  }
 
   async function addSalesCustomer(e) {
     e.preventDefault();
@@ -516,6 +559,118 @@ export default function OpsPage() {
                 ))}
                 {salesCustomers.length === 0 && <li className="py-6 text-center text-sm text-slate-400">No customers yet</li>}
               </ul>
+            </section>
+          </div>
+        )}
+
+        {tab === 'hr' && (
+          <div className="space-y-6">
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-4">Employees</h2>
+              <form onSubmit={addEmployee} className="flex flex-wrap gap-3 mb-4">
+                <input value={empForm.name} onChange={(e) => setEmpForm({ ...empForm, name: e.target.value })} placeholder="Employee name" className="flex-1 min-w-[180px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3.5 py-2.5 text-sm" />
+                <input value={empForm.position} onChange={(e) => setEmpForm({ ...empForm, position: e.target.value })} placeholder="Position" className="w-44 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <input type="number" value={empForm.base_salary} onChange={(e) => setEmpForm({ ...empForm, base_salary: e.target.value })} placeholder="Monthly salary" className="w-40 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Add employee</button>
+              </form>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm min-w-[480px]">
+                  <thead className="text-left text-xs uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                    <tr><th className="py-2 pr-3">Name</th><th className="py-2 pr-3">Position</th><th className="py-2 pr-3 text-right">Monthly Salary</th><th className="py-2" /></tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {employees.map((e) => (
+                      <tr key={e.id}>
+                        <td className="py-2 pr-3 font-medium">{e.name}</td>
+                        <td className="py-2 pr-3 text-slate-500">{e.position || '—'}</td>
+                        <td className="py-2 pr-3 text-right tabular-nums">{money(e.base_salary)}</td>
+                        <td className="py-2 text-right"><button onClick={async () => { await api.deleteEmployee(e.id); load(); }} className="text-xs font-semibold text-red-500 hover:underline">Remove</button></td>
+                      </tr>
+                    ))}
+                    {employees.length === 0 && <tr><td colSpan={4} className="py-6 text-center text-slate-400">No employees yet for this BU</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-4">Leave Requests</h2>
+              <form onSubmit={submitLeave} className="flex flex-wrap gap-3 mb-4">
+                <select value={leaveForm.employee_id} onChange={(e) => setLeaveForm({ ...leaveForm, employee_id: e.target.value })} className="flex-1 min-w-[180px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                  <option value="">Select employee…</option>
+                  {employees.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                </select>
+                <select value={leaveForm.leave_type} onChange={(e) => setLeaveForm({ ...leaveForm, leave_type: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                  {['annual', 'sick', 'casual', 'unpaid'].map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+                <input type="date" value={leaveForm.start_date} onChange={(e) => setLeaveForm({ ...leaveForm, start_date: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <input type="date" value={leaveForm.end_date} onChange={(e) => setLeaveForm({ ...leaveForm, end_date: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Request leave</button>
+              </form>
+              <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                {leaveList.map((lv) => (
+                  <li key={lv.id} className="py-2.5 flex items-center justify-between gap-3 flex-wrap">
+                    <p className="text-sm"><span className="font-semibold">{lv.employee_name}</span> <span className="text-slate-400">· {lv.leave_type} · {lv.start_date} → {lv.end_date} ({lv.days}d)</span></p>
+                    <div className="flex items-center gap-2">
+                      <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[lv.status] || STATUS_BADGE.pending}`}>{lv.status}</span>
+                      {lv.status === 'pending' && <>
+                        <button onClick={async () => { await api.reviewLeave(lv.id, { decision: 'approved' }); load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Approve</button>
+                        <button onClick={async () => { await api.reviewLeave(lv.id, { decision: 'rejected' }); load(); }} className="text-xs font-semibold text-red-500 hover:underline">Reject</button>
+                      </>}
+                    </div>
+                  </li>
+                ))}
+                {leaveList.length === 0 && <li className="py-6 text-center text-sm text-slate-400">No leave requests</li>}
+              </ul>
+            </section>
+
+            <section className={`${GLASS} p-6`}>
+              <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
+                <h2 className="font-bold text-slate-900 dark:text-slate-100">Payroll</h2>
+                <div className="flex items-center gap-2">
+                  <input type="month" value={payrollPeriod} onChange={(e) => setPayrollPeriod(e.target.value)} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm font-semibold" />
+                  <button onClick={generatePayroll} className="whitespace-nowrap bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors">Generate run</button>
+                </div>
+              </div>
+              {payrollRuns.map((run) => (
+                <div key={run.id} className="border border-slate-200 dark:border-slate-700 rounded-xl p-4 mb-4">
+                  <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+                    <p className="text-sm font-bold text-slate-900 dark:text-slate-100">{run.period} <span className="font-normal text-slate-400">· gross {money(run.total_gross)} · deductions {money(run.total_deductions)} · net {money(run.total_net)}</span></p>
+                    <div className="flex items-center gap-2">
+                      <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[run.status] || STATUS_BADGE.draft}`}>{run.status}</span>
+                      {run.status === 'draft' && <button onClick={async () => { try { await api.approvePayroll(run.id); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-sky-600 dark:text-sky-400 hover:underline">Approve</button>}
+                      {run.status === 'approved' && <button onClick={async () => { try { await api.payPayroll(run.id); } catch (err) { setError(err.message); } setNotice(`Payroll ${run.period} paid — journal posted.`); setTimeout(() => setNotice(''), 4000); load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Pay (post journal)</button>}
+                    </div>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm min-w-[560px]">
+                      <thead className="text-left text-xs uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                        <tr><th className="py-1.5 pr-3">Employee</th><th className="py-1.5 pr-3 text-right">Base</th><th className="py-1.5 pr-3 text-right">Allowances</th><th className="py-1.5 pr-3 text-right">Deductions</th><th className="py-1.5 text-right">Net</th></tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                        {run.lines.map((l) => (
+                          <tr key={l.id}>
+                            <td className="py-1.5 pr-3 font-medium">{l.employee_name}</td>
+                            <td className="py-1.5 pr-3 text-right tabular-nums">{money(l.base_salary)}</td>
+                            <td className="py-1.5 pr-3 text-right">
+                              {run.status === 'draft' ? (
+                                <input type="number" defaultValue={l.allowances || ''} placeholder="0" onBlur={async (e) => { const v = Number(e.target.value) || 0; if (v !== l.allowances) { await api.updatePayrollLine(run.id, l.id, { allowances: v }); load(); } }} className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-xs text-right" />
+                              ) : <span className="tabular-nums">{money(l.allowances)}</span>}
+                            </td>
+                            <td className="py-1.5 pr-3 text-right">
+                              {run.status === 'draft' ? (
+                                <input type="number" defaultValue={l.deductions || ''} placeholder="0" onBlur={async (e) => { const v = Number(e.target.value) || 0; if (v !== l.deductions) { await api.updatePayrollLine(run.id, l.id, { deductions: v }); load(); } }} className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-xs text-right" />
+                              ) : <span className="tabular-nums">{money(l.deductions)}</span>}
+                            </td>
+                            <td className="py-1.5 text-right tabular-nums font-semibold">{money(l.net)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ))}
+              {payrollRuns.length === 0 && <p className="text-sm text-slate-400 text-center py-4">No payroll runs yet — generate one for this month</p>}
             </section>
           </div>
         )}

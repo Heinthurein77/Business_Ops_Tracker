@@ -855,3 +855,80 @@ class InvoicePayment(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     invoice = relationship("SalesInvoice", back_populates="payments")
+
+
+# ------------------------------------------------------------------ HR & payroll (ERP Phase 5)
+
+class Employee(Base):
+    """Staff master per BU (people, distinct from login Users)."""
+    __tablename__ = "employees"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    name = Column(String(150), nullable=False)
+    position = Column(String(120), nullable=True)
+    phone = Column(String(40), nullable=True)
+    base_salary = Column(Numeric(16, 2), default=0, nullable=False)  # monthly
+    joined_date = Column(Date, nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+
+
+class LeaveRequest(Base):
+    __tablename__ = "leave_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False, index=True)
+    leave_type = Column(String(30), default="annual", nullable=False)  # annual/sick/casual/unpaid
+    start_date = Column(Date, nullable=False)
+    end_date = Column(Date, nullable=False)
+    reason = Column(String(300), nullable=True)
+    status = Column(String(20), default="pending", nullable=False, index=True)
+    reviewed_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+    employee = relationship("Employee")
+
+
+class PayrollRun(Base):
+    """One run per BU per month: draft -> approved -> paid.
+
+    Paying posts Dr 6200 Salaries (gross) / Cr 1110 Cash (net) /
+    Cr 2120 Accrued (deductions) when the BU has a chart of accounts.
+    """
+    __tablename__ = "payroll_runs"
+    __table_args__ = (
+        UniqueConstraint("business_unit_id", "period", name="uq_payroll_bu_period"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    period = Column(String(7), nullable=False, index=True)  # YYYY-MM
+    status = Column(String(20), default="draft", nullable=False, index=True)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    paid_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+    lines = relationship("PayrollLine", back_populates="run", cascade="all, delete-orphan")
+
+
+class PayrollLine(Base):
+    __tablename__ = "payroll_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(Integer, ForeignKey("payroll_runs.id"), nullable=False, index=True)
+    employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False)
+    base_salary = Column(Numeric(16, 2), default=0, nullable=False)
+    allowances = Column(Numeric(16, 2), default=0, nullable=False)
+    deductions = Column(Numeric(16, 2), default=0, nullable=False)
+
+    run = relationship("PayrollRun", back_populates="lines")
+    employee = relationship("Employee")

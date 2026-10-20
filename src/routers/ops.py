@@ -22,11 +22,15 @@ from src.models import (
     Customer,
     CustomerMetric,
     DailyFinancial,
+    Employee,
     ExpenseRequest,
     InventoryItem,
     InvoicePayment,
+    LeaveRequest,
     LicenseDocument,
     Notification,
+    PayrollLine,
+    PayrollRun,
     PurchaseOrder,
     PurchaseOrderLine,
     SalesInvoice,
@@ -1568,3 +1572,263 @@ def aging_report(business_unit_id: Optional[int] = None, user: User = Depends(ge
         "ap": {"buckets": {k: float(v) for k, v in ap_buckets.items()},
                "total": float(sum(ap_buckets.values(), Decimal("0"))), "items": ap_items},
     }
+
+
+# ================================================================== HR & payroll (ERP Phase 5)
+
+def serialize_employee(e: Employee) -> dict:
+    return {
+        "id": e.id, "business_unit_id": e.business_unit_id, "name": e.name,
+        "position": e.position, "phone": e.phone,
+        "base_salary": float(e.base_salary or 0),
+        "joined_date": e.joined_date.isoformat() if e.joined_date else None,
+        "is_active": e.is_active,
+    }
+
+
+class EmployeeIn(BaseModel):
+    business_unit_id: int
+    name: str = Field(min_length=1, max_length=150)
+    position: Optional[str] = None
+    phone: Optional[str] = None
+    base_salary: float = 0
+    joined_date: Optional[date] = None
+
+
+@router.get("/employees")
+def list_employees(business_unit_id: Optional[int] = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.role == "CEO":
+        business_unit_id = user.business_unit_id
+    q = db.query(Employee).filter(Employee.is_active == True)  # noqa: E712
+    if business_unit_id:
+        q = q.filter(Employee.business_unit_id == business_unit_id)
+    return {"items": [serialize_employee(e) for e in q.order_by(Employee.name).all()]}
+
+
+@router.post("/employees")
+def create_employee(payload: EmployeeIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    bu_scope(user, payload.business_unit_id)
+    e = Employee(**payload.model_dump(), created_by_id=user.id)
+    db.add(e)
+    db.commit()
+    db.refresh(e)
+    return serialize_employee(e)
+
+
+@router.delete("/employees/{employee_id}")
+def delete_employee(employee_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    e = db.query(Employee).filter(Employee.id == employee_id).first()
+    if not e:
+        raise HTTPException(404, "Employee not found")
+    bu_scope(user, e.business_unit_id)
+    e.is_active = False
+    db.commit()
+    return {"ok": True}
+
+
+def serialize_leave(db: Session, lv: LeaveRequest) -> dict:
+    days = (lv.end_date - lv.start_date).days + 1 if lv.start_date and lv.end_date else 0
+    return {
+        "id": lv.id, "business_unit_id": lv.business_unit_id, "employee_id": lv.employee_id,
+        "employee_name": lv.employee.name if lv.employee else None,
+        "leave_type": lv.leave_type,
+        "start_date": lv.start_date.isoformat() if lv.start_date else None,
+        "end_date": lv.end_date.isoformat() if lv.end_date else None,
+        "days": days, "reason": lv.reason, "status": lv.status,
+    }
+
+
+class LeaveIn(BaseModel):
+    employee_id: int
+    leave_type: str = "annual"
+    start_date: date
+    end_date: date
+    reason: Optional[str] = None
+
+
+@router.get("/leave-requests")
+def list_leave(business_unit_id: Optional[int] = None, status: Optional[str] = None,
+               user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.role == "CEO":
+        business_unit_id = user.business_unit_id
+    q = db.query(LeaveRequest)
+    if business_unit_id:
+        q = q.filter(LeaveRequest.business_unit_id == business_unit_id)
+    if status:
+        q = q.filter(LeaveRequest.status == status)
+    rows = q.order_by(LeaveRequest.start_date.desc()).limit(200).all()
+    return {"items": [serialize_leave(db, lv) for lv in rows]}
+
+
+@router.post("/leave-requests")
+def create_leave(payload: LeaveIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    emp = db.query(Employee).filter(Employee.id == payload.employee_id, Employee.is_active == True).first()  # noqa: E712
+    if not emp:
+        raise HTTPException(404, "Employee not found")
+    bu_scope(user, emp.business_unit_id)
+    if payload.end_date < payload.start_date:
+        raise HTTPException(400, "End date is before start date")
+    lv = LeaveRequest(business_unit_id=emp.business_unit_id, **payload.model_dump())
+    db.add(lv)
+    db.commit()
+    db.refresh(lv)
+    return serialize_leave(db, lv)
+
+
+class LeaveReview(BaseModel):
+    decision: str = Field(pattern="^(approved|rejected)$")
+
+
+@router.post("/leave-requests/{leave_id}/review")
+def review_leave(leave_id: int, payload: LeaveReview, user: User = Depends(require_roles("Chairman", "HO", "CEO")), db: Session = Depends(get_db)):
+    lv = db.query(LeaveRequest).filter(LeaveRequest.id == leave_id).first()
+    if not lv:
+        raise HTTPException(404, "Leave request not found")
+    bu_scope(user, lv.business_unit_id)
+    if lv.status != "pending":
+        raise HTTPException(400, f"Leave already {lv.status}")
+    lv.status = payload.decision
+    lv.reviewed_by_id = user.id
+    lv.reviewed_at = datetime.utcnow()
+    db.commit()
+    return serialize_leave(db, lv)
+
+
+def serialize_payroll(db: Session, run: PayrollRun) -> dict:
+    lines = []
+    totals = {"gross": Decimal("0"), "deductions": Decimal("0"), "net": Decimal("0")}
+    for l in run.lines:
+        gross = Decimal(str(l.base_salary or 0)) + Decimal(str(l.allowances or 0))
+        net = gross - Decimal(str(l.deductions or 0))
+        totals["gross"] += gross
+        totals["deductions"] += Decimal(str(l.deductions or 0))
+        totals["net"] += net
+        lines.append({
+            "id": l.id, "employee_id": l.employee_id,
+            "employee_name": l.employee.name if l.employee else None,
+            "base_salary": float(l.base_salary or 0), "allowances": float(l.allowances or 0),
+            "deductions": float(l.deductions or 0), "gross": float(gross), "net": float(net),
+        })
+    return {
+        "id": run.id, "business_unit_id": run.business_unit_id,
+        "bu_name": run.business_unit.name if run.business_unit else None,
+        "period": run.period, "status": run.status,
+        "paid_at": run.paid_at.isoformat() if run.paid_at else None,
+        "lines": lines,
+        "total_gross": float(totals["gross"]), "total_deductions": float(totals["deductions"]),
+        "total_net": float(totals["net"]),
+    }
+
+
+class PayrollCreate(BaseModel):
+    business_unit_id: int
+    period: str = Field(pattern=r"^\d{4}-\d{2}$")
+
+
+@router.get("/payroll-runs")
+def list_payroll(business_unit_id: Optional[int] = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.role == "CEO":
+        business_unit_id = user.business_unit_id
+    q = db.query(PayrollRun)
+    if business_unit_id:
+        q = q.filter(PayrollRun.business_unit_id == business_unit_id)
+    rows = q.order_by(PayrollRun.period.desc()).limit(50).all()
+    return {"items": [serialize_payroll(db, r) for r in rows]}
+
+
+@router.post("/payroll-runs")
+def create_payroll(payload: PayrollCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Generate a draft run from the BU's active employees + base salaries."""
+    bu_scope(user, payload.business_unit_id)
+    existing = db.query(PayrollRun).filter(
+        PayrollRun.business_unit_id == payload.business_unit_id,
+        PayrollRun.period == payload.period).first()
+    if existing:
+        raise HTTPException(400, f"Payroll for {payload.period} already exists")
+    employees = db.query(Employee).filter(
+        Employee.business_unit_id == payload.business_unit_id,
+        Employee.is_active == True).all()  # noqa: E712
+    if not employees:
+        raise HTTPException(400, "No active employees in this BU")
+    run = PayrollRun(business_unit_id=payload.business_unit_id, period=payload.period,
+                     status="draft", created_by_id=user.id)
+    db.add(run)
+    db.flush()
+    for emp in employees:
+        db.add(PayrollLine(run_id=run.id, employee_id=emp.id, base_salary=emp.base_salary))
+    db.commit()
+    db.refresh(run)
+    return serialize_payroll(db, run)
+
+
+class PayrollLineUpdate(BaseModel):
+    allowances: Optional[float] = None
+    deductions: Optional[float] = None
+
+
+@router.patch("/payroll-runs/{run_id}/lines/{line_id}")
+def update_payroll_line(run_id: int, line_id: int, payload: PayrollLineUpdate,
+                        user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    run = db.query(PayrollRun).filter(PayrollRun.id == run_id).first()
+    if not run:
+        raise HTTPException(404, "Payroll run not found")
+    bu_scope(user, run.business_unit_id)
+    if run.status != "draft":
+        raise HTTPException(400, "Only draft runs can be edited")
+    line = db.query(PayrollLine).filter(PayrollLine.id == line_id, PayrollLine.run_id == run_id).first()
+    if not line:
+        raise HTTPException(404, "Payroll line not found")
+    if payload.allowances is not None:
+        line.allowances = Decimal(str(payload.allowances))
+    if payload.deductions is not None:
+        line.deductions = Decimal(str(payload.deductions))
+    db.commit()
+    db.refresh(run)
+    return serialize_payroll(db, run)
+
+
+@router.post("/payroll-runs/{run_id}/approve")
+def approve_payroll(run_id: int, user: User = Depends(require_roles("Chairman", "HO")), db: Session = Depends(get_db)):
+    run = db.query(PayrollRun).filter(PayrollRun.id == run_id).first()
+    if not run:
+        raise HTTPException(404, "Payroll run not found")
+    if run.status != "draft":
+        raise HTTPException(400, f"Run is {run.status}")
+    run.status = "approved"
+    run.approved_by_id = user.id
+    db.commit()
+    db.refresh(run)
+    return serialize_payroll(db, run)
+
+
+@router.post("/payroll-runs/{run_id}/pay")
+def pay_payroll(run_id: int, user: User = Depends(require_roles("Chairman", "HO")), db: Session = Depends(get_db)):
+    run = db.query(PayrollRun).filter(PayrollRun.id == run_id).first()
+    if not run:
+        raise HTTPException(404, "Payroll run not found")
+    if run.status != "approved":
+        raise HTTPException(400, "Payroll must be approved before paying")
+    totals = serialize_payroll(db, run)
+    run.status = "paid"
+    run.paid_at = datetime.utcnow()
+    db.commit()
+    try:
+        from src.routers.accounting import account_by_code, create_entry
+        bu = run.business_unit_id
+        sal = account_by_code(db, bu, "6200")
+        cash = account_by_code(db, bu, "1110")
+        if sal and cash:
+            y, m = run.period.split("-")
+            lines = [{"account_id": sal.id, "debit": Decimal(str(totals["total_gross"])), "credit": 0},
+                     {"account_id": cash.id, "debit": 0, "credit": Decimal(str(totals["total_net"]))}]
+            if totals["total_deductions"] > 0:
+                acc = account_by_code(db, bu, "2120")
+                if acc:
+                    lines.append({"account_id": acc.id, "debit": 0, "credit": Decimal(str(totals["total_deductions"]))})
+            create_entry(db, bu, date(int(y), int(m), 1), f"Payroll {run.period} — {run.business_unit.name if run.business_unit else ''}",
+                         "payroll", user.id, lines, source_id=run.id, post=True)
+            db.commit()
+    except Exception:
+        db.rollback()
+    db.refresh(run)
+    return serialize_payroll(db, run)
