@@ -7,6 +7,7 @@ import StepsCounter from '../components/StepsCounter';
 import YesNoToggle from '../components/YesNoToggle';
 import PercentProgress from '../components/PercentProgress';
 import QuadrantStatusCircle from '../components/QuadrantStatusCircle';
+import CeoOpsSection from '../components/CeoOpsSection';
 import Footer from '../components/Footer';
 import {
   BU_QUADRANTS,
@@ -959,6 +960,7 @@ export default function CeoDashboardPage() {
             </button>
           </div>
         </form>
+        <CeoOpsSection />
         <Footer light />
       </main>
     </div>

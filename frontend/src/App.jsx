@@ -12,6 +12,7 @@ import CeoReportLogsPage from './pages/CeoReportLogsPage';
 import AdminDashboardPage from './pages/AdminDashboardPage';
 import ComparisonPage from './pages/ComparisonPage';
 import OperationsPage from './pages/OperationsPage';
+import OpsPage from './pages/OpsPage';
 import ActivityDashboardPage from './pages/ActivityDashboardPage';
 import HealthDashboardPage from './pages/HealthDashboardPage';
 import ReportLogsPage from './pages/ReportLogsPage';
@@ -98,6 +99,14 @@ export default function App() {
             element={
               <ProtectedRoute roles={['Chairman', 'HO']}>
                 <ComparisonPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/operations-center"
+            element={
+              <ProtectedRoute roles={['Chairman', 'HO']}>
+                <OpsPage />
               </ProtectedRoute>
             }
           />

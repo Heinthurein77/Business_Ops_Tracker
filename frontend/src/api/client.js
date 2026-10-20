@@ -107,6 +107,70 @@ export const api = {
     const query = params.toString();
     return `/api/admin/export-excel${query ? `?${query}` : ''}`;
   },
+
+  // ---- Operations extensions ----
+  listActionItems: (params = {}) => {
+    const q = new URLSearchParams();
+    if (params.business_unit_id) q.set('business_unit_id', params.business_unit_id);
+    if (params.status) q.set('status', params.status);
+    if (params.mine) q.set('mine', 'true');
+    const query = q.toString();
+    return getJson(`/api/ops/action-items${query ? `?${query}` : ''}`);
+  },
+  createActionItem: (payload) => postJson('/api/ops/action-items', payload),
+  updateActionItem: (id, payload) => fetch(`/api/ops/action-items/${id}`, {
+    method: 'PATCH', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
+  }).then(handle),
+  deleteActionItem: (id) => fetch(`/api/ops/action-items/${id}`, {
+    method: 'DELETE', credentials: 'include',
+  }).then(handle),
+
+  listNotifications: (unreadOnly = false) => getJson(`/api/ops/notifications${unreadOnly ? '?unread_only=true' : ''}`),
+  markNotificationRead: (id) => postJson(`/api/ops/notifications/${id}/read`),
+  markAllNotificationsRead: () => postJson('/api/ops/notifications/read-all'),
+  remindMissingReports: () => postJson('/api/ops/notifications/remind-missing'),
+
+  listInventory: (params = {}) => {
+    const q = new URLSearchParams();
+    if (params.business_unit_id) q.set('business_unit_id', params.business_unit_id);
+    if (params.low_only) q.set('low_only', 'true');
+    const query = q.toString();
+    return getJson(`/api/ops/inventory${query ? `?${query}` : ''}`);
+  },
+  createInventoryItem: (payload) => postJson('/api/ops/inventory', payload),
+  recordStockMovement: (id, payload) => postJson(`/api/ops/inventory/${id}/movements`, payload),
+  listStockMovements: (id) => getJson(`/api/ops/inventory/${id}/movements`),
+  deleteInventoryItem: (id) => fetch(`/api/ops/inventory/${id}`, {
+    method: 'DELETE', credentials: 'include',
+  }).then(handle),
+
+  listExpenses: (params = {}) => {
+    const q = new URLSearchParams();
+    if (params.business_unit_id) q.set('business_unit_id', params.business_unit_id);
+    if (params.status) q.set('status', params.status);
+    const query = q.toString();
+    return getJson(`/api/ops/expenses${query ? `?${query}` : ''}`);
+  },
+  submitExpense: (payload) => postJson('/api/ops/expenses', payload),
+  reviewExpense: (id, payload) => postJson(`/api/ops/expenses/${id}/review`, payload),
+
+  submitStaff: (payload) => postJson('/api/ops/staff', payload),
+  listStaff: (params = {}) => {
+    const q = new URLSearchParams();
+    if (params.business_unit_id) q.set('business_unit_id', params.business_unit_id);
+    if (params.days) q.set('days', params.days);
+    const query = q.toString();
+    return getJson(`/api/ops/staff${query ? `?${query}` : ''}`);
+  },
+  submitCustomers: (payload) => postJson('/api/ops/customers', payload),
+  listCustomers: (params = {}) => {
+    const q = new URLSearchParams();
+    if (params.business_unit_id) q.set('business_unit_id', params.business_unit_id);
+    if (params.days) q.set('days', params.days);
+    const query = q.toString();
+    return getJson(`/api/ops/customers${query ? `?${query}` : ''}`);
+  },
+  forecast: (businessUnitId) => getJson(`/api/ops/forecast${businessUnitId ? `?business_unit_id=${businessUnitId}` : ''}`),
 };
 
 export { ApiError };

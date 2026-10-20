@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import ThemeToggle from './ThemeToggle';
+import NotificationBell from './NotificationBell';
 
 const ADMIN_NAV_GROUPS = [
   {
@@ -23,6 +24,7 @@ const ADMIN_NAV_GROUPS = [
   {
     label: 'Manage',
     links: [
+      { to: '/admin/operations-center', label: 'Operations Center' },
       { to: '/admin/ceo-profiles', label: 'CEO Profiles' },
       { to: '/admin/head-office', label: 'Head Office' },
       { to: '/admin/users', label: 'User Management', chairmanOnly: true },
@@ -52,6 +54,7 @@ const ICONS = {
   '/admin/health-dashboard': 'M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z',
   '/admin/report-logs': 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z',
   '/admin/ceo-profiles': 'M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z',
+  '/admin/operations-center': 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z',
   '/admin/head-office': 'M3 21h18M5 21V7l7-4 7 4v14M9 9h1m-1 4h1m4-4h1m-1 4h1M9 21v-4h6v4',
   '/admin/users': 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z',
   '/admin/security-log': 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z',
@@ -126,10 +129,11 @@ export default function AdminSidebar() {
       <aside className="hidden lg:flex flex-col w-60 flex-shrink-0 h-screen sticky top-0 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800">
         <div className="flex items-center gap-2.5 px-5 pt-5 pb-4">
           <BrandMark size="w-8 h-8" rounding="rounded-lg" textClass="text-[13px]" shadow="shadow-sm" />
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <p className="text-sm font-bold text-slate-900 dark:text-slate-100 leading-none truncate tracking-tight">abcMIB</p>
             <p className="text-[10px] text-slate-400 mt-1 truncate">Business Ops Tracker</p>
           </div>
+          <NotificationBell />
         </div>
 
         <nav className="flex-1 overflow-y-auto px-3 pb-4 space-y-5">

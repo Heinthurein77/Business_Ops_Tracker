@@ -469,3 +469,135 @@ class AuditLog(Base):
     details = Column(Text, nullable=True)
     ip_address = Column(String(64), nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class ActionItem(Base):
+    """Follow-up tasks from meetings/decisions. Assigned to a user, tracked to completion."""
+    __tablename__ = "action_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    title = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    assigned_to_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    due_date = Column(Date, nullable=True)
+    status = Column(String(20), default="pending", nullable=False, index=True)  # pending/in_progress/done
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+
+
+class Notification(Base):
+    """In-app notifications: missing-report reminders, approvals, alerts."""
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    type = Column(String(40), nullable=False, index=True)  # missing_report/expense_approval/action_due/alert
+    title = Column(String(200), nullable=False)
+    message = Column(Text, nullable=True)
+    link = Column(String(300), nullable=True)
+    is_read = Column(Boolean, default=False, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class InventoryItem(Base):
+    """Stock items per business unit (retail/convenience stores)."""
+    __tablename__ = "inventory_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    name = Column(String(150), nullable=False)
+    sku = Column(String(60), nullable=True, index=True)
+    category = Column(String(80), nullable=True, index=True)
+    unit = Column(String(20), default="pcs", nullable=False)
+    current_stock = Column(Numeric(14, 2), default=0, nullable=False)
+    reorder_level = Column(Numeric(14, 2), default=0, nullable=False)
+    unit_cost = Column(Numeric(14, 2), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+    movements = relationship("StockMovement", back_populates="item", cascade="all, delete-orphan")
+
+
+class StockMovement(Base):
+    """Every stock in/out/adjustment — the audit trail for inventory."""
+    __tablename__ = "stock_movements"
+
+    id = Column(Integer, primary_key=True, index=True)
+    item_id = Column(Integer, ForeignKey("inventory_items.id"), nullable=False, index=True)
+    movement_type = Column(String(20), nullable=False, index=True)  # in/out/adjustment
+    quantity = Column(Numeric(14, 2), nullable=False)
+    reason = Column(String(200), nullable=True)
+    recorded_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    item = relationship("InventoryItem", back_populates="movements")
+
+
+class ExpenseRequest(Base):
+    """CEO-submitted expenses needing HO/Chairman approval."""
+    __tablename__ = "expense_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    submitted_by_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    title = Column(String(200), nullable=False)
+    amount = Column(Numeric(14, 2), nullable=False)
+    category = Column(String(80), nullable=True, index=True)
+    description = Column(Text, nullable=True)
+    receipt_url = Column(String(500), nullable=True)
+    status = Column(String(20), default="pending", nullable=False, index=True)  # pending/approved/rejected
+    reviewed_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    review_notes = Column(Text, nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    business_unit = relationship("BusinessUnit")
+
+
+class StaffRecord(Base):
+    """Daily headcount snapshot per BU."""
+    __tablename__ = "staff_records"
+    __table_args__ = (
+        UniqueConstraint("business_unit_id", "report_date", name="uq_staff_bu_date"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    report_date = Column(Date, nullable=False, index=True)
+    total_staff = Column(Integer, default=0, nullable=False)
+    present = Column(Integer, default=0, nullable=False)
+    absent = Column(Integer, default=0, nullable=False)
+    new_hires = Column(Integer, default=0, nullable=False)
+    resignations = Column(Integer, default=0, nullable=False)
+    notes = Column(Text, nullable=True)
+    submitted_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+
+
+class CustomerMetric(Base):
+    """Daily customer/footfall metrics per BU."""
+    __tablename__ = "customer_metrics"
+    __table_args__ = (
+        UniqueConstraint("business_unit_id", "report_date", name="uq_customer_bu_date"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    report_date = Column(Date, nullable=False, index=True)
+    footfall = Column(Integer, nullable=True)
+    transactions = Column(Integer, nullable=True)
+    complaints = Column(Integer, default=0, nullable=False)
+    satisfaction_score = Column(Numeric(3, 1), nullable=True)  # 1.0 - 5.0
+    notes = Column(Text, nullable=True)
+    submitted_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")

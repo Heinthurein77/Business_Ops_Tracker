@@ -29,7 +29,7 @@ from src.config import settings
 from src.database import SessionLocal
 from src.edge import EdgeMiddleware
 from src.models import BusinessUnit, User
-from src.routers import admin, auth, ceo, ho, users
+from src.routers import admin, auth, ceo, ho, ops, users
 
 REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
 FRONTEND_DIST = os.path.join(REPO_ROOT, "frontend", "dist")
@@ -227,6 +227,7 @@ app.include_router(ceo.router)
 app.include_router(ho.router)
 app.include_router(admin.router)
 app.include_router(users.router)
+app.include_router(ops.router)
 
 
 # ---------------------------------------------------------------------------
