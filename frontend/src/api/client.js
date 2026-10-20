@@ -219,6 +219,9 @@ export const api = {
   accPeriods: (buId) => getJson(`/api/accounting/periods?business_unit_id=${buId}`),
   accClosePeriod: (payload) => postJson('/api/accounting/periods/close', payload),
   accReopenPeriod: (payload) => postJson('/api/accounting/periods/reopen', payload),
+  accConsolidatedPL: (period) => getJson(`/api/accounting/reports/consolidated-pl${period ? `?period=${period}` : ''}`),
+  accConsolidatedBS: (period) => getJson(`/api/accounting/reports/consolidated-bs${period ? `?period=${period}` : ''}`),
+  accBuComparison: (period) => getJson(`/api/accounting/reports/bu-comparison${period ? `?period=${period}` : ''}`),
 };
 
 export { ApiError };

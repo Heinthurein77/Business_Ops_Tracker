@@ -596,6 +596,114 @@ def balance_sheet(business_unit_id: int, period: Optional[str] = None,
     }
 
 
+# ------------------------------------------------------- Phase 2: consolidation
+
+def _all_posted_lines(db: Session, upto: Optional[date] = None):
+    q = (db.query(JournalLine, Account, JournalEntry)
+         .join(Account, JournalLine.account_id == Account.id)
+         .join(JournalEntry, JournalLine.entry_id == JournalEntry.id)
+         .filter(JournalEntry.status == "posted"))
+    if upto:
+        q = q.filter(JournalEntry.entry_date <= upto)
+    return q.all()
+
+
+@router.get("/reports/consolidated-pl")
+def consolidated_pl(period: Optional[str] = None, user: User = Depends(require_accounting),
+                    db: Session = Depends(get_db)):
+    """Group P&L: every BU summed by the shared account-code standard."""
+    income: dict[str, Decimal] = {}
+    expense: dict[str, Decimal] = {}
+    names: dict[str, str] = {}
+    for line, acc, e in _all_posted_lines(db, _period_end(period)):
+        names.setdefault(acc.code, acc.name)
+        if period and period_of(e.entry_date) != period:
+            continue
+        if acc.account_type == "income":
+            income[acc.code] = income.get(acc.code, ZERO) + (line.credit or ZERO) - (line.debit or ZERO)
+        elif acc.account_type == "expense":
+            expense[acc.code] = expense.get(acc.code, ZERO) + (line.debit or ZERO) - (line.credit or ZERO)
+    ti = sum(income.values(), ZERO)
+    te = sum(expense.values(), ZERO)
+    return {
+        "income": [{"code": c, "name": names.get(c, c), "amount": fmt(v)} for c, v in sorted(income.items())],
+        "expenses": [{"code": c, "name": names.get(c, c), "amount": fmt(v)} for c, v in sorted(expense.items())],
+        "total_income": fmt(ti), "total_expenses": fmt(te), "net_profit": fmt(ti - te),
+    }
+
+
+@router.get("/reports/consolidated-bs")
+def consolidated_bs(period: Optional[str] = None, user: User = Depends(require_accounting),
+                    db: Session = Depends(get_db)):
+    """Group balance sheet with intercompany elimination: Intercompany
+    Receivable (1180, asset) is eliminated against Intercompany Payable
+    (2180, liability) up to the smaller side — group-internal balances are
+    not real assets/liabilities of the group."""
+    groups: dict[str, dict[str, Decimal]] = {"asset": {}, "liability": {}, "equity": {}}
+    names: dict[str, str] = {}
+    retained = ZERO
+    for line, acc, _e in _all_posted_lines(db, _period_end(period)):
+        names.setdefault(acc.code, acc.name)
+        if acc.account_type in groups:
+            bal = (line.debit or ZERO) - (line.credit or ZERO)
+            if acc.account_type != "asset":
+                bal = -bal
+            groups[acc.account_type][acc.code] = groups[acc.account_type].get(acc.code, ZERO) + bal
+        elif acc.account_type == "income":
+            retained += (line.credit or ZERO) - (line.debit or ZERO)
+        elif acc.account_type == "expense":
+            retained -= (line.debit or ZERO) - (line.credit or ZERO)
+    ic_asset = groups["asset"].get("1180", ZERO)
+    ic_liab = groups["liability"].get("2180", ZERO)
+    elimination = min(ic_asset, ic_liab)
+    if elimination > 0:
+        groups["asset"]["1180"] = ic_asset - elimination
+        groups["liability"]["2180"] = ic_liab - elimination
+
+    def section(kind):
+        items = [{"code": c, "name": names.get(c, c), "amount": fmt(v)}
+                 for c, v in sorted(groups[kind].items()) if v != 0]
+        return items, sum(groups[kind].values(), ZERO)
+
+    assets, ta = section("asset")
+    liabs, tl = section("liability")
+    equity, te = section("equity")
+    te += retained
+    equity.append({"code": "—", "name": "Retained Earnings (group result)",
+                   "amount": fmt(retained)})
+    return {
+        "assets": assets, "total_assets": fmt(ta),
+        "liabilities": liabs, "total_liabilities": fmt(tl),
+        "equity": equity, "total_equity": fmt(te),
+        "total_liabilities_equity": fmt(tl + te),
+        "intercompany_eliminated": fmt(elimination),
+        "balanced": ta == tl + te,
+    }
+
+
+@router.get("/reports/bu-comparison")
+def bu_comparison(period: Optional[str] = None, user: User = Depends(require_accounting),
+                  db: Session = Depends(get_db)):
+    """Per-BU P&L for a period — the group scoreboard."""
+    per_bu: dict[int, dict[str, Decimal]] = {}
+    for line, acc, e in _all_posted_lines(db, _period_end(period)):
+        if period and period_of(e.entry_date) != period:
+            continue
+        row = per_bu.setdefault(e.business_unit_id, {"income": ZERO, "expense": ZERO})
+        if acc.account_type == "income":
+            row["income"] += (line.credit or ZERO) - (line.debit or ZERO)
+        elif acc.account_type == "expense":
+            row["expense"] += (line.debit or ZERO) - (line.credit or ZERO)
+    names = {bu.id: bu.name for bu in db.query(BusinessUnit).all()}
+    items = [{
+        "business_unit_id": bu_id, "bu_name": names.get(bu_id, str(bu_id)),
+        "income": fmt(v["income"]), "expenses": fmt(v["expense"]),
+        "net_profit": fmt(v["income"] - v["expense"]),
+    } for bu_id, v in per_bu.items()]
+    items.sort(key=lambda x: -x["net_profit"])
+    return {"items": items}
+
+
 # ---------------------------------------------------------------- periods & rules
 
 @router.get("/periods")

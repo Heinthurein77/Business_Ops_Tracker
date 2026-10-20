@@ -6,6 +6,7 @@ import { GLASS, PAGE_BG } from '../utils/glassTheme';
 
 const TABS = [
   { key: 'reports', label: 'Reports' },
+  { key: 'group', label: 'Group' },
   { key: 'journal', label: 'Journal' },
   { key: 'coa', label: 'Chart of Accounts' },
   { key: 'ledger', label: 'Ledger' },
@@ -58,6 +59,9 @@ export default function AccountingPage() {
   const [ledgerAcc, setLedgerAcc] = useState('');
   const [ledger, setLedger] = useState(null);
   const [periods, setPeriods] = useState([]);
+  const [gpl, setGpl] = useState(null);
+  const [gbs, setGbs] = useState(null);
+  const [gcomp, setGcomp] = useState([]);
 
   useEffect(() => {
     api.adminOverview().then((d) => {
@@ -84,6 +88,11 @@ export default function AccountingPage() {
         setTb(await api.accTrialBalance(bu, period));
         setPl(await api.accPL(bu, period));
         setBs(await api.accBS(bu, period));
+      }
+      if (tab === 'group') {
+        setGpl(await api.accConsolidatedPL(period));
+        setGbs(await api.accConsolidatedBS(period));
+        setGcomp((await api.accBuComparison(period)).items);
       }
       if (tab === 'journal') setJournal((await api.accJournal(bu, {})).items);
       if (tab === 'periods') setPeriods((await api.accPeriods(bu)).items);
@@ -236,6 +245,70 @@ export default function AccountingPage() {
                 </tbody>
               </table>
             </section>
+          </div>
+        )}
+
+        {tab === 'group' && (
+          <div className="space-y-6">
+            {gpl && (
+              <section className="grid sm:grid-cols-3 gap-4">
+                {[
+                  { label: `Group Income — ${period}`, value: money(gpl.total_income) },
+                  { label: `Group Expenses — ${period}`, value: money(gpl.total_expenses) },
+                  { label: 'Group Net Profit', value: money(gpl.net_profit), accent: gpl.net_profit >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500' },
+                ].map((c) => (
+                  <div key={c.label} className={`${GLASS} p-5`}>
+                    <p className="text-[11px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-[0.08em]">{c.label}</p>
+                    <p className={`font-bold text-slate-900 dark:text-slate-100 text-[24px] leading-tight mt-1.5 tabular-nums ${c.accent || ''}`}>{c.value}</p>
+                  </div>
+                ))}
+              </section>
+            )}
+            <section className={`${GLASS} p-6 overflow-x-auto`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-4">BU Comparison — {period}</h2>
+              <table className="w-full text-sm min-w-[540px]">
+                <thead className="text-left text-xs uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                  <tr><th className="py-2 pr-3">Business Unit</th><th className="py-2 pr-3 text-right">Income</th><th className="py-2 pr-3 text-right">Expenses</th><th className="py-2 text-right">Net Profit</th></tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {gcomp.map((b) => (
+                    <tr key={b.business_unit_id}>
+                      <td className="py-2 pr-3 font-medium">{b.bu_name}</td>
+                      <td className="py-2 pr-3 text-right tabular-nums">{money(b.income)}</td>
+                      <td className="py-2 pr-3 text-right tabular-nums">{money(b.expenses)}</td>
+                      <td className={`py-2 text-right tabular-nums font-semibold ${b.net_profit >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}`}>{money(b.net_profit)}</td>
+                    </tr>
+                  ))}
+                  {gcomp.length === 0 && <tr><td colSpan={4} className="py-8 text-center text-slate-400">No posted accounting data for this period yet</td></tr>}
+                </tbody>
+              </table>
+            </section>
+            <div className="grid lg:grid-cols-2 gap-6 items-start">
+              <section className={`${GLASS} p-6`}>
+                <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-4">Consolidated P&L — {period}</h2>
+                {gpl && <>
+                  <p className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">Income</p>
+                  {gpl.income.map((i) => <div key={i.code} className="flex justify-between text-sm py-1"><span>{i.code} {i.name}</span><span className="tabular-nums whitespace-nowrap pl-3">{money(i.amount)}</span></div>)}
+                  {gpl.income.length === 0 && <p className="text-sm text-slate-400 py-1">No income posted</p>}
+                  <p className="text-xs font-bold uppercase tracking-wider text-slate-400 mt-4 mb-2">Expenses</p>
+                  {gpl.expenses.map((i) => <div key={i.code} className="flex justify-between text-sm py-1"><span>{i.code} {i.name}</span><span className="tabular-nums whitespace-nowrap pl-3">{money(i.amount)}</span></div>)}
+                  {gpl.expenses.length === 0 && <p className="text-sm text-slate-400 py-1">No expenses posted</p>}
+                  <div className="border-t border-slate-200 dark:border-slate-700 mt-4 pt-3 flex justify-between font-bold text-slate-900 dark:text-slate-100"><span>Group Net Profit</span><span className="tabular-nums">{money(gpl.net_profit)}</span></div>
+                </>}
+              </section>
+              <section className={`${GLASS} p-6`}>
+                <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-4">Consolidated Balance Sheet {gbs && (gbs.balanced ? <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 ml-2">balanced ✓</span> : <span className="text-xs font-semibold text-red-500 ml-2">NOT balanced</span>)}</h2>
+                {gbs && <>
+                  {gbs.intercompany_eliminated > 0 && <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">Intercompany balances eliminated: {money(gbs.intercompany_eliminated)}</p>}
+                  <p className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">Assets — {money(gbs.total_assets)}</p>
+                  {gbs.assets.map((i) => <div key={i.code + i.name} className="flex justify-between text-sm py-1"><span>{i.code} {i.name}</span><span className="tabular-nums whitespace-nowrap pl-3">{money(i.amount)}</span></div>)}
+                  <p className="text-xs font-bold uppercase tracking-wider text-slate-400 mt-4 mb-2">Liabilities — {money(gbs.total_liabilities)}</p>
+                  {gbs.liabilities.map((i) => <div key={i.code + i.name} className="flex justify-between text-sm py-1"><span>{i.code} {i.name}</span><span className="tabular-nums whitespace-nowrap pl-3">{money(i.amount)}</span></div>)}
+                  <p className="text-xs font-bold uppercase tracking-wider text-slate-400 mt-4 mb-2">Equity — {money(gbs.total_equity)}</p>
+                  {gbs.equity.map((i) => <div key={i.code + i.name} className="flex justify-between text-sm py-1"><span>{i.code} {i.name}</span><span className="tabular-nums whitespace-nowrap pl-3">{money(i.amount)}</span></div>)}
+                </>}
+              </section>
+            </div>
           </div>
         )}
 
