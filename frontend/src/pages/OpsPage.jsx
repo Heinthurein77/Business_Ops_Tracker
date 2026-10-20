@@ -178,6 +178,9 @@ export default function OpsPage() {
               <a href={api.monthlyReportUrl(reportMonth)} className="text-xs font-semibold bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 px-3.5 py-2 rounded-lg hover:opacity-90 transition-opacity">
                 Monthly report (PDF)
               </a>
+              <a href={api.opsExportUrl(tab === 'forecast' ? 'actions' : tab, buId)} className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-2 rounded-lg transition-colors">
+                Export Excel
+              </a>
             </div>
           </div>
         </header>

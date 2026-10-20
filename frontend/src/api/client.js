@@ -185,6 +185,11 @@ export const api = {
   }).then(handle),
   checkDocumentExpiry: () => postJson('/api/ops/documents/check-expiry'),
   monthlyReportUrl: (month) => `/api/ops/monthly-report${month ? `?month=${month}` : ''}`,
+  opsExportUrl: (tab, buId) => {
+    const q = new URLSearchParams({ tab: tab || 'actions' });
+    if (buId) q.set('business_unit_id', buId);
+    return `/api/ops/export-excel?${q.toString()}`;
+  },
 };
 
 export { ApiError };

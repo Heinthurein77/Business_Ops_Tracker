@@ -203,6 +203,11 @@ def mark_all_read(user: User = Depends(get_current_user), db: Session = Depends(
 @router.post("/notifications/remind-missing")
 def remind_missing(user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Notify CEOs whose BU has not submitted today's DailyFinancial."""
+    return {"notified": run_remind_missing_reports(db)}
+
+
+def run_remind_missing_reports(db: Session) -> int:
+    """Job-callable: notify CEOs whose BU hasn't submitted today."""
     today = date.today()
     submitted_bu_ids = {
         row[0] for row in db.query(DailyFinancial.business_unit_id).filter(DailyFinancial.report_date == today).all()
@@ -219,7 +224,7 @@ def remind_missing(user: User = Depends(require_admin), db: Session = Depends(ge
             ))
             sent += 1
     db.commit()
-    return {"notified": sent}
+    return sent
 
 
 # ---------------------------------------------------------------- inventory
@@ -682,6 +687,11 @@ def delete_document(document_id: int, user: User = Depends(get_current_user), db
 def check_document_expiry(days: int = 30, user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Notify each BU's CEO + all Chairman/HO about documents expiring within
     `days`. Throttled per document to one alert per 7 days."""
+    return run_check_document_expiry(db, days)
+
+
+def run_check_document_expiry(db: Session, days: int = 30) -> dict:
+    """Job-callable: notify CEOs + Chairman/HO about documents expiring soon."""
     today = date.today()
     horizon = today + timedelta(days=days)
     docs = db.query(LicenseDocument).filter(
@@ -850,3 +860,105 @@ def monthly_report(month: Optional[str] = None, user: User = Depends(require_adm
     filename = f"monthly_report_{month_start.strftime('%Y-%m')}.pdf"
     return StreamingResponse(buf, media_type="application/pdf",
                              headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+# ---------------------------------------------------------------- Excel export
+
+@router.get("/export-excel")
+def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
+                 user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Download one Operations Center tab as an .xlsx workbook."""
+    from io import BytesIO
+
+    from fastapi.responses import StreamingResponse
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+
+    bu_id = bu_scope(user, business_unit_id)
+    bu_names = {bu.id: bu.name for bu in db.query(BusinessUnit).all()}
+    header_fill = PatternFill(start_color="1F2937", end_color="1F2937", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF")
+
+    def build(title, headers, rows):
+        wb = Workbook()
+        ws = wb.active
+        ws.title = title[:31]
+        ws.append(headers)
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+        for r in rows:
+            ws.append(r)
+        for col in ws.columns:
+            width = max(len(str(c.value)) if c.value is not None else 0 for c in col) + 3
+            ws.column_dimensions[col[0].column_letter].width = min(max(width, 12), 42)
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return StreamingResponse(
+            buf,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="ops_{tab}.xlsx"'},
+        )
+
+    def scoped(q, model):
+        return q.filter(model.business_unit_id == bu_id).all() if bu_id is not None else q.all()
+
+    if tab == "actions":
+        q = db.query(ActionItem).order_by(ActionItem.created_at.desc())
+        rows = scoped(q, ActionItem)
+        return build("Action Items",
+                     ["Title", "BU", "Status", "Due Date", "Assigned To", "Created"],
+                     [[i.title, bu_names.get(i.business_unit_id, ""), i.status,
+                       i.due_date.isoformat() if i.due_date else "",
+                       (db.query(User).get(i.assigned_to_id).full_name if i.assigned_to_id else "") or "",
+                       i.created_at.strftime("%Y-%m-%d %H:%M") if i.created_at else ""] for i in rows])
+
+    if tab == "inventory":
+        q = db.query(InventoryItem).filter(InventoryItem.is_active == True)  # noqa: E712
+        rows = scoped(q, InventoryItem)
+        return build("Inventory",
+                     ["Item", "BU", "Stock", "Unit", "Reorder Level", "Low Stock"],
+                     [[i.name, bu_names.get(i.business_unit_id, ""), float(i.current_stock or 0),
+                       i.unit or "", float(i.reorder_level or 0),
+                       "YES" if float(i.current_stock or 0) <= float(i.reorder_level or 0) and float(i.reorder_level or 0) > 0 else ""] for i in rows])
+
+    if tab == "expenses":
+        q = db.query(ExpenseRequest).order_by(ExpenseRequest.created_at.desc())
+        rows = scoped(q, ExpenseRequest)
+        return build("Expenses",
+                     ["Title", "Amount (Ks)", "Category", "BU", "Status", "Submitted By", "Submitted"],
+                     [[e.title, float(e.amount or 0), e.category or "", bu_names.get(e.business_unit_id, ""),
+                       e.status,
+                       (db.query(User).get(e.submitted_by_id).full_name if e.submitted_by_id else "") or "",
+                       e.created_at.strftime("%Y-%m-%d %H:%M") if e.created_at else ""] for e in rows])
+
+    if tab == "documents":
+        q = db.query(LicenseDocument).order_by(LicenseDocument.expiry_date.asc())
+        rows = scoped(q, LicenseDocument)
+        return build("Documents",
+                     ["Title", "Type", "BU", "Issue Date", "Expiry Date", "Days Left", "Notes"],
+                     [[d.title, d.document_type, bu_names.get(d.business_unit_id, ""),
+                       d.issue_date.isoformat() if d.issue_date else "",
+                       d.expiry_date.isoformat() if d.expiry_date else "",
+                       (d.expiry_date - date.today()).days if d.expiry_date else "",
+                       d.notes or ""] for d in rows])
+
+    if tab == "staff":
+        q = db.query(StaffRecord).order_by(StaffRecord.report_date.desc()).limit(500)
+        rows = scoped(q, StaffRecord)
+        return build("Staff",
+                     ["Date", "BU", "Total", "Present", "Absent", "New Hires", "Resignations"],
+                     [[s.report_date.isoformat() if s.report_date else "", bu_names.get(s.business_unit_id, ""),
+                       s.total_staff, s.present, s.absent, s.new_hires, s.resignations] for s in rows])
+
+    if tab == "customers":
+        q = db.query(CustomerMetric).order_by(CustomerMetric.report_date.desc()).limit(500)
+        rows = scoped(q, CustomerMetric)
+        return build("Customers",
+                     ["Date", "BU", "Footfall", "Transactions", "Complaints", "Satisfaction (1-5)"],
+                     [[c.report_date.isoformat() if c.report_date else "", bu_names.get(c.business_unit_id, ""),
+                       c.footfall, c.transactions, c.complaints,
+                       float(c.satisfaction_score) if c.satisfaction_score is not None else ""] for c in rows])
+
+    raise HTTPException(400, "tab must be actions/inventory/expenses/documents/staff/customers")
