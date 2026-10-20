@@ -124,7 +124,8 @@ export default function OpsPage() {
 
   async function addEmployee(e) {
     e.preventDefault();
-    if (!empForm.name.trim() || !buId) return;
+    if (!empForm.name.trim()) return;
+    if (!buId) { setError('Select a specific business unit first (not All Business Units)'); return; }
     try {
       await api.createEmployee({ business_unit_id: Number(buId), name: empForm.name.trim(), position: empForm.position || undefined, base_salary: Number(empForm.base_salary) || 0 });
       setEmpForm({ name: '', position: '', base_salary: '' });
@@ -299,7 +300,7 @@ export default function OpsPage() {
         <header className={`${GLASS} px-5 sm:px-6 py-4 flex items-center justify-between flex-wrap gap-4`}>
           <div>
             <h1 className="font-bold text-slate-900 dark:text-slate-100 text-lg">Operations Center</h1>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Action items, inventory, expenses, documents, staff, customers & forecast</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Action items, inventory, purchasing, invoices, HR, expenses, documents, staff, customers & forecast</p>
           </div>
           <div className="flex items-center gap-3 flex-wrap">
             <select value={buId} onChange={(e) => setBuId(e.target.value)} className="text-sm font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2">
