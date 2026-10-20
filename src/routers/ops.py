@@ -24,8 +24,11 @@ from src.models import (
     InventoryItem,
     LicenseDocument,
     Notification,
+    PurchaseOrder,
+    PurchaseOrderLine,
     StaffRecord,
     StockMovement,
+    Supplier,
     User,
 )
 
@@ -296,6 +299,9 @@ class MovementIn(BaseModel):
     movement_type: str  # in/out/adjustment
     quantity: float
     reason: Optional[str] = None
+    # ERP Phase 3: for "out" movements that are sales, post COGS to the
+    # journal at the item's moving-average cost (Dr 5100 / Cr 1140).
+    post_cogs: bool = False
 
 
 @router.post("/inventory/{item_id}/movements")
@@ -319,7 +325,67 @@ def record_movement(item_id: int, payload: MovementIn, user: User = Depends(get_
     _maybe_notify_low_stock(db, item)
     db.commit()
     db.refresh(item)
+    if payload.post_cogs and payload.movement_type == "out" and (item.unit_cost or 0) > 0:
+        try:
+            from src.routers.accounting import account_by_code, create_entry
+            inv = account_by_code(db, item.business_unit_id, "1140")
+            cogs = account_by_code(db, item.business_unit_id, "5100")
+            if inv and cogs:
+                amount = qty * Decimal(str(item.unit_cost))
+                create_entry(db, item.business_unit_id, date.today(),
+                             f"COGS — {item.name} x{qty}", "inventory", user.id,
+                             [{"account_id": cogs.id, "debit": amount, "credit": 0},
+                              {"account_id": inv.id, "debit": 0, "credit": amount}],
+                             source_id=item.id, post=True)
+                db.commit()
+        except Exception:
+            db.rollback()
     return serialize_inventory_item(item)
+
+
+class TransferIn(BaseModel):
+    to_business_unit_id: int
+    quantity: float
+
+
+@router.post("/inventory/{item_id}/transfer")
+def transfer_stock(item_id: int, payload: TransferIn, user: User = Depends(get_current_user),
+                   db: Session = Depends(get_db)):
+    """Move stock to another BU (matched by item name; created there if new)."""
+    src = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
+    if not src:
+        raise HTTPException(404, "Inventory item not found")
+    bu_scope(user, src.business_unit_id)
+    if payload.to_business_unit_id == src.business_unit_id:
+        raise HTTPException(400, "Source and destination are the same BU")
+    if not db.query(BusinessUnit).filter(BusinessUnit.id == payload.to_business_unit_id).first():
+        raise HTTPException(404, "Destination business unit not found")
+    qty = Decimal(str(payload.quantity))
+    if qty <= 0:
+        raise HTTPException(400, "Quantity must be positive")
+    if (src.current_stock or 0) < qty:
+        raise HTTPException(400, "Not enough stock to transfer")
+    dst = db.query(InventoryItem).filter(
+        InventoryItem.business_unit_id == payload.to_business_unit_id,
+        InventoryItem.name == src.name, InventoryItem.is_active == True).first()  # noqa: E712
+    if not dst:
+        dst = InventoryItem(business_unit_id=payload.to_business_unit_id, name=src.name,
+                            sku=src.sku, category=src.category, unit=src.unit,
+                            current_stock=0, reorder_level=src.reorder_level,
+                            unit_cost=src.unit_cost)
+        db.add(dst)
+        db.flush()
+    src.current_stock = (src.current_stock or 0) - qty
+    dst.current_stock = (dst.current_stock or 0) + qty
+    src.updated_at = dst.updated_at = datetime.utcnow()
+    db.add(StockMovement(item_id=src.id, movement_type="out", quantity=qty,
+                         reason=f"Transfer to BU {payload.to_business_unit_id}", recorded_by_id=user.id))
+    db.add(StockMovement(item_id=dst.id, movement_type="in", quantity=qty,
+                         reason=f"Transfer from BU {src.business_unit_id}", recorded_by_id=user.id))
+    db.commit()
+    db.refresh(dst)
+    return {"ok": True, "destination_item": serialize_inventory_item(dst),
+            "source_stock": float(src.current_stock)}
 
 
 def _maybe_notify_low_stock(db: Session, item: InventoryItem) -> None:
@@ -968,3 +1034,239 @@ def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
                        float(c.satisfaction_score) if c.satisfaction_score is not None else ""] for c in rows])
 
     raise HTTPException(400, "tab must be actions/inventory/expenses/documents/staff/customers")
+
+
+# ================================================================== suppliers & purchasing (ERP Phase 3)
+
+def serialize_supplier(s: Supplier) -> dict:
+    return {
+        "id": s.id, "business_unit_id": s.business_unit_id, "name": s.name,
+        "contact_person": s.contact_person, "phone": s.phone, "email": s.email,
+        "address": s.address, "is_active": s.is_active,
+        "scope": "Group" if s.business_unit_id is None else (s.business_unit.name if s.business_unit else "BU"),
+    }
+
+
+class SupplierIn(BaseModel):
+    name: str = Field(min_length=1, max_length=150)
+    business_unit_id: Optional[int] = None  # None = group-shared
+    contact_person: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+
+
+@router.get("/suppliers")
+def list_suppliers(business_unit_id: Optional[int] = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    q = db.query(Supplier).filter(Supplier.is_active == True)  # noqa: E712
+    if user.role == "CEO":
+        q = q.filter((Supplier.business_unit_id == user.business_unit_id) | (Supplier.business_unit_id == None))  # noqa: E711
+    elif business_unit_id:
+        q = q.filter((Supplier.business_unit_id == business_unit_id) | (Supplier.business_unit_id == None))  # noqa: E711
+    rows = q.order_by(Supplier.name).all()
+    return {"items": [serialize_supplier(s) for s in rows]}
+
+
+@router.post("/suppliers")
+def create_supplier(payload: SupplierIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.role == "CEO":
+        payload.business_unit_id = user.business_unit_id
+    s = Supplier(**payload.model_dump(), created_by_id=user.id)
+    db.add(s)
+    db.commit()
+    db.refresh(s)
+    return serialize_supplier(s)
+
+
+@router.delete("/suppliers/{supplier_id}")
+def delete_supplier(supplier_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    s = db.query(Supplier).filter(Supplier.id == supplier_id).first()
+    if not s:
+        raise HTTPException(404, "Supplier not found")
+    if s.business_unit_id is not None:
+        bu_scope(user, s.business_unit_id)
+    s.is_active = False
+    db.commit()
+    return {"ok": True}
+
+
+def po_total(po: PurchaseOrder) -> Decimal:
+    return sum((Decimal(str(l.quantity)) * Decimal(str(l.unit_cost)) for l in po.lines), Decimal("0"))
+
+
+def serialize_po(db: Session, po: PurchaseOrder) -> dict:
+    return {
+        "id": po.id, "po_no": po.po_no, "business_unit_id": po.business_unit_id,
+        "bu_name": po.business_unit.name if po.business_unit else None,
+        "supplier_id": po.supplier_id,
+        "supplier_name": po.supplier.name if po.supplier else None,
+        "status": po.status, "order_date": po.order_date.isoformat() if po.order_date else None,
+        "notes": po.notes, "total": float(po_total(po)),
+        "received_at": po.received_at.isoformat() if po.received_at else None,
+        "paid_at": po.paid_at.isoformat() if po.paid_at else None,
+        "lines": [{"id": l.id, "item_name": l.item_name, "inventory_item_id": l.inventory_item_id,
+                   "quantity": float(l.quantity), "unit_cost": float(l.unit_cost),
+                   "line_total": float(Decimal(str(l.quantity)) * Decimal(str(l.unit_cost)))} for l in po.lines],
+    }
+
+
+class POLineIn(BaseModel):
+    item_name: str = Field(min_length=1, max_length=150)
+    inventory_item_id: Optional[int] = None
+    quantity: float = Field(gt=0)
+    unit_cost: float = Field(ge=0)
+
+
+class POIn(BaseModel):
+    business_unit_id: int
+    supplier_id: int
+    order_date: date
+    notes: Optional[str] = None
+    lines: list[POLineIn] = Field(min_length=1)
+
+
+@router.get("/purchase-orders")
+def list_pos(business_unit_id: Optional[int] = None, status: Optional[str] = None,
+             user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.role == "CEO":
+        business_unit_id = user.business_unit_id
+    q = db.query(PurchaseOrder)
+    if business_unit_id:
+        q = q.filter(PurchaseOrder.business_unit_id == business_unit_id)
+    if status:
+        q = q.filter(PurchaseOrder.status == status)
+    rows = q.order_by(PurchaseOrder.order_date.desc(), PurchaseOrder.id.desc()).limit(200).all()
+    return {"items": [serialize_po(db, po) for po in rows]}
+
+
+@router.post("/purchase-orders")
+def create_po(payload: POIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    bu_scope(user, payload.business_unit_id)
+    supplier = db.query(Supplier).filter(Supplier.id == payload.supplier_id, Supplier.is_active == True).first()  # noqa: E712
+    if not supplier:
+        raise HTTPException(404, "Supplier not found")
+    count = db.query(PurchaseOrder).filter(PurchaseOrder.business_unit_id == payload.business_unit_id).count()
+    po = PurchaseOrder(
+        business_unit_id=payload.business_unit_id, supplier_id=payload.supplier_id,
+        po_no=f"PO-{payload.business_unit_id}-{count + 1:04d}", status="draft",
+        order_date=payload.order_date, notes=payload.notes, created_by_id=user.id,
+    )
+    db.add(po)
+    db.flush()
+    for ln in payload.lines:
+        db.add(PurchaseOrderLine(po_id=po.id, item_name=ln.item_name,
+                                 inventory_item_id=ln.inventory_item_id,
+                                 quantity=Decimal(str(ln.quantity)),
+                                 unit_cost=Decimal(str(ln.unit_cost))))
+    db.commit()
+    db.refresh(po)
+    return serialize_po(db, po)
+
+
+def _po_or_404(db: Session, po_id: int) -> PurchaseOrder:
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id).first()
+    if not po:
+        raise HTTPException(404, "Purchase order not found")
+    return po
+
+
+def _post_po_journal(db: Session, po: PurchaseOrder, user_id: int, kind: str) -> None:
+    """kind=receive: Dr 1140 Inventory / Cr 2110 AP. kind=pay: Dr 2110 / Cr 1110."""
+    try:
+        from src.routers.accounting import account_by_code, create_entry
+        total = po_total(po)
+        if total <= 0:
+            return
+        if kind == "receive":
+            dr = account_by_code(db, po.business_unit_id, "1140")
+            cr = account_by_code(db, po.business_unit_id, "2110")
+            desc = f"Goods received {po.po_no} — {po.supplier.name if po.supplier else ''}"
+        else:
+            dr = account_by_code(db, po.business_unit_id, "2110")
+            cr = account_by_code(db, po.business_unit_id, "1110")
+            desc = f"Supplier payment {po.po_no} — {po.supplier.name if po.supplier else ''}"
+        if dr and cr:
+            create_entry(db, po.business_unit_id, date.today(), desc, "purchase",
+                         user_id, [{"account_id": dr.id, "debit": total, "credit": 0},
+                                   {"account_id": cr.id, "debit": 0, "credit": total}],
+                         source_id=po.id, post=True)
+            db.commit()
+    except Exception:
+        db.rollback()
+
+
+@router.post("/purchase-orders/{po_id}/order")
+def order_po(po_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    po = _po_or_404(db, po_id)
+    bu_scope(user, po.business_unit_id)
+    if po.status != "draft":
+        raise HTTPException(400, f"Cannot order a PO in status {po.status}")
+    po.status = "ordered"
+    db.commit()
+    return serialize_po(db, po)
+
+
+@router.post("/purchase-orders/{po_id}/receive")
+def receive_po(po_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Receive goods: stock-in each line at moving-average cost, post AP journal."""
+    po = _po_or_404(db, po_id)
+    bu_scope(user, po.business_unit_id)
+    if po.status not in ("draft", "ordered"):
+        raise HTTPException(400, f"Cannot receive a PO in status {po.status}")
+    for ln in po.lines:
+        item = None
+        if ln.inventory_item_id:
+            item = db.query(InventoryItem).filter(InventoryItem.id == ln.inventory_item_id).first()
+        if item is None:
+            item = db.query(InventoryItem).filter(
+                InventoryItem.business_unit_id == po.business_unit_id,
+                InventoryItem.name == ln.item_name, InventoryItem.is_active == True).first()  # noqa: E712
+        if item is None:
+            item = InventoryItem(business_unit_id=po.business_unit_id, name=ln.item_name,
+                                 current_stock=0, unit_cost=ln.unit_cost)
+            db.add(item)
+            db.flush()
+        ln.inventory_item_id = item.id
+        old_qty = Decimal(str(item.current_stock or 0))
+        old_avg = Decimal(str(item.unit_cost or 0))
+        in_qty = Decimal(str(ln.quantity))
+        in_cost = Decimal(str(ln.unit_cost))
+        new_qty = old_qty + in_qty
+        # Moving (weighted) average cost — the standard valuation formula.
+        item.unit_cost = ((old_qty * old_avg + in_qty * in_cost) / new_qty) if new_qty > 0 else in_cost
+        item.current_stock = new_qty
+        item.updated_at = datetime.utcnow()
+        db.add(StockMovement(item_id=item.id, movement_type="in", quantity=in_qty,
+                             reason=f"PO {po.po_no} received", recorded_by_id=user.id))
+        _maybe_notify_low_stock(db, item)
+    po.status = "received"
+    po.received_at = datetime.utcnow()
+    db.commit()
+    _post_po_journal(db, po, user.id, "receive")
+    db.refresh(po)
+    return serialize_po(db, po)
+
+
+@router.post("/purchase-orders/{po_id}/pay")
+def pay_po(po_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    po = _po_or_404(db, po_id)
+    bu_scope(user, po.business_unit_id)
+    if po.status != "received":
+        raise HTTPException(400, "Only received POs can be paid")
+    po.status = "paid"
+    po.paid_at = datetime.utcnow()
+    db.commit()
+    _post_po_journal(db, po, user.id, "pay")
+    db.refresh(po)
+    return serialize_po(db, po)
+
+
+@router.post("/purchase-orders/{po_id}/cancel")
+def cancel_po(po_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    po = _po_or_404(db, po_id)
+    bu_scope(user, po.business_unit_id)
+    if po.status in ("received", "paid"):
+        raise HTTPException(400, f"Cannot cancel a {po.status} PO")
+    po.status = "cancelled"
+    db.commit()
+    return serialize_po(db, po)

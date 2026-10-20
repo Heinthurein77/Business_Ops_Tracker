@@ -722,3 +722,61 @@ class PostingRule(Base):
     source_field = Column(String(60), nullable=False, index=True)
     debit_account_code = Column(String(20), nullable=False)
     credit_account_code = Column(String(20), nullable=False)
+
+
+# ------------------------------------------------------------------ procurement (ERP Phase 3)
+
+class Supplier(Base):
+    """Vendors. business_unit_id NULL = group-shared supplier."""
+    __tablename__ = "suppliers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=True, index=True)
+    name = Column(String(150), nullable=False)
+    contact_person = Column(String(120), nullable=True)
+    phone = Column(String(40), nullable=True)
+    email = Column(String(150), nullable=True)
+    address = Column(String(300), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+
+
+class PurchaseOrder(Base):
+    """draft -> ordered -> received -> paid (or cancelled).
+
+    Receiving posts Dr Inventory / Cr Accounts Payable; paying posts
+    Dr Accounts Payable / Cr Cash (when the BU has a chart of accounts).
+    """
+    __tablename__ = "purchase_orders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=False, index=True)
+    po_no = Column(String(30), nullable=False, index=True)
+    status = Column(String(20), default="draft", nullable=False, index=True)
+    order_date = Column(Date, nullable=False)
+    notes = Column(String(500), nullable=True)
+    received_at = Column(DateTime, nullable=True)
+    paid_at = Column(DateTime, nullable=True)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+    supplier = relationship("Supplier")
+    lines = relationship("PurchaseOrderLine", back_populates="po", cascade="all, delete-orphan")
+
+
+class PurchaseOrderLine(Base):
+    __tablename__ = "purchase_order_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    po_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=False, index=True)
+    inventory_item_id = Column(Integer, ForeignKey("inventory_items.id"), nullable=True)
+    item_name = Column(String(150), nullable=False)
+    quantity = Column(Numeric(14, 2), nullable=False)
+    unit_cost = Column(Numeric(16, 2), nullable=False)
+
+    po = relationship("PurchaseOrder", back_populates="lines")

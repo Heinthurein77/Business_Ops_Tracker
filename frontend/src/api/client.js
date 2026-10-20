@@ -184,6 +184,17 @@ export const api = {
     method: 'DELETE', credentials: 'include',
   }).then(handle),
   checkDocumentExpiry: () => postJson('/api/ops/documents/check-expiry'),
+  // ---- Procurement (ERP Phase 3) ----
+  listSuppliers: (buId) => getJson(`/api/ops/suppliers${buId ? `?business_unit_id=${buId}` : ''}`),
+  createSupplier: (payload) => postJson('/api/ops/suppliers', payload),
+  deleteSupplier: (id) => fetch(`/api/ops/suppliers/${id}`, { method: 'DELETE', credentials: 'include' }).then(handle),
+  listPOs: (buId) => getJson(`/api/ops/purchase-orders${buId ? `?business_unit_id=${buId}` : ''}`),
+  createPO: (payload) => postJson('/api/ops/purchase-orders', payload),
+  orderPO: (id) => postJson(`/api/ops/purchase-orders/${id}/order`),
+  receivePO: (id) => postJson(`/api/ops/purchase-orders/${id}/receive`),
+  payPO: (id) => postJson(`/api/ops/purchase-orders/${id}/pay`),
+  cancelPO: (id) => postJson(`/api/ops/purchase-orders/${id}/cancel`),
+  transferStock: (itemId, payload) => postJson(`/api/ops/inventory/${itemId}/transfer`, payload),
   monthlyReportUrl: (month) => `/api/ops/monthly-report${month ? `?month=${month}` : ''}`,
   opsExportUrl: (tab, buId) => {
     const q = new URLSearchParams({ tab: tab || 'actions' });

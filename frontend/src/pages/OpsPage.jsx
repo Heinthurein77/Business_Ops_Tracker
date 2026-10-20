@@ -7,6 +7,8 @@ import { GLASS, PAGE_BG } from '../utils/glassTheme';
 const TABS = [
   { key: 'actions', label: 'Action Items' },
   { key: 'inventory', label: 'Inventory' },
+  { key: 'purchasing', label: 'Purchasing' },
+  { key: 'suppliers', label: 'Suppliers' },
   { key: 'expenses', label: 'Expenses' },
   { key: 'documents', label: 'Documents' },
   { key: 'staff', label: 'Staff' },
@@ -20,6 +22,12 @@ const STATUS_BADGE = {
   done: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400',
   approved: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400',
   rejected: 'bg-red-500/10 border-red-500/20 text-red-600 dark:text-red-400',
+  draft: 'bg-slate-500/10 border-slate-500/20 text-slate-600 dark:text-slate-300',
+  ordered: 'bg-sky-500/10 border-sky-500/20 text-sky-600 dark:text-sky-400',
+  received: 'bg-amber-500/10 border-amber-500/20 text-amber-600 dark:text-amber-400',
+  paid: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400',
+  cancelled: 'bg-red-500/10 border-red-500/20 text-red-600 dark:text-red-400',
+  open: 'bg-slate-500/10 border-slate-500/20 text-slate-600 dark:text-slate-300',
 };
 
 function money(v) {
@@ -39,6 +47,7 @@ export default function OpsPage() {
   const [lowCount, setLowCount] = useState(0);
   const [invForm, setInvForm] = useState({ name: '', reorder_level: '', initial_stock: '', unit: 'pcs' });
   const [moveQty, setMoveQty] = useState({});
+  const [transferTo, setTransferTo] = useState({});
 
   const [expenses, setExpenses] = useState([]);
   const [documents, setDocuments] = useState([]);
@@ -47,6 +56,10 @@ export default function OpsPage() {
   const [staff, setStaff] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [forecast, setForecast] = useState(null);
+  const [suppliers, setSuppliers] = useState([]);
+  const [supForm, setSupForm] = useState({ name: '', contact_person: '', phone: '' });
+  const [pos, setPos] = useState([]);
+  const [poForm, setPoForm] = useState({ supplier_id: '', order_date: new Date().toISOString().slice(0, 10), lines: [{ item_name: '', quantity: '', unit_cost: '' }] });
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
@@ -69,12 +82,40 @@ export default function OpsPage() {
       if (tab === 'staff') setStaff((await api.listStaff({ business_unit_id: bu, days: 14 })).items);
       if (tab === 'customers') setCustomers((await api.listCustomers({ business_unit_id: bu, days: 14 })).items);
       if (tab === 'forecast') setForecast(await api.forecast(bu));
+      if (tab === 'suppliers') setSuppliers((await api.listSuppliers(bu)).items);
+      if (tab === 'purchasing') {
+        setPos((await api.listPOs(bu)).items);
+        setSuppliers((await api.listSuppliers(bu)).items);
+      }
     } catch (e) {
       setError(e.message || 'Failed to load');
     }
   }, [tab, buId]);
 
   useEffect(() => { load(); }, [load]);
+
+  async function addSupplier(e) {
+    e.preventDefault();
+    if (!supForm.name.trim()) return;
+    try {
+      await api.createSupplier({ name: supForm.name.trim(), contact_person: supForm.contact_person || undefined, phone: supForm.phone || undefined, business_unit_id: buId ? Number(buId) : undefined });
+      setSupForm({ name: '', contact_person: '', phone: '' });
+      load();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function createPO(e) {
+    e.preventDefault();
+    const lines = poForm.lines.filter((l) => l.item_name.trim()).map((l) => ({ item_name: l.item_name.trim(), quantity: Number(l.quantity) || 0, unit_cost: Number(l.unit_cost) || 0 }));
+    if (!poForm.supplier_id || lines.length === 0 || !buId) { setError('Pick a supplier and add at least one line'); return; }
+    try {
+      await api.createPO({ business_unit_id: Number(buId), supplier_id: Number(poForm.supplier_id), order_date: poForm.order_date, lines });
+      setPoForm({ supplier_id: '', order_date: new Date().toISOString().slice(0, 10), lines: [{ item_name: '', quantity: '', unit_cost: '' }] });
+      setNotice('Purchase order created (draft).');
+      setTimeout(() => setNotice(''), 4000);
+      load();
+    } catch (err) { setError(err.message); }
+  }
 
   async function addAction(e) {
     e.preventDefault();
@@ -108,11 +149,25 @@ export default function OpsPage() {
     } catch (err) { setError(err.message); }
   }
 
-  async function recordMove(item, type) {
+  async function recordMove(item, type, postCogs = false) {
     const qty = Number(moveQty[item.id]);
     if (!qty) return;
-    await api.recordStockMovement(item.id, { movement_type: type, quantity: qty });
+    try {
+      await api.recordStockMovement(item.id, { movement_type: type, quantity: qty, post_cogs: postCogs });
+    } catch (err) { setError(err.message); }
     setMoveQty((m) => ({ ...m, [item.id]: '' }));
+    load();
+  }
+
+  async function transferItem(item) {
+    const qty = Number(moveQty[item.id]);
+    const dest = transferTo[item.id];
+    if (!qty || !dest) { setError('Enter a quantity and pick a destination BU to transfer'); return; }
+    try {
+      await api.transferStock(item.id, { to_business_unit_id: Number(dest), quantity: qty });
+      setNotice(`Transferred ${qty} × ${item.name}.`);
+      setTimeout(() => setNotice(''), 4000);
+    } catch (err) { setError(err.message); }
     load();
   }
 
@@ -238,7 +293,7 @@ export default function OpsPage() {
             <div className="overflow-x-auto">
               <table className="w-full text-sm min-w-[640px]">
                 <thead className="text-left text-xs uppercase tracking-wider text-slate-400 dark:text-slate-500">
-                  <tr><th className="py-2 pr-3">Item</th><th className="py-2 pr-3">BU</th><th className="py-2 pr-3 text-right">Stock</th><th className="py-2 pr-3 text-right">Reorder at</th><th className="py-2">Move stock</th></tr>
+                  <tr><th className="py-2 pr-3">Item</th><th className="py-2 pr-3">BU</th><th className="py-2 pr-3 text-right">Stock</th><th className="py-2 pr-3 text-right">Avg Cost</th><th className="py-2 pr-3 text-right">Stock Value</th><th className="py-2 pr-3 text-right">Reorder at</th><th className="py-2">Move stock</th></tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                   {inventory.map((i) => (
@@ -246,21 +301,98 @@ export default function OpsPage() {
                       <td className="py-2.5 pr-3 font-semibold text-slate-800 dark:text-slate-200">{i.name} {i.is_low && <span className="ml-1 text-[10px] font-bold bg-red-500/10 border border-red-500/20 text-red-600 dark:text-red-400 rounded-full px-2 py-0.5">LOW</span>}</td>
                       <td className="py-2.5 pr-3 text-slate-500 dark:text-slate-400">{buName(i.business_unit_id)}</td>
                       <td className="py-2.5 pr-3 text-right tabular-nums font-semibold">{i.current_stock} {i.unit}</td>
+                      <td className="py-2.5 pr-3 text-right tabular-nums text-slate-500">{i.unit_cost ? money(i.unit_cost) : '—'}</td>
+                      <td className="py-2.5 pr-3 text-right tabular-nums text-slate-500">{i.unit_cost ? money(i.current_stock * i.unit_cost) : '—'}</td>
                       <td className="py-2.5 pr-3 text-right tabular-nums text-slate-500">{i.reorder_level}</td>
                       <td className="py-2.5">
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-1.5 flex-wrap">
                           <input type="number" value={moveQty[i.id] || ''} onChange={(e) => setMoveQty((m) => ({ ...m, [i.id]: e.target.value }))} placeholder="Qty" className="w-20 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1.5 text-xs" />
                           <button onClick={() => recordMove(i, 'in')} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">+ In</button>
                           <button onClick={() => recordMove(i, 'out')} className="text-xs font-semibold text-red-500 hover:underline">− Out</button>
+                          <button onClick={() => recordMove(i, 'out', true)} className="text-xs font-semibold text-violet-600 dark:text-violet-400 hover:underline" title="Stock out as a sale — posts COGS to the journal at average cost">Sold (COGS)</button>
+                          <select value={transferTo[i.id] || ''} onChange={(e) => setTransferTo((t) => ({ ...t, [i.id]: e.target.value }))} className="text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-1.5 py-1.5">
+                            <option value="">Transfer to…</option>
+                            {bus.filter((b) => b.bu_id !== i.business_unit_id).map((b) => <option key={b.bu_id} value={b.bu_id}>{b.bu_name}</option>)}
+                          </select>
+                          <button onClick={() => transferItem(i)} className="text-xs font-semibold text-sky-600 dark:text-sky-400 hover:underline">Transfer</button>
                           <button onClick={async () => { await api.deleteInventoryItem(i.id); load(); }} className="text-xs font-semibold text-slate-400 hover:underline">Remove</button>
                         </div>
                       </td>
                     </tr>
                   ))}
-                  {inventory.length === 0 && <tr><td colSpan={5} className="py-8 text-center text-slate-400">No inventory items yet</td></tr>}
+                  {inventory.length === 0 && <tr><td colSpan={7} className="py-8 text-center text-slate-400">No inventory items yet</td></tr>}
                 </tbody>
               </table>
             </div>
+          </section>
+        )}
+
+        {tab === 'purchasing' && (
+          <section className={`${GLASS} p-6`}>
+            <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-4">New Purchase Order</h2>
+            <form onSubmit={createPO} className="space-y-3 mb-6">
+              <div className="flex flex-wrap gap-3">
+                <select value={poForm.supplier_id} onChange={(e) => setPoForm({ ...poForm, supplier_id: e.target.value })} className="flex-1 min-w-[200px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                  <option value="">Select supplier…</option>
+                  {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.scope})</option>)}
+                </select>
+                <input type="date" value={poForm.order_date} onChange={(e) => setPoForm({ ...poForm, order_date: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+              </div>
+              {poForm.lines.map((l, idx) => (
+                <div key={idx} className="flex flex-wrap gap-2">
+                  <input value={l.item_name} onChange={(e) => { const lines = [...poForm.lines]; lines[idx].item_name = e.target.value; setPoForm({ ...poForm, lines }); }} placeholder="Item name" className="flex-1 min-w-[180px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3.5 py-2.5 text-sm" />
+                  <input type="number" value={l.quantity} onChange={(e) => { const lines = [...poForm.lines]; lines[idx].quantity = e.target.value; setPoForm({ ...poForm, lines }); }} placeholder="Qty" className="w-28 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                  <input type="number" value={l.unit_cost} onChange={(e) => { const lines = [...poForm.lines]; lines[idx].unit_cost = e.target.value; setPoForm({ ...poForm, lines }); }} placeholder="Unit cost" className="w-36 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                </div>
+              ))}
+              <div className="flex items-center justify-between flex-wrap gap-3">
+                <button type="button" onClick={() => setPoForm({ ...poForm, lines: [...poForm.lines, { item_name: '', quantity: '', unit_cost: '' }] })} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">+ Add line</button>
+                <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Create PO</button>
+              </div>
+            </form>
+            <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+              {pos.map((po) => (
+                <li key={po.id} className="py-3">
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">{po.po_no} <span className="font-normal text-slate-400">· {po.supplier_name} · {money(po.total)}</span></p>
+                      <p className="text-xs text-slate-400">{po.order_date}{po.bu_name ? ` · ${po.bu_name}` : ''} · {po.lines.map((l) => `${l.item_name} ×${l.quantity}`).join(', ')}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[po.status] || STATUS_BADGE.open}`}>{po.status}</span>
+                      {po.status === 'draft' && <button onClick={async () => { await api.orderPO(po.id); load(); }} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">Order</button>}
+                      {(po.status === 'draft' || po.status === 'ordered') && <button onClick={async () => { await api.receivePO(po.id); setNotice(`Received ${po.po_no} — stock updated, AP posted.`); setTimeout(() => setNotice(''), 4000); load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Receive</button>}
+                      {po.status === 'received' && <button onClick={async () => { await api.payPO(po.id); load(); }} className="text-xs font-semibold text-violet-600 dark:text-violet-400 hover:underline">Pay</button>}
+                      {(po.status === 'draft' || po.status === 'ordered') && <button onClick={async () => { await api.cancelPO(po.id); load(); }} className="text-xs font-semibold text-red-500 hover:underline">Cancel</button>}
+                    </div>
+                  </div>
+                </li>
+              ))}
+              {pos.length === 0 && <li className="py-8 text-center text-sm text-slate-400">No purchase orders yet</li>}
+            </ul>
+          </section>
+        )}
+
+        {tab === 'suppliers' && (
+          <section className={`${GLASS} p-6`}>
+            <form onSubmit={addSupplier} className="flex flex-wrap gap-3 mb-5">
+              <input value={supForm.name} onChange={(e) => setSupForm({ ...supForm, name: e.target.value })} placeholder="Supplier name" className="flex-1 min-w-[200px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3.5 py-2.5 text-sm" />
+              <input value={supForm.contact_person} onChange={(e) => setSupForm({ ...supForm, contact_person: e.target.value })} placeholder="Contact person" className="w-48 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+              <input value={supForm.phone} onChange={(e) => setSupForm({ ...supForm, phone: e.target.value })} placeholder="Phone" className="w-40 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+              <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Add supplier</button>
+            </form>
+            <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+              {suppliers.map((s) => (
+                <li key={s.id} className="py-3 flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">{s.name} <span className="text-[10px] font-bold uppercase tracking-wide text-slate-400 ml-1">{s.scope}</span></p>
+                    <p className="text-xs text-slate-400">{[s.contact_person, s.phone, s.email].filter(Boolean).join(' · ') || '—'}</p>
+                  </div>
+                  <button onClick={async () => { await api.deleteSupplier(s.id); load(); }} className="text-xs font-semibold text-red-500 hover:underline">Remove</button>
+                </li>
+              ))}
+              {suppliers.length === 0 && <li className="py-8 text-center text-sm text-slate-400">No suppliers yet</li>}
+            </ul>
           </section>
         )}
 
