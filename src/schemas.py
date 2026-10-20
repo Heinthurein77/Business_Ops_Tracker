@@ -131,8 +131,8 @@ class CreateUserRequest(BaseModel):
         # Chairman is deliberately not creatable here — there's exactly one,
         # seeded at boot; adding another is a code change, not a self-service
         # admin action.
-        if value not in ("CEO", "HO"):
-            raise ValueError('role must be "CEO" or "HO"')
+        if value not in ("CEO", "HO", "Accountant"):
+            raise ValueError('role must be "CEO", "HO" or "Accountant"')
         return value
 
 

@@ -292,6 +292,7 @@ export default function ManageUsersPage() {
                 >
                   <option value="CEO">CEO</option>
                   <option value="HO">Head Office Staff</option>
+                  <option value="Accountant">Accountant</option>
                 </select>
               </div>
               {form.role === 'CEO' && (

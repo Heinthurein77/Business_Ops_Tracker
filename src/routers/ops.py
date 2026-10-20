@@ -476,6 +476,12 @@ def review_expense(expense_id: int, payload: ExpenseReviewIn, user: User = Depen
         message=f"{e.title} — Ks {float(e.amount):,.0f}", link="/ceo",
     ))
     db.commit()
+    if payload.decision == "approved":
+        try:
+            from src.routers.accounting import auto_post_expense
+            auto_post_expense(db, e, user.id)
+        except Exception:
+            db.rollback()  # accounting must never break the approval flow
     return serialize_expense(db, e)
 
 

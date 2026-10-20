@@ -190,6 +190,35 @@ export const api = {
     if (buId) q.set('business_unit_id', buId);
     return `/api/ops/export-excel?${q.toString()}`;
   },
+
+  // ---- Accounting (ERP Phase 1) ----
+  accTemplates: () => getJson('/api/accounting/templates'),
+  accProvision: (buId, template) => postJson(`/api/accounting/provision/${buId}?template=${template}`),
+  accCoa: (buId) => getJson(`/api/accounting/coa?business_unit_id=${buId}`),
+  accCreateAccount: (payload) => postJson('/api/accounting/accounts', payload),
+  accUpdateAccount: (id, payload) => fetch(`/api/accounting/accounts/${id}`, {
+    method: 'PATCH', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
+  }).then(handle),
+  accJournal: (buId, params = {}) => {
+    const q = new URLSearchParams({ business_unit_id: buId });
+    if (params.status) q.set('status', params.status);
+    if (params.source) q.set('source', params.source);
+    if (params.period) q.set('period', params.period);
+    return getJson(`/api/accounting/journal?${q.toString()}`);
+  },
+  accCreateJournal: (payload) => postJson('/api/accounting/journal', payload),
+  accPostJournal: (id) => postJson(`/api/accounting/journal/${id}/post`),
+  accReverseJournal: (id) => postJson(`/api/accounting/journal/${id}/reverse`),
+  accDeleteJournal: (id) => fetch(`/api/accounting/journal/${id}`, {
+    method: 'DELETE', credentials: 'include',
+  }).then(handle),
+  accTrialBalance: (buId, period) => getJson(`/api/accounting/trial-balance?business_unit_id=${buId}${period ? `&period=${period}` : ''}`),
+  accLedger: (accountId, period) => getJson(`/api/accounting/ledger?account_id=${accountId}${period ? `&period=${period}` : ''}`),
+  accPL: (buId, period) => getJson(`/api/accounting/reports/pl?business_unit_id=${buId}${period ? `&period=${period}` : ''}`),
+  accBS: (buId, period) => getJson(`/api/accounting/reports/balance-sheet?business_unit_id=${buId}${period ? `&period=${period}` : ''}`),
+  accPeriods: (buId) => getJson(`/api/accounting/periods?business_unit_id=${buId}`),
+  accClosePeriod: (payload) => postJson('/api/accounting/periods/close', payload),
+  accReopenPeriod: (payload) => postJson('/api/accounting/periods/reopen', payload),
 };
 
 export { ApiError };

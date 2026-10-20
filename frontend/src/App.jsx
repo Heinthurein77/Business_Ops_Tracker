@@ -13,6 +13,7 @@ import AdminDashboardPage from './pages/AdminDashboardPage';
 import ComparisonPage from './pages/ComparisonPage';
 import OperationsPage from './pages/OperationsPage';
 import OpsPage from './pages/OpsPage';
+import AccountingPage from './pages/AccountingPage';
 import ActivityDashboardPage from './pages/ActivityDashboardPage';
 import HealthDashboardPage from './pages/HealthDashboardPage';
 import ReportLogsPage from './pages/ReportLogsPage';
@@ -99,6 +100,14 @@ export default function App() {
             element={
               <ProtectedRoute roles={['Chairman', 'HO']}>
                 <ComparisonPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/accounting"
+            element={
+              <ProtectedRoute roles={['Chairman', 'HO', 'Accountant']}>
+                <AccountingPage />
               </ProtectedRoute>
             }
           />

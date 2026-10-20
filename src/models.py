@@ -80,7 +80,7 @@ class User(Base):
             postgresql_where=text("role = 'CEO' AND is_active"),
             sqlite_where=text("role = 'CEO' AND is_active = 1"),
         ),
-        _pg_check("role IN ('Chairman', 'HO', 'CEO')", name="ck_users_role"),
+        _pg_check("role IN ('Chairman', 'HO', 'CEO', 'Accountant')", name="ck_users_role"),
         _pg_check("(role = 'CEO') = (business_unit_id IS NOT NULL)", name="ck_users_ceo_has_bu"),
         _pg_check("username = lower(username)", name="ck_users_username_lower"),
     )
@@ -89,7 +89,7 @@ class User(Base):
     username = Column(String(80), unique=True, nullable=False, index=True)
     hashed_password = Column(String(255), nullable=False)
     full_name = Column(String(150), nullable=True)
-    role = Column(String(20), nullable=False)  # Chairman | HO | CEO
+    role = Column(String(20), nullable=False)  # Chairman | HO | CEO | Accountant
     business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=True)
     require_password_change = Column(Boolean, default=False, nullable=False)
     # Only meaningful for role == "CEO" — Chairman/HO have no profile to
@@ -620,3 +620,105 @@ class LicenseDocument(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
+
+
+# ------------------------------------------------------------------ accounting (ERP Phase 1)
+
+class Account(Base):
+    """Chart of Accounts entry (per business unit).
+
+    Codes follow one group standard so consolidation can sum by code.
+    Header accounts group children and cannot be posted to.
+    """
+    __tablename__ = "accounts"
+    __table_args__ = (
+        UniqueConstraint("business_unit_id", "code", name="uq_account_bu_code"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    code = Column(String(20), nullable=False, index=True)
+    name = Column(String(150), nullable=False)
+    account_type = Column(String(20), nullable=False)  # asset/liability/equity/income/expense
+    parent_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
+    is_header = Column(Boolean, default=False, nullable=False)
+    is_system = Column(Boolean, default=False, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+    parent = relationship("Account", remote_side=[id])
+
+
+class JournalEntry(Base):
+    """Double-entry journal header. Posted entries are immutable; corrections
+    are made with a reversal entry (reversal_of_id points back)."""
+    __tablename__ = "journal_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    entry_no = Column(String(30), nullable=False, index=True)  # JV-YYYY-MM-NNN per BU
+    entry_date = Column(Date, nullable=False, index=True)
+    description = Column(String(500), nullable=True)
+    reference = Column(String(100), nullable=True)
+    source = Column(String(30), default="manual", nullable=False, index=True)
+    # manual / daily_financial / expense / opening / reversal
+    source_id = Column(Integer, nullable=True)
+    status = Column(String(20), default="draft", nullable=False, index=True)  # draft / posted
+    reversal_of_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)
+    reversed_by_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    posted_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    posted_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+    lines = relationship("JournalLine", back_populates="entry", cascade="all, delete-orphan")
+
+
+class JournalLine(Base):
+    __tablename__ = "journal_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    entry_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=False, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False, index=True)
+    debit = Column(Numeric(16, 2), default=0, nullable=False)
+    credit = Column(Numeric(16, 2), default=0, nullable=False)
+    memo = Column(String(255), nullable=True)
+
+    entry = relationship("JournalEntry", back_populates="lines")
+    account = relationship("Account")
+
+
+class FiscalPeriod(Base):
+    """One row per BU per month; posting into a closed period is rejected."""
+    __tablename__ = "fiscal_periods"
+    __table_args__ = (
+        UniqueConstraint("business_unit_id", "period", name="uq_fiscal_bu_period"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    period = Column(String(7), nullable=False, index=True)  # YYYY-MM
+    status = Column(String(10), default="open", nullable=False)  # open / closed
+    closed_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+
+    business_unit = relationship("BusinessUnit")
+
+
+class PostingRule(Base):
+    """Maps an auto-posting source field to debit/credit account codes.
+
+    business_unit_id NULL = group default; a BU-specific row wins.
+    """
+    __tablename__ = "posting_rules"
+    __table_args__ = (
+        UniqueConstraint("business_unit_id", "source_field", name="uq_posting_rule"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=True, index=True)
+    source_field = Column(String(60), nullable=False, index=True)
+    debit_account_code = Column(String(20), nullable=False)
+    credit_account_code = Column(String(20), nullable=False)

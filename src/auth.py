@@ -58,6 +58,8 @@ _PROFILE_SETUP_EXEMPT_PATHS = {
 def role_home_path(role: str) -> str:
     if role == "CEO":
         return "/ceo"
+    if role == "Accountant":
+        return "/accounting"
     if role in ("Chairman", "HO"):
         return "/admin"
     return "/login"

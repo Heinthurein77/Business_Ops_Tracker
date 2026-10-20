@@ -1048,4 +1048,13 @@ def submit_report(
     audit_detail = build_resubmit_audit_detail(report_date, changes)
     log_audit(db, user, "DAILY_REPORT_SUBMITTED", audit_detail, request)
 
+    # ERP Phase 1: auto-post the day's revenue to the journal (no-op until
+    # the BU's chart of accounts is provisioned). Never break submission.
+    try:
+        from src.routers.accounting import auto_post_daily_financial
+        db.refresh(financial)
+        auto_post_daily_financial(db, financial, user.id)
+    except Exception:
+        db.rollback()
+
     return {"ok": True}
