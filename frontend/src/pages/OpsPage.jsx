@@ -163,22 +163,22 @@ export default function OpsPage() {
         <header className={`${GLASS} px-5 sm:px-6 py-4 flex items-center justify-between flex-wrap gap-4`}>
           <div>
             <h1 className="font-bold text-slate-900 dark:text-slate-100 text-lg">Operations Center</h1>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Action items, inventory, expenses, staff, customers & forecast</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Action items, inventory, expenses, documents, staff, customers & forecast</p>
           </div>
           <div className="flex items-center gap-3 flex-wrap">
             <select value={buId} onChange={(e) => setBuId(e.target.value)} className="text-sm font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2">
               <option value="">All Business Units</option>
               {bus.map((b) => <option key={b.bu_id} value={b.bu_id}>{b.bu_name}</option>)}
             </select>
-            <button onClick={remind} className="text-xs font-semibold bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 px-3.5 py-2 rounded-lg hover:bg-amber-500/20 transition-colors">
+            <button onClick={remind} className="whitespace-nowrap text-xs font-semibold bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 px-3.5 py-2 rounded-lg hover:bg-amber-500/20 transition-colors">
               Remind missing reports
             </button>
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 flex-wrap">
               <input type="month" value={reportMonth} onChange={(e) => setReportMonth(e.target.value)} className="text-xs font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2.5 py-2" />
-              <a href={api.monthlyReportUrl(reportMonth)} className="text-xs font-semibold bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 px-3.5 py-2 rounded-lg hover:opacity-90 transition-opacity">
+              <a href={api.monthlyReportUrl(reportMonth)} className="whitespace-nowrap text-xs font-semibold bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 px-3.5 py-2 rounded-lg hover:opacity-90 transition-opacity">
                 Monthly report (PDF)
               </a>
-              <a href={api.opsExportUrl(tab === 'forecast' ? 'actions' : tab, buId)} className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-2 rounded-lg transition-colors">
+              <a href={api.opsExportUrl(tab === 'forecast' ? 'actions' : tab, buId)} className="whitespace-nowrap text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-2 rounded-lg transition-colors">
                 Export Excel
               </a>
             </div>
