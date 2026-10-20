@@ -22,6 +22,7 @@ from src.models import (
     DailyFinancial,
     ExpenseRequest,
     InventoryItem,
+    LicenseDocument,
     Notification,
     StaffRecord,
     StockMovement,
@@ -310,9 +311,39 @@ def record_movement(item_id: int, payload: MovementIn, user: User = Depends(get_
     item.updated_at = datetime.utcnow()
     db.add(StockMovement(item_id=item.id, movement_type=payload.movement_type,
                          quantity=qty, reason=payload.reason, recorded_by_id=user.id))
+    _maybe_notify_low_stock(db, item)
     db.commit()
     db.refresh(item)
     return serialize_inventory_item(item)
+
+
+def _maybe_notify_low_stock(db: Session, item: InventoryItem) -> None:
+    """Alert the BU's CEO + all Chairman/HO when stock hits the reorder level.
+
+    Throttled: at most one alert per item per 24h so repeated movements while
+    low don't spam the notification center.
+    """
+    stock = float(item.current_stock or 0)
+    reorder = float(item.reorder_level or 0)
+    if reorder <= 0 or stock > reorder:
+        return
+    if item.low_notified_at and item.low_notified_at > datetime.utcnow() - timedelta(hours=24):
+        return
+    bu = db.query(BusinessUnit).filter(BusinessUnit.id == item.business_unit_id).first()
+    bu_name = bu.name if bu else f"BU {item.business_unit_id}"
+    title = f"Low stock: {item.name} ({bu_name})"
+    message = f"Stock {stock:g} {item.unit or ''} at or below reorder level {reorder:g}."
+    admins = db.query(User).filter(User.role.in_(["Chairman", "HO"])).all()
+    ceos = db.query(User).filter(User.role == "CEO", User.business_unit_id == item.business_unit_id).all()
+    seen = set()
+    for u in admins + ceos:
+        if u.id in seen:
+            continue
+        seen.add(u.id)
+        db.add(Notification(user_id=u.id, type="low_stock",
+                            title=title, message=message,
+                            link="/admin/operations-center"))
+    item.low_notified_at = datetime.utcnow()
 
 
 @router.get("/inventory/{item_id}/movements")
@@ -575,3 +606,247 @@ def forecast(business_unit_id: Optional[int] = None, user: User = Depends(get_cu
         "daily_avg_revenue": round(mtd_revenue / days_elapsed, 2) if days_elapsed else 0,
         "daily_avg_cash_flow": round(mtd_cash_flow / days_elapsed, 2) if days_elapsed else 0,
     }
+
+
+# ---------------------------------------------------------------- licenses & documents
+
+def serialize_document(db: Session, d: LicenseDocument) -> dict:
+    bu = db.query(BusinessUnit).filter(BusinessUnit.id == d.business_unit_id).first()
+    days_left = (d.expiry_date - date.today()).days if d.expiry_date else None
+    return {
+        "id": d.id,
+        "business_unit_id": d.business_unit_id,
+        "bu_name": bu.name if bu else None,
+        "title": d.title,
+        "document_type": d.document_type,
+        "issue_date": d.issue_date.isoformat() if d.issue_date else None,
+        "expiry_date": d.expiry_date.isoformat() if d.expiry_date else None,
+        "days_left": days_left,
+        "notes": d.notes,
+        "created_at": d.created_at.isoformat() if d.created_at else None,
+    }
+
+
+class DocumentIn(BaseModel):
+    business_unit_id: Optional[int] = None
+    title: str = Field(min_length=1, max_length=255)
+    document_type: str = "license"
+    issue_date: Optional[date] = None
+    expiry_date: date
+    notes: Optional[str] = None
+
+
+@router.get("/documents")
+def list_documents(business_unit_id: Optional[int] = None, expiring_soon: bool = False,
+                   user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    bu_id = bu_scope(user, business_unit_id)
+    q = db.query(LicenseDocument)
+    if bu_id is not None:
+        q = q.filter(LicenseDocument.business_unit_id == bu_id)
+    rows = q.order_by(LicenseDocument.expiry_date.asc()).all()
+    items = [serialize_document(db, d) for d in rows]
+    if expiring_soon:
+        items = [i for i in items if i["days_left"] is not None and i["days_left"] <= 30]
+    return {"items": items, "count": len(items)}
+
+
+@router.post("/documents")
+def create_document(payload: DocumentIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    bu_id = bu_scope(user, payload.business_unit_id)
+    if bu_id is None:
+        raise HTTPException(400, "business_unit_id is required")
+    d = LicenseDocument(
+        business_unit_id=bu_id, title=payload.title,
+        document_type=payload.document_type or "license",
+        issue_date=payload.issue_date, expiry_date=payload.expiry_date,
+        notes=payload.notes, created_by_id=user.id,
+    )
+    db.add(d)
+    db.commit()
+    db.refresh(d)
+    return serialize_document(db, d)
+
+
+@router.delete("/documents/{document_id}")
+def delete_document(document_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    d = db.query(LicenseDocument).filter(LicenseDocument.id == document_id).first()
+    if not d:
+        raise HTTPException(404, "Document not found")
+    bu_scope(user, d.business_unit_id)
+    db.delete(d)
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/documents/check-expiry")
+def check_document_expiry(days: int = 30, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Notify each BU's CEO + all Chairman/HO about documents expiring within
+    `days`. Throttled per document to one alert per 7 days."""
+    today = date.today()
+    horizon = today + timedelta(days=days)
+    docs = db.query(LicenseDocument).filter(
+        LicenseDocument.expiry_date >= today, LicenseDocument.expiry_date <= horizon).all()
+    admins = db.query(User).filter(User.role.in_(["Chairman", "HO"]), User.is_active == True).all()  # noqa: E712
+    sent = 0
+    for d in docs:
+        if d.expiry_notified_at and d.expiry_notified_at > datetime.utcnow() - timedelta(days=7):
+            continue
+        bu = db.query(BusinessUnit).filter(BusinessUnit.id == d.business_unit_id).first()
+        bu_name = bu.name if bu else f"BU {d.business_unit_id}"
+        days_left = (d.expiry_date - today).days
+        title = f"Document expiring: {d.title} ({bu_name})"
+        message = f"{d.document_type} expires in {days_left} days ({d.expiry_date.isoformat()})."
+        ceos = db.query(User).filter(User.role == "CEO", User.business_unit_id == d.business_unit_id, User.is_active == True).all()  # noqa: E712
+        seen = set()
+        for u in admins + ceos:
+            if u.id in seen:
+                continue
+            seen.add(u.id)
+            db.add(Notification(user_id=u.id, type="document_expiry",
+                                title=title, message=message, link="/admin/operations-center"))
+            sent += 1
+        d.expiry_notified_at = datetime.utcnow()
+    db.commit()
+    return {"checked": len(docs), "notified": sent}
+
+
+# ---------------------------------------------------------------- monthly chairman PDF report
+
+@router.get("/monthly-report")
+def monthly_report(month: Optional[str] = None, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """One-page-per-BU monthly summary PDF for the Chairman (admin roles only).
+
+    `month` format YYYY-MM; defaults to the current month.
+    """
+    from io import BytesIO
+
+    from fastapi.responses import StreamingResponse
+    from sqlalchemy import func
+
+    today = date.today()
+    if month:
+        try:
+            y, m = month.split("-")
+            month_start = date(int(y), int(m), 1)
+        except Exception:
+            raise HTTPException(400, "month must be YYYY-MM")
+    else:
+        month_start = date(today.year, today.month, 1)
+    import calendar as _cal
+    month_end = date(month_start.year, month_start.month, _cal.monthrange(month_start.year, month_start.month)[1])
+    days_in_month = (month_end - month_start).days + 1
+
+    from src.models import MonthlyTarget
+
+    fin = (db.query(DailyFinancial.business_unit_id,
+                    func.coalesce(func.sum(DailyFinancial.revenue), 0),
+                    func.coalesce(func.sum(DailyFinancial.cash_flow), 0),
+                    func.count(func.distinct(DailyFinancial.report_date)))
+           .filter(DailyFinancial.report_date >= month_start, DailyFinancial.report_date <= month_end)
+           .group_by(DailyFinancial.business_unit_id).all())
+    fin_map = {row[0]: (float(row[1]), float(row[2]), int(row[3])) for row in fin}
+    targets = {t.business_unit_id: t for t in db.query(MonthlyTarget).filter(MonthlyTarget.target_month == month_start).all()}
+    bus = db.query(BusinessUnit).order_by(BusinessUnit.name).all()
+
+    rows = []
+    for bu in bus:
+        rev, cf, rep_days = fin_map.get(bu.id, (0.0, 0.0, 0))
+        t = targets.get(bu.id)
+        trev = float(t.monthly_revenue_target) if t and t.monthly_revenue_target else 0.0
+        ach = (rev / trev * 100) if trev else None
+        rows.append({"name": bu.name, "revenue": rev, "cash_flow": cf,
+                     "reports": rep_days, "target": trev, "ach": ach})
+
+    totals = {
+        "revenue": sum(r["revenue"] for r in rows),
+        "cash_flow": sum(r["cash_flow"] for r in rows),
+        "target": sum(r["target"] for r in rows),
+    }
+    totals["ach"] = (totals["revenue"] / totals["target"] * 100) if totals["target"] else None
+
+    # Alert data
+    low_items = [i for i in db.query(InventoryItem).filter(InventoryItem.is_active == True).all()  # noqa: E712
+                 if float(i.current_stock or 0) <= float(i.reorder_level or 0) and float(i.reorder_level or 0) > 0]
+    pending_expenses = db.query(ExpenseRequest).filter(ExpenseRequest.status == "pending").count()
+    expiring_docs = [d for d in db.query(LicenseDocument).all()
+                     if d.expiry_date and 0 <= (d.expiry_date - today).days <= 30]
+
+    from fpdf import FPDF
+
+    def t(text):
+        """Strip characters the core latin-1 PDF font can't render."""
+        return (text or "").encode("latin-1", errors="replace").decode("latin-1")
+
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=16)
+    pdf.add_page()
+    W = pdf.w - 20
+
+    pdf.set_font("helvetica", "B", 18)
+    pdf.cell(W, 10, "Business Operations - Monthly Report", ln=1)
+    pdf.set_font("helvetica", "", 11)
+    pdf.set_text_color(100, 100, 100)
+    label = month_start.strftime("%B %Y")
+    pdf.cell(W, 6, f"{label}  |  Generated {today.isoformat()}", ln=1)
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(4)
+
+    def money(v):
+        return f"Ks {v:,.0f}"
+
+    pdf.set_font("helvetica", "B", 13)
+    pdf.cell(W, 8, "Portfolio Summary", ln=1)
+    pdf.set_font("helvetica", "", 11)
+    summary = [
+        ("Total revenue", money(totals["revenue"])),
+        ("Total cash flow", money(totals["cash_flow"])),
+        ("Revenue target", money(totals["target"]) if totals["target"] else "-"),
+        ("Overall achievement", f"{totals['ach']:.1f}%" if totals["ach"] is not None else "-"),
+        ("Business units", str(len(rows))),
+    ]
+    for k, v in summary:
+        pdf.cell(60, 6.5, k)
+        pdf.cell(0, 6.5, v, ln=1)
+    pdf.ln(3)
+
+    pdf.set_font("helvetica", "B", 13)
+    pdf.cell(W, 8, "Business Unit Performance", ln=1)
+    headers = [("BU", 52), ("Revenue", 30), ("Cash Flow", 30), ("Target", 30), ("Ach. %", 18), ("Reports", 20)]
+    pdf.set_font("helvetica", "B", 10)
+    for h, w in headers:
+        pdf.cell(w, 7, h, border=1)
+    pdf.ln()
+    pdf.set_font("helvetica", "", 10)
+    for r in sorted(rows, key=lambda x: -(x["ach"] or 0)):
+        vals = [t(r["name"][:26]), f"{r['revenue']:,.0f}", f"{r['cash_flow']:,.0f}",
+                f"{r['target']:,.0f}" if r["target"] else "-",
+                f"{r['ach']:.0f}%" if r["ach"] is not None else "-",
+                f"{r['reports']}/{days_in_month}"]
+        for (_, w), v in zip(headers, vals):
+            pdf.cell(w, 6.5, v, border=1)
+        pdf.ln()
+    pdf.ln(3)
+
+    pdf.set_font("helvetica", "B", 13)
+    pdf.cell(W, 8, "Alerts", ln=1)
+    pdf.set_font("helvetica", "", 11)
+    alerts = []
+    no_report = [r["name"] for r in rows if r["reports"] == 0]
+    if no_report:
+        alerts.append(f"No reports this month: {', '.join(no_report)}")
+    if low_items:
+        names = ", ".join(f"{i.name}" for i in low_items[:8])
+        alerts.append(f"Low stock items ({len(low_items)}): {names}")
+    if pending_expenses:
+        alerts.append(f"Expense requests pending approval: {pending_expenses}")
+    for d in expiring_docs:
+        alerts.append(f"Document expiring soon: {d.title} - {d.expiry_date.isoformat()}")
+    if not alerts:
+        alerts.append("No alerts.")
+    for a in alerts:
+        pdf.multi_cell(W, 6, t(f"- {a}"))
+
+    buf = BytesIO(pdf.output())
+    filename = f"monthly_report_{month_start.strftime('%Y-%m')}.pdf"
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f'attachment; filename="{filename}"'})

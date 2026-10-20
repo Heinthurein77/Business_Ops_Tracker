@@ -171,6 +171,20 @@ export const api = {
     return getJson(`/api/ops/customers${query ? `?${query}` : ''}`);
   },
   forecast: (businessUnitId) => getJson(`/api/ops/forecast${businessUnitId ? `?business_unit_id=${businessUnitId}` : ''}`),
+
+  listDocuments: (params = {}) => {
+    const q = new URLSearchParams();
+    if (params.business_unit_id) q.set('business_unit_id', params.business_unit_id);
+    if (params.expiring_soon) q.set('expiring_soon', 'true');
+    const query = q.toString();
+    return getJson(`/api/ops/documents${query ? `?${query}` : ''}`);
+  },
+  createDocument: (payload) => postJson('/api/ops/documents', payload),
+  deleteDocument: (id) => fetch(`/api/ops/documents/${id}`, {
+    method: 'DELETE', credentials: 'include',
+  }).then(handle),
+  checkDocumentExpiry: () => postJson('/api/ops/documents/check-expiry'),
+  monthlyReportUrl: (month) => `/api/ops/monthly-report${month ? `?month=${month}` : ''}`,
 };
 
 export { ApiError };

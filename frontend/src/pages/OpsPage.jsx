@@ -8,6 +8,7 @@ const TABS = [
   { key: 'actions', label: 'Action Items' },
   { key: 'inventory', label: 'Inventory' },
   { key: 'expenses', label: 'Expenses' },
+  { key: 'documents', label: 'Documents' },
   { key: 'staff', label: 'Staff' },
   { key: 'customers', label: 'Customers' },
   { key: 'forecast', label: 'Forecast' },
@@ -40,6 +41,9 @@ export default function OpsPage() {
   const [moveQty, setMoveQty] = useState({});
 
   const [expenses, setExpenses] = useState([]);
+  const [documents, setDocuments] = useState([]);
+  const [docForm, setDocForm] = useState({ title: '', document_type: 'license', expiry_date: '', notes: '' });
+  const [reportMonth, setReportMonth] = useState(new Date().toISOString().slice(0, 7));
   const [staff, setStaff] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [forecast, setForecast] = useState(null);
@@ -61,6 +65,7 @@ export default function OpsPage() {
         setLowCount(d.low_count);
       }
       if (tab === 'expenses') setExpenses((await api.listExpenses({ business_unit_id: bu })).items);
+      if (tab === 'documents') setDocuments((await api.listDocuments({ business_unit_id: bu })).items);
       if (tab === 'staff') setStaff((await api.listStaff({ business_unit_id: bu, days: 14 })).items);
       if (tab === 'customers') setCustomers((await api.listCustomers({ business_unit_id: bu, days: 14 })).items);
       if (tab === 'forecast') setForecast(await api.forecast(bu));
@@ -122,6 +127,33 @@ export default function OpsPage() {
     setTimeout(() => setNotice(''), 5000);
   }
 
+  async function addDocument(e) {
+    e.preventDefault();
+    if (!docForm.title.trim() || !docForm.expiry_date || !buId) {
+      setError('Pick a business unit, enter a title and an expiry date');
+      return;
+    }
+    try {
+      await api.createDocument({
+        business_unit_id: Number(buId),
+        title: docForm.title.trim(),
+        document_type: docForm.document_type,
+        expiry_date: docForm.expiry_date,
+        notes: docForm.notes || undefined,
+      });
+      setDocForm({ title: '', document_type: 'license', expiry_date: '', notes: '' });
+      load();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function checkExpiry() {
+    try {
+      const d = await api.checkDocumentExpiry();
+      setNotice(`Expiry check done — ${d.checked} document(s) expiring soon, ${d.notified} notification(s) sent.`);
+      setTimeout(() => setNotice(''), 5000);
+    } catch (err) { setError(err.message); }
+  }
+
   const buName = (id) => bus.find((b) => b.bu_id === id)?.bu_name || `BU ${id}`;
 
   return (
@@ -141,6 +173,12 @@ export default function OpsPage() {
             <button onClick={remind} className="text-xs font-semibold bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 px-3.5 py-2 rounded-lg hover:bg-amber-500/20 transition-colors">
               Remind missing reports
             </button>
+            <div className="flex items-center gap-1.5">
+              <input type="month" value={reportMonth} onChange={(e) => setReportMonth(e.target.value)} className="text-xs font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2.5 py-2" />
+              <a href={api.monthlyReportUrl(reportMonth)} className="text-xs font-semibold bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 px-3.5 py-2 rounded-lg hover:opacity-90 transition-opacity">
+                Monthly report (PDF)
+              </a>
+            </div>
           </div>
         </header>
 
@@ -152,6 +190,7 @@ export default function OpsPage() {
             <button key={t.key} onClick={() => setTab(t.key)} className={`text-xs font-semibold px-3.5 py-1.5 rounded-md transition-colors whitespace-nowrap ${tab === t.key ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300'}`}>
               {t.label}
               {t.key === 'inventory' && lowCount > 0 && <span className="ml-1.5 text-[10px] font-bold bg-red-500 text-white rounded-full px-1.5 py-0.5">{lowCount}</span>}
+              {t.key === 'documents' && documents.filter((d) => d.days_left !== null && d.days_left <= 30).length > 0 && <span className="ml-1.5 text-[10px] font-bold bg-red-500 text-white rounded-full px-1.5 py-0.5">{documents.filter((d) => d.days_left !== null && d.days_left <= 30).length}</span>}
               {t.key === 'expenses' && expenses.filter((e) => e.status === 'pending').length > 0 && <span className="ml-1.5 text-[10px] font-bold bg-amber-500 text-white rounded-full px-1.5 py-0.5">{expenses.filter((e) => e.status === 'pending').length}</span>}
             </button>
           ))}
@@ -242,6 +281,54 @@ export default function OpsPage() {
               ))}
               {expenses.length === 0 && <li className="py-8 text-center text-sm text-slate-400">No expense requests</li>}
             </ul>
+          </section>
+        )}
+
+        {tab === 'documents' && (
+          <section className={`${GLASS} p-6`}>
+            <form onSubmit={addDocument} className="flex flex-wrap gap-3 mb-5">
+              <input value={docForm.title} onChange={(e) => setDocForm({ ...docForm, title: e.target.value })} placeholder="Document title (select a BU first)" className="flex-1 min-w-[200px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
+              <select value={docForm.document_type} onChange={(e) => setDocForm({ ...docForm, document_type: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                <option value="license">License</option>
+                <option value="contract">Contract</option>
+                <option value="permit">Permit</option>
+                <option value="other">Other</option>
+              </select>
+              <input type="date" value={docForm.expiry_date} onChange={(e) => setDocForm({ ...docForm, expiry_date: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+              <input value={docForm.notes} onChange={(e) => setDocForm({ ...docForm, notes: e.target.value })} placeholder="Notes (optional)" className="flex-1 min-w-[160px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3.5 py-2.5 text-sm" />
+              <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Add</button>
+            </form>
+            <div className="flex justify-end mb-3">
+              <button onClick={checkExpiry} className="text-xs font-semibold bg-red-500/10 border border-red-500/20 text-red-600 dark:text-red-400 px-3.5 py-2 rounded-lg hover:bg-red-500/20 transition-colors">
+                Send expiry alerts
+              </button>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm min-w-[560px]">
+                <thead className="text-left text-xs uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                  <tr><th className="py-2 pr-3">Document</th><th className="py-2 pr-3">Type</th><th className="py-2 pr-3">BU</th><th className="py-2 pr-3 text-right">Expires</th><th className="py-2 text-right">Status</th></tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {documents.map((d) => (
+                    <tr key={d.id}>
+                      <td className="py-2.5 pr-3 font-semibold text-slate-800 dark:text-slate-200">{d.title}
+                        {d.notes && <span className="block text-xs font-normal text-slate-400">{d.notes}</span>}
+                      </td>
+                      <td className="py-2.5 pr-3 text-slate-500 dark:text-slate-400 capitalize">{d.document_type}</td>
+                      <td className="py-2.5 pr-3 text-slate-500 dark:text-slate-400">{d.bu_name}</td>
+                      <td className="py-2.5 pr-3 text-right tabular-nums">{d.expiry_date}</td>
+                      <td className="py-2.5 text-right">
+                        {d.days_left !== null && d.days_left < 0 && <span className="text-[10px] font-bold bg-red-500 text-white rounded-full px-2 py-0.5">EXPIRED</span>}
+                        {d.days_left !== null && d.days_left >= 0 && d.days_left <= 30 && <span className="text-[10px] font-bold bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 rounded-full px-2 py-0.5">{d.days_left}d left</span>}
+                        {(d.days_left === null || d.days_left > 30) && <span className="text-[10px] font-bold bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400 rounded-full px-2 py-0.5">OK</span>}
+                        <button onClick={async () => { await api.deleteDocument(d.id); load(); }} className="ml-2 text-xs font-semibold text-slate-400 hover:text-red-500">Remove</button>
+                      </td>
+                    </tr>
+                  ))}
+                  {documents.length === 0 && <tr><td colSpan={5} className="py-8 text-center text-slate-400">No documents yet</td></tr>}
+                </tbody>
+              </table>
+            </div>
           </section>
         )}
 

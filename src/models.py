@@ -517,6 +517,7 @@ class InventoryItem(Base):
     reorder_level = Column(Numeric(14, 2), default=0, nullable=False)
     unit_cost = Column(Numeric(14, 2), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
+    low_notified_at = Column(DateTime, nullable=True)  # last low-stock alert sent
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -598,6 +599,24 @@ class CustomerMetric(Base):
     satisfaction_score = Column(Numeric(3, 1), nullable=True)  # 1.0 - 5.0
     notes = Column(Text, nullable=True)
     submitted_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+
+
+class LicenseDocument(Base):
+    """Licenses, contracts and permits per business unit with expiry tracking."""
+    __tablename__ = "license_documents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    document_type = Column(String(32), default="license", nullable=False)  # license / contract / permit / other
+    issue_date = Column(Date, nullable=True)
+    expiry_date = Column(Date, nullable=False, index=True)
+    notes = Column(Text, nullable=True)
+    expiry_notified_at = Column(DateTime, nullable=True)  # last expiry alert sent
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
