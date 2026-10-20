@@ -9,6 +9,7 @@ const TABS = [
   { key: 'inventory', label: 'Inventory' },
   { key: 'purchasing', label: 'Purchasing' },
   { key: 'suppliers', label: 'Suppliers' },
+  { key: 'invoices', label: 'Invoices' },
   { key: 'expenses', label: 'Expenses' },
   { key: 'documents', label: 'Documents' },
   { key: 'staff', label: 'Staff' },
@@ -23,6 +24,9 @@ const STATUS_BADGE = {
   approved: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400',
   rejected: 'bg-red-500/10 border-red-500/20 text-red-600 dark:text-red-400',
   draft: 'bg-slate-500/10 border-slate-500/20 text-slate-600 dark:text-slate-300',
+  sent: 'bg-sky-500/10 border-sky-500/20 text-sky-600 dark:text-sky-400',
+  partial: 'bg-amber-500/10 border-amber-500/20 text-amber-600 dark:text-amber-400',
+  overdue: 'bg-red-500/10 border-red-500/20 text-red-600 dark:text-red-400',
   ordered: 'bg-sky-500/10 border-sky-500/20 text-sky-600 dark:text-sky-400',
   received: 'bg-amber-500/10 border-amber-500/20 text-amber-600 dark:text-amber-400',
   paid: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400',
@@ -60,6 +64,12 @@ export default function OpsPage() {
   const [supForm, setSupForm] = useState({ name: '', contact_person: '', phone: '' });
   const [pos, setPos] = useState([]);
   const [poForm, setPoForm] = useState({ supplier_id: '', order_date: new Date().toISOString().slice(0, 10), lines: [{ item_name: '', quantity: '', unit_cost: '' }] });
+  const [salesCustomers, setSalesCustomers] = useState([]);
+  const [custForm, setCustForm] = useState({ name: '', phone: '' });
+  const [invoices, setInvoices] = useState([]);
+  const [invCreate, setInvCreate] = useState({ customer_id: '', invoice_date: new Date().toISOString().slice(0, 10), due_date: '', tax_rate: 5, lines: [{ description: '', quantity: 1, unit_price: '' }] });
+  const [payAmt, setPayAmt] = useState({});
+  const [agingData, setAgingData] = useState(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
@@ -87,12 +97,40 @@ export default function OpsPage() {
         setPos((await api.listPOs(bu)).items);
         setSuppliers((await api.listSuppliers(bu)).items);
       }
+      if (tab === 'invoices') {
+        setInvoices((await api.listInvoices(bu)).items);
+        setSalesCustomers((await api.listSalesCustomers(bu)).items);
+        setAgingData(await api.aging(bu));
+      }
     } catch (e) {
       setError(e.message || 'Failed to load');
     }
   }, [tab, buId]);
 
   useEffect(() => { load(); }, [load]);
+
+  async function addSalesCustomer(e) {
+    e.preventDefault();
+    if (!custForm.name.trim() || !buId) return;
+    try {
+      await api.createSalesCustomer({ business_unit_id: Number(buId), name: custForm.name.trim(), phone: custForm.phone || undefined });
+      setCustForm({ name: '', phone: '' });
+      load();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function createInvoice(e) {
+    e.preventDefault();
+    const lines = invCreate.lines.filter((l) => l.description.trim()).map((l) => ({ description: l.description.trim(), quantity: Number(l.quantity) || 1, unit_price: Number(l.unit_price) || 0 }));
+    if (!invCreate.customer_id || lines.length === 0 || !buId) { setError('Pick a customer and add at least one line'); return; }
+    try {
+      await api.createInvoice({ business_unit_id: Number(buId), customer_id: Number(invCreate.customer_id), invoice_date: invCreate.invoice_date, due_date: invCreate.due_date || undefined, tax_rate: Number(invCreate.tax_rate) || 0, lines });
+      setInvCreate({ customer_id: '', invoice_date: new Date().toISOString().slice(0, 10), due_date: '', tax_rate: 5, lines: [{ description: '', quantity: 1, unit_price: '' }] });
+      setNotice('Invoice created (draft). Send it to post to the ledger.');
+      setTimeout(() => setNotice(''), 4000);
+      load();
+    } catch (err) { setError(err.message); }
+  }
 
   async function addSupplier(e) {
     e.preventDefault();
@@ -394,6 +432,92 @@ export default function OpsPage() {
               {suppliers.length === 0 && <li className="py-8 text-center text-sm text-slate-400">No suppliers yet</li>}
             </ul>
           </section>
+        )}
+
+        {tab === 'invoices' && (
+          <div className="space-y-6">
+            {agingData && (
+              <section className="grid sm:grid-cols-2 gap-4">
+                {[
+                  { title: 'Receivables (AR)', data: agingData.ar, color: 'text-sky-600 dark:text-sky-400' },
+                  { title: 'Payables (AP)', data: agingData.ap, color: 'text-violet-600 dark:text-violet-400' },
+                ].map((card) => (
+                  <div key={card.title} className={`${GLASS} p-5`}>
+                    <p className="text-[11px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-[0.08em]">{card.title} — outstanding {money(card.data.total)}</p>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2.5">
+                      {Object.entries(card.data.buckets).map(([k, v]) => (
+                        <p key={k} className="text-xs text-slate-500 dark:text-slate-400">{k === 'current' ? 'Current' : `${k} days`}: <span className={`font-bold tabular-nums ${v > 0 ? card.color : ''}`}>{money(v)}</span></p>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </section>
+            )}
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-4">New Invoice</h2>
+              <form onSubmit={createInvoice} className="space-y-3 mb-6">
+                <div className="flex flex-wrap gap-3">
+                  <select value={invCreate.customer_id} onChange={(e) => setInvCreate({ ...invCreate, customer_id: e.target.value })} className="flex-1 min-w-[200px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                    <option value="">Select customer…</option>
+                    {salesCustomers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                  <input type="date" value={invCreate.invoice_date} onChange={(e) => setInvCreate({ ...invCreate, invoice_date: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                  <input type="date" value={invCreate.due_date} onChange={(e) => setInvCreate({ ...invCreate, due_date: e.target.value })} title="Due date" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                  <input type="number" value={invCreate.tax_rate} onChange={(e) => setInvCreate({ ...invCreate, tax_rate: e.target.value })} title="Commercial tax %" className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                </div>
+                {invCreate.lines.map((l, idx) => (
+                  <div key={idx} className="flex flex-wrap gap-2">
+                    <input value={l.description} onChange={(e) => { const lines = [...invCreate.lines]; lines[idx].description = e.target.value; setInvCreate({ ...invCreate, lines }); }} placeholder="Description" className="flex-1 min-w-[180px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3.5 py-2.5 text-sm" />
+                    <input type="number" value={l.quantity} onChange={(e) => { const lines = [...invCreate.lines]; lines[idx].quantity = e.target.value; setInvCreate({ ...invCreate, lines }); }} placeholder="Qty" className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                    <input type="number" value={l.unit_price} onChange={(e) => { const lines = [...invCreate.lines]; lines[idx].unit_price = e.target.value; setInvCreate({ ...invCreate, lines }); }} placeholder="Unit price" className="w-36 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                  </div>
+                ))}
+                <div className="flex items-center justify-between flex-wrap gap-3">
+                  <button type="button" onClick={() => setInvCreate({ ...invCreate, lines: [...invCreate.lines, { description: '', quantity: 1, unit_price: '' }] })} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">+ Add line</button>
+                  <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Create invoice</button>
+                </div>
+              </form>
+              <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                {invoices.map((inv) => (
+                  <li key={inv.id} className="py-3">
+                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                      <div>
+                        <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">{inv.invoice_no} <span className="font-normal text-slate-400">· {inv.customer_name} · {money(inv.total)}</span></p>
+                        <p className="text-xs text-slate-400">{inv.invoice_date}{inv.due_date ? ` · due ${inv.due_date}` : ''} · paid {money(inv.paid)} · balance {money(inv.balance)}</p>
+                      </div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[inv.status] || STATUS_BADGE.draft}`}>{inv.status}</span>
+                        {inv.stored_status === 'draft' && <button onClick={async () => { await api.sendInvoice(inv.id); load(); }} className="text-xs font-semibold text-sky-600 dark:text-sky-400 hover:underline">Send</button>}
+                        {inv.stored_status === 'draft' && <button onClick={async () => { await api.cancelInvoice(inv.id); load(); }} className="text-xs font-semibold text-red-500 hover:underline">Cancel</button>}
+                        {(inv.stored_status === 'sent' || inv.stored_status === 'partial') && <>
+                          <input type="number" value={payAmt[inv.id] || ''} onChange={(e) => setPayAmt((p) => ({ ...p, [inv.id]: e.target.value }))} placeholder="Amount" className="w-28 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1.5 text-xs" />
+                          <button onClick={async () => { const amt = Number(payAmt[inv.id]); if (!amt) return; try { await api.recordInvoicePayment(inv.id, { amount: amt, payment_date: new Date().toISOString().slice(0, 10), method: 'cash' }); setPayAmt((p) => ({ ...p, [inv.id]: '' })); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Record payment</button>
+                        </>}
+                      </div>
+                    </div>
+                  </li>
+                ))}
+                {invoices.length === 0 && <li className="py-8 text-center text-sm text-slate-400">No invoices yet</li>}
+              </ul>
+            </section>
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-4">Customers</h2>
+              <form onSubmit={addSalesCustomer} className="flex flex-wrap gap-3 mb-4">
+                <input value={custForm.name} onChange={(e) => setCustForm({ ...custForm, name: e.target.value })} placeholder="Customer name" className="flex-1 min-w-[200px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3.5 py-2.5 text-sm" />
+                <input value={custForm.phone} onChange={(e) => setCustForm({ ...custForm, phone: e.target.value })} placeholder="Phone" className="w-44 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Add customer</button>
+              </form>
+              <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                {salesCustomers.map((c) => (
+                  <li key={c.id} className="py-2.5 flex items-center justify-between">
+                    <p className="text-sm font-medium text-slate-800 dark:text-slate-200">{c.name} <span className="text-xs text-slate-400 font-normal">{c.phone || ''}</span></p>
+                    <button onClick={async () => { await api.deleteSalesCustomer(c.id); load(); }} className="text-xs font-semibold text-red-500 hover:underline">Remove</button>
+                  </li>
+                ))}
+                {salesCustomers.length === 0 && <li className="py-6 text-center text-sm text-slate-400">No customers yet</li>}
+              </ul>
+            </section>
+          </div>
         )}
 
         {tab === 'expenses' && (

@@ -18,14 +18,18 @@ from src.database import get_db
 from src.models import (
     ActionItem,
     BusinessUnit,
+    Customer,
     CustomerMetric,
     DailyFinancial,
     ExpenseRequest,
     InventoryItem,
+    InvoicePayment,
     LicenseDocument,
     Notification,
     PurchaseOrder,
     PurchaseOrderLine,
+    SalesInvoice,
+    SalesInvoiceLine,
     StaffRecord,
     StockMovement,
     Supplier,
@@ -1270,3 +1274,292 @@ def cancel_po(po_id: int, user: User = Depends(get_current_user), db: Session = 
     po.status = "cancelled"
     db.commit()
     return serialize_po(db, po)
+
+
+# ================================================================== sales, invoices, aging (ERP Phase 4)
+
+def serialize_customer(c: Customer) -> dict:
+    return {
+        "id": c.id, "business_unit_id": c.business_unit_id, "name": c.name,
+        "contact_person": c.contact_person, "phone": c.phone, "email": c.email,
+        "address": c.address, "credit_limit": float(c.credit_limit) if c.credit_limit is not None else None,
+        "is_active": c.is_active,
+    }
+
+
+class CustomerIn(BaseModel):
+    business_unit_id: int
+    name: str = Field(min_length=1, max_length=150)
+    contact_person: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+    credit_limit: Optional[float] = None
+
+
+@router.get("/sales-customers")
+def list_sales_customers(business_unit_id: Optional[int] = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.role == "CEO":
+        business_unit_id = user.business_unit_id
+    q = db.query(Customer).filter(Customer.is_active == True)  # noqa: E712
+    if business_unit_id:
+        q = q.filter(Customer.business_unit_id == business_unit_id)
+    return {"items": [serialize_customer(c) for c in q.order_by(Customer.name).all()]}
+
+
+@router.post("/sales-customers")
+def create_sales_customer(payload: CustomerIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    bu_scope(user, payload.business_unit_id)
+    c = Customer(**payload.model_dump(), created_by_id=user.id)
+    db.add(c)
+    db.commit()
+    db.refresh(c)
+    return serialize_customer(c)
+
+
+@router.delete("/sales-customers/{customer_id}")
+def delete_sales_customer(customer_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    c = db.query(Customer).filter(Customer.id == customer_id).first()
+    if not c:
+        raise HTTPException(404, "Customer not found")
+    bu_scope(user, c.business_unit_id)
+    c.is_active = False
+    db.commit()
+    return {"ok": True}
+
+
+def invoice_amounts(inv: SalesInvoice) -> dict:
+    subtotal = sum((Decimal(str(l.quantity)) * Decimal(str(l.unit_price)) for l in inv.lines), Decimal("0"))
+    tax = (subtotal * Decimal(str(inv.tax_rate or 0)) / Decimal("100")).quantize(Decimal("0.01"))
+    total = subtotal + tax
+    paid = sum((Decimal(str(p.amount)) for p in inv.payments), Decimal("0"))
+    return {"subtotal": subtotal, "tax": tax, "total": total, "paid": paid, "balance": total - paid}
+
+
+def serialize_invoice(db: Session, inv: SalesInvoice) -> dict:
+    a = invoice_amounts(inv)
+    overdue = (inv.status in ("sent", "partial") and inv.due_date is not None
+               and inv.due_date < date.today() and a["balance"] > 0)
+    return {
+        "id": inv.id, "invoice_no": inv.invoice_no, "business_unit_id": inv.business_unit_id,
+        "bu_name": inv.business_unit.name if inv.business_unit else None,
+        "customer_id": inv.customer_id,
+        "customer_name": inv.customer.name if inv.customer else None,
+        "status": "overdue" if overdue else inv.status,
+        "stored_status": inv.status,
+        "invoice_date": inv.invoice_date.isoformat() if inv.invoice_date else None,
+        "due_date": inv.due_date.isoformat() if inv.due_date else None,
+        "tax_rate": float(inv.tax_rate or 0), "notes": inv.notes,
+        "subtotal": float(a["subtotal"]), "tax_amount": float(a["tax"]),
+        "total": float(a["total"]), "paid": float(a["paid"]), "balance": float(a["balance"]),
+        "lines": [{"id": l.id, "description": l.description, "quantity": float(l.quantity),
+                   "unit_price": float(l.unit_price),
+                   "line_total": float(Decimal(str(l.quantity)) * Decimal(str(l.unit_price)))} for l in inv.lines],
+        "payments": [{"id": p.id, "amount": float(p.amount),
+                      "payment_date": p.payment_date.isoformat() if p.payment_date else None,
+                      "method": p.method} for p in inv.payments],
+    }
+
+
+class InvoiceLineIn(BaseModel):
+    description: str = Field(min_length=1, max_length=200)
+    quantity: float = Field(gt=0, default=1)
+    unit_price: float = Field(ge=0)
+
+
+class InvoiceIn(BaseModel):
+    business_unit_id: int
+    customer_id: int
+    invoice_date: date
+    due_date: Optional[date] = None
+    tax_rate: float = 5
+    notes: Optional[str] = None
+    lines: list[InvoiceLineIn] = Field(min_length=1)
+
+
+@router.get("/invoices")
+def list_invoices(business_unit_id: Optional[int] = None, status: Optional[str] = None,
+                  user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.role == "CEO":
+        business_unit_id = user.business_unit_id
+    q = db.query(SalesInvoice)
+    if business_unit_id:
+        q = q.filter(SalesInvoice.business_unit_id == business_unit_id)
+    if status:
+        q = q.filter(SalesInvoice.status == status)
+    rows = q.order_by(SalesInvoice.invoice_date.desc(), SalesInvoice.id.desc()).limit(200).all()
+    return {"items": [serialize_invoice(db, inv) for inv in rows]}
+
+
+@router.post("/invoices")
+def create_invoice(payload: InvoiceIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    bu_scope(user, payload.business_unit_id)
+    cust = db.query(Customer).filter(Customer.id == payload.customer_id, Customer.is_active == True).first()  # noqa: E712
+    if not cust or cust.business_unit_id != payload.business_unit_id:
+        raise HTTPException(404, "Customer not found in this BU")
+    count = db.query(SalesInvoice).filter(SalesInvoice.business_unit_id == payload.business_unit_id).count()
+    inv = SalesInvoice(
+        business_unit_id=payload.business_unit_id, customer_id=payload.customer_id,
+        invoice_no=f"INV-{payload.business_unit_id}-{count + 1:04d}", status="draft",
+        invoice_date=payload.invoice_date, due_date=payload.due_date,
+        tax_rate=Decimal(str(payload.tax_rate)), notes=payload.notes, created_by_id=user.id,
+    )
+    db.add(inv)
+    db.flush()
+    for ln in payload.lines:
+        db.add(SalesInvoiceLine(invoice_id=inv.id, description=ln.description,
+                                quantity=Decimal(str(ln.quantity)),
+                                unit_price=Decimal(str(ln.unit_price))))
+    db.commit()
+    db.refresh(inv)
+    return serialize_invoice(db, inv)
+
+
+def _invoice_or_404(db: Session, invoice_id: int) -> SalesInvoice:
+    inv = db.query(SalesInvoice).filter(SalesInvoice.id == invoice_id).first()
+    if not inv:
+        raise HTTPException(404, "Invoice not found")
+    return inv
+
+
+def _post_invoice_journal(db: Session, inv: SalesInvoice, user_id: int, kind: str, amount: Decimal = Decimal("0")) -> None:
+    try:
+        from src.routers.accounting import account_by_code, create_entry
+        bu = inv.business_unit_id
+        if kind == "send":
+            a = invoice_amounts(inv)
+            ar = account_by_code(db, bu, "1130")
+            sales = account_by_code(db, bu, "4100")
+            tax_acc = account_by_code(db, bu, "2130")
+            if not (ar and sales):
+                return
+            lines = [{"account_id": ar.id, "debit": a["total"], "credit": 0},
+                     {"account_id": sales.id, "debit": 0, "credit": a["subtotal"]}]
+            if a["tax"] > 0 and tax_acc:
+                lines.append({"account_id": tax_acc.id, "debit": 0, "credit": a["tax"]})
+            create_entry(db, bu, inv.invoice_date, f"Invoice {inv.invoice_no} — {inv.customer.name if inv.customer else ''}",
+                         "invoice", user_id, lines, source_id=inv.id, post=True)
+        else:  # payment
+            cash = account_by_code(db, bu, "1110")
+            ar = account_by_code(db, bu, "1130")
+            if not (cash and ar):
+                return
+            create_entry(db, bu, date.today(), f"Payment received {inv.invoice_no}",
+                         "invoice", user_id,
+                         [{"account_id": cash.id, "debit": amount, "credit": 0},
+                          {"account_id": ar.id, "debit": 0, "credit": amount}],
+                         source_id=inv.id, post=True)
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
+@router.post("/invoices/{invoice_id}/send")
+def send_invoice(invoice_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    inv = _invoice_or_404(db, invoice_id)
+    bu_scope(user, inv.business_unit_id)
+    if inv.status != "draft":
+        raise HTTPException(400, f"Cannot send an invoice in status {inv.status}")
+    inv.status = "sent"
+    inv.sent_at = datetime.utcnow()
+    db.commit()
+    _post_invoice_journal(db, inv, user.id, "send")
+    db.refresh(inv)
+    return serialize_invoice(db, inv)
+
+
+class PaymentIn(BaseModel):
+    amount: float = Field(gt=0)
+    payment_date: date
+    method: str = "cash"
+    notes: Optional[str] = None
+
+
+@router.post("/invoices/{invoice_id}/payments")
+def record_payment(invoice_id: int, payload: PaymentIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    inv = _invoice_or_404(db, invoice_id)
+    bu_scope(user, inv.business_unit_id)
+    if inv.status not in ("sent", "partial"):
+        raise HTTPException(400, f"Cannot take payment on a {inv.status} invoice")
+    amt = Decimal(str(payload.amount))
+    a = invoice_amounts(inv)
+    if amt > a["balance"]:
+        raise HTTPException(400, f"Payment {amt} exceeds balance {a['balance']}")
+    db.add(InvoicePayment(invoice_id=inv.id, amount=amt, payment_date=payload.payment_date,
+                          method=payload.method, notes=payload.notes, received_by_id=user.id))
+    db.flush()
+    a2 = invoice_amounts(inv)
+    inv.status = "paid" if a2["balance"] <= 0 else "partial"
+    db.commit()
+    _post_invoice_journal(db, inv, user.id, "payment", amt)
+    db.refresh(inv)
+    return serialize_invoice(db, inv)
+
+
+@router.post("/invoices/{invoice_id}/cancel")
+def cancel_invoice(invoice_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    inv = _invoice_or_404(db, invoice_id)
+    bu_scope(user, inv.business_unit_id)
+    if inv.status != "draft":
+        raise HTTPException(400, "Only draft invoices can be cancelled")
+    inv.status = "cancelled"
+    db.commit()
+    return serialize_invoice(db, inv)
+
+
+def _bucket(days: int) -> str:
+    if days <= 0:
+        return "current"
+    if days <= 30:
+        return "1-30"
+    if days <= 60:
+        return "31-60"
+    if days <= 90:
+        return "61-90"
+    return "90+"
+
+
+@router.get("/aging")
+def aging_report(business_unit_id: Optional[int] = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """AR aging (unpaid invoices by days past due) + AP aging (received,
+    unpaid POs by days since receipt)."""
+    if user.role == "CEO":
+        business_unit_id = user.business_unit_id
+    today_d = date.today()
+    ar_buckets = {k: Decimal("0") for k in ("current", "1-30", "31-60", "61-90", "90+")}
+    ar_items = []
+    q = db.query(SalesInvoice).filter(SalesInvoice.status.in_(("sent", "partial")))
+    if business_unit_id:
+        q = q.filter(SalesInvoice.business_unit_id == business_unit_id)
+    for inv in q.all():
+        a = invoice_amounts(inv)
+        if a["balance"] <= 0:
+            continue
+        days = (today_d - inv.due_date).days if inv.due_date else 0
+        b = _bucket(days)
+        ar_buckets[b] += a["balance"]
+        ar_items.append({"invoice_no": inv.invoice_no, "customer": inv.customer.name if inv.customer else None,
+                         "bu_name": inv.business_unit.name if inv.business_unit else None,
+                         "due_date": inv.due_date.isoformat() if inv.due_date else None,
+                         "days_overdue": max(days, 0), "bucket": b, "balance": float(a["balance"])})
+    ap_buckets = {k: Decimal("0") for k in ("current", "1-30", "31-60", "61-90", "90+")}
+    ap_items = []
+    qp = db.query(PurchaseOrder).filter(PurchaseOrder.status == "received")
+    if business_unit_id:
+        qp = qp.filter(PurchaseOrder.business_unit_id == business_unit_id)
+    for po in qp.all():
+        total = po_total(po)
+        ref = po.received_at.date() if po.received_at else po.order_date
+        days = (today_d - ref).days
+        b = _bucket(days)
+        ap_buckets[b] += total
+        ap_items.append({"po_no": po.po_no, "supplier": po.supplier.name if po.supplier else None,
+                         "bu_name": po.business_unit.name if po.business_unit else None,
+                         "received_date": ref.isoformat(), "days": max(days, 0),
+                         "bucket": b, "balance": float(total)})
+    return {
+        "ar": {"buckets": {k: float(v) for k, v in ar_buckets.items()},
+               "total": float(sum(ar_buckets.values(), Decimal("0"))), "items": ar_items},
+        "ap": {"buckets": {k: float(v) for k, v in ap_buckets.items()},
+               "total": float(sum(ap_buckets.values(), Decimal("0"))), "items": ap_items},
+    }

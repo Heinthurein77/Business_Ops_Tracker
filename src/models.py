@@ -780,3 +780,78 @@ class PurchaseOrderLine(Base):
     unit_cost = Column(Numeric(16, 2), nullable=False)
 
     po = relationship("PurchaseOrder", back_populates="lines")
+
+
+# ------------------------------------------------------------------ sales & receivables (ERP Phase 4)
+
+class Customer(Base):
+    """Sales customers per BU (distinct from CustomerMetric daily counts)."""
+    __tablename__ = "customers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    name = Column(String(150), nullable=False)
+    contact_person = Column(String(120), nullable=True)
+    phone = Column(String(40), nullable=True)
+    email = Column(String(150), nullable=True)
+    address = Column(String(300), nullable=True)
+    credit_limit = Column(Numeric(16, 2), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+
+
+class SalesInvoice(Base):
+    """draft -> sent -> partial -> paid (overdue is computed from due_date).
+
+    Sending posts Dr 1130 AR (gross) / Cr 4100 Sales (net) / Cr 2130 Tax.
+    Payments post Dr 1110 Cash / Cr 1130 AR.
+    """
+    __tablename__ = "sales_invoices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=False, index=True)
+    invoice_no = Column(String(30), nullable=False, index=True)
+    status = Column(String(20), default="draft", nullable=False, index=True)
+    invoice_date = Column(Date, nullable=False)
+    due_date = Column(Date, nullable=True)
+    tax_rate = Column(Numeric(5, 2), default=5, nullable=False)  # % commercial tax
+    notes = Column(String(500), nullable=True)
+    sent_at = Column(DateTime, nullable=True)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+    customer = relationship("Customer")
+    lines = relationship("SalesInvoiceLine", back_populates="invoice", cascade="all, delete-orphan")
+    payments = relationship("InvoicePayment", back_populates="invoice", cascade="all, delete-orphan")
+
+
+class SalesInvoiceLine(Base):
+    __tablename__ = "sales_invoice_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    invoice_id = Column(Integer, ForeignKey("sales_invoices.id"), nullable=False, index=True)
+    description = Column(String(200), nullable=False)
+    quantity = Column(Numeric(14, 2), default=1, nullable=False)
+    unit_price = Column(Numeric(16, 2), nullable=False)
+
+    invoice = relationship("SalesInvoice", back_populates="lines")
+
+
+class InvoicePayment(Base):
+    __tablename__ = "invoice_payments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    invoice_id = Column(Integer, ForeignKey("sales_invoices.id"), nullable=False, index=True)
+    amount = Column(Numeric(16, 2), nullable=False)
+    payment_date = Column(Date, nullable=False)
+    method = Column(String(20), default="cash", nullable=False)  # cash/bank/mobile
+    notes = Column(String(255), nullable=True)
+    received_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    invoice = relationship("SalesInvoice", back_populates="payments")

@@ -195,6 +195,16 @@ export const api = {
   payPO: (id) => postJson(`/api/ops/purchase-orders/${id}/pay`),
   cancelPO: (id) => postJson(`/api/ops/purchase-orders/${id}/cancel`),
   transferStock: (itemId, payload) => postJson(`/api/ops/inventory/${itemId}/transfer`, payload),
+  // ---- Sales & receivables (ERP Phase 4) ----
+  listSalesCustomers: (buId) => getJson(`/api/ops/sales-customers${buId ? `?business_unit_id=${buId}` : ''}`),
+  createSalesCustomer: (payload) => postJson('/api/ops/sales-customers', payload),
+  deleteSalesCustomer: (id) => fetch(`/api/ops/sales-customers/${id}`, { method: 'DELETE', credentials: 'include' }).then(handle),
+  listInvoices: (buId) => getJson(`/api/ops/invoices${buId ? `?business_unit_id=${buId}` : ''}`),
+  createInvoice: (payload) => postJson('/api/ops/invoices', payload),
+  sendInvoice: (id) => postJson(`/api/ops/invoices/${id}/send`),
+  cancelInvoice: (id) => postJson(`/api/ops/invoices/${id}/cancel`),
+  recordInvoicePayment: (id, payload) => postJson(`/api/ops/invoices/${id}/payments`, payload),
+  aging: (buId) => getJson(`/api/ops/aging${buId ? `?business_unit_id=${buId}` : ''}`),
   monthlyReportUrl: (month) => `/api/ops/monthly-report${month ? `?month=${month}` : ''}`,
   opsExportUrl: (tab, buId) => {
     const q = new URLSearchParams({ tab: tab || 'actions' });
