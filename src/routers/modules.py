@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from src.auth import get_current_user
 from src.database import get_db
+from src.utils import validate_period
 from src.models import (
     BomComponent, BusinessUnit, Customer, ExpenseRequest, Installment,
     InventoryItem, LeaseContract, ManufacturingBom, ProductionOrder,
@@ -676,7 +677,7 @@ def bill_lease(lease_id: int, period: Optional[str] = None, user: User = Depends
     bu_scope(user, l.business_unit_id)
     if l.status != "active":
         raise HTTPException(400, "Lease is not active")
-    period = period or date.today().strftime("%Y-%m")
+    period = validate_period(period or date.today().strftime("%Y-%m"))
     if l.last_billed_period == period:
         raise HTTPException(400, f"Rent already billed for {period}")
     from src.routers.ops import InvoiceIn, InvoiceLineIn, create_invoice
@@ -700,6 +701,7 @@ def principal_report(business_unit_id: Optional[int] = None, period: Optional[st
                      user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Sales grouped by principal (brand owner) and brand, from invoice
     lines linked to inventory items. Amounts in MMK."""
+    period = validate_period(period)
     bu_id = bu_scope(user, business_unit_id)
     q = db.query(SalesInvoice).filter(SalesInvoice.status.in_(("sent", "partial", "paid")))
     if bu_id is not None:

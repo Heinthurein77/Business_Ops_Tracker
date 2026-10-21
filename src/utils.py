@@ -7,6 +7,7 @@ the business-unit detail page.
 """
 import calendar as calendar_module
 import json
+import re
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Optional
@@ -35,6 +36,23 @@ def today_local() -> date:
 
 def is_weekend(d: date) -> bool:
     return d.weekday() >= 5  # 5 = Saturday, 6 = Sunday
+
+
+_PERIOD_FORMAT = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+def validate_period(period: Optional[str]) -> Optional[str]:
+    """Validates a YYYY-MM `period`/`month` query value and returns it
+    unchanged. Report endpoints used to feed the raw string into
+    split('-') / int() and answer garbage like ?period=garbage with a 500
+    (audit finding L3); now anything that isn't a real year-month is a
+    422, like any other malformed parameter. None and "" pass through —
+    callers treat them as "no period given"."""
+    if period is None or period == "":
+        return period
+    if not _PERIOD_FORMAT.match(period):
+        raise HTTPException(status_code=422, detail="period must be in YYYY-MM format")
+    return period
 
 
 def calculate_age(date_of_birth: date, as_of: Optional[date] = None) -> int:

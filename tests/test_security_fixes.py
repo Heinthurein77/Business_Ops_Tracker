@@ -329,3 +329,104 @@ class TestLocalUploadsGating:
 
         response = asyncio.run(serve_local_upload("a.txt", user=SimpleNamespace(username="boss")))
         assert str(response.path) == str((upload_dir / "a.txt").resolve())
+
+
+# --------------------------------------------------------------------- L3
+
+CHAIRMAN_NS = SimpleNamespace(id=1, role="Chairman", business_unit_id=None)
+
+
+class TestPeriodValidation:
+    def test_helper(self):
+        from src.utils import validate_period
+
+        assert validate_period(None) is None
+        assert validate_period("") == ""
+        assert validate_period("2026-10") == "2026-10"
+        assert validate_period("1999-01") == "1999-01"
+        for bad in ("garbage", "2026-13", "2026-00", "2026-1", "26-10", "2026/10", "2026-10-01"):
+            with pytest.raises(HTTPException) as exc:
+                validate_period(bad)
+            assert exc.value.status_code == 422
+
+    def test_accounting_endpoints_422(self, db):
+        from src.models import BusinessUnit
+        from src.routers import accounting as acct
+
+        bu = BusinessUnit(code="BU1", name="Shop")
+        db.add(bu)
+        db.commit()
+
+        calls = [
+            lambda: acct.profit_loss(bu.id, period="garbage", user=CHAIRMAN_NS, db=db),
+            lambda: acct.balance_sheet(bu.id, period="garbage", user=CHAIRMAN_NS, db=db),
+            lambda: acct.trial_balance(bu.id, period="2026-13", user=CHAIRMAN_NS, db=db),
+            lambda: acct.ledger(1, period="garbage", user=CHAIRMAN_NS, db=db),
+            lambda: acct.list_journal(bu.id, period="garbage", user=CHAIRMAN_NS, db=db),
+            lambda: acct.consolidated_pl(period="garbage", user=CHAIRMAN_NS, db=db),
+            lambda: acct.consolidated_bs(period="garbage", user=CHAIRMAN_NS, db=db),
+            lambda: acct.bu_comparison(period="garbage", user=CHAIRMAN_NS, db=db),
+            lambda: acct.tax_report(bu.id, period="garbage", user=CHAIRMAN_NS, db=db),
+            lambda: acct.cash_flow_report(bu.id, period="garbage", user=CHAIRMAN_NS, db=db),
+            lambda: acct.finance_summary(period="garbage", user=CHAIRMAN_NS, db=db),
+            lambda: acct.export_report("pl", business_unit_id=bu.id, period="garbage", user=CHAIRMAN_NS, db=db),
+        ]
+        for call in calls:
+            with pytest.raises(HTTPException) as exc:
+                call()
+            assert exc.value.status_code == 422
+
+        # Valid periods keep working on an empty set of books.
+        assert acct.profit_loss(bu.id, period="2026-10", user=CHAIRMAN_NS, db=db)["total_income"] == 0
+        assert acct.consolidated_pl(period="2026-10", user=CHAIRMAN_NS, db=db)["net_profit"] == 0
+        assert acct.finance_summary(period="2026-10", user=CHAIRMAN_NS, db=db)["period"] == "2026-10"
+
+    def test_ops_and_modules_endpoints_422(self, db):
+        from datetime import date
+        from decimal import Decimal
+
+        from src.models import BusinessUnit, Customer, LeaseContract, PropertyUnit
+        from src.routers.modules import bill_lease, principal_report
+        from src.routers.ops import list_attendance, monthly_report
+
+        bu = BusinessUnit(code="BU1", name="Shop")
+        db.add(bu)
+        db.commit()
+        tenant = Customer(business_unit_id=bu.id, name="Tenant")
+        unit = PropertyUnit(business_unit_id=bu.id, unit_no="A1")
+        db.add_all([tenant, unit])
+        db.commit()
+        lease = LeaseContract(
+            business_unit_id=bu.id, unit_id=unit.id, tenant_id=tenant.id,
+            monthly_rent=Decimal("1000"), start_date=date(2026, 1, 1), status="active",
+        )
+        db.add(lease)
+        db.commit()
+
+        calls = [
+            lambda: monthly_report(month="garbage", user=CHAIRMAN_NS, db=db),
+            lambda: monthly_report(month="2026-13", user=CHAIRMAN_NS, db=db),
+            lambda: list_attendance(month="garbage", user=CHAIRMAN_NS, db=db),
+            lambda: principal_report(period="garbage", user=CHAIRMAN_NS, db=db),
+            lambda: bill_lease(lease.id, period="garbage", user=CHAIRMAN_NS, db=db),
+        ]
+        for call in calls:
+            with pytest.raises(HTTPException) as exc:
+                call()
+            assert exc.value.status_code == 422
+
+    def test_body_period_patterns_reject_month_13(self):
+        from pydantic import ValidationError
+
+        from src.routers.accounting import BudgetIn, DepreciateIn, PeriodAction
+        from src.routers.ops import PayrollCreate
+
+        for build in (
+            lambda: PeriodAction(business_unit_id=1, period="2026-13"),
+            lambda: DepreciateIn(business_unit_id=1, period="2026-13"),
+            lambda: BudgetIn(business_unit_id=1, period="2026-13", account_code="1110", amount=1),
+            lambda: PayrollCreate(business_unit_id=1, period="2026-13"),
+        ):
+            with pytest.raises(ValidationError):
+                build()
+        assert PeriodAction(business_unit_id=1, period="2026-10").period == "2026-10"

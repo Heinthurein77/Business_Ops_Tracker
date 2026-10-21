@@ -28,6 +28,7 @@ from src.models import (
     Account, BusinessUnit, FiscalPeriod, JournalEntry, JournalLine,
     PostingRule, User,
 )
+from src.utils import validate_period
 
 router = APIRouter(prefix="/api/accounting", tags=["accounting"])
 require_accounting = require_roles("Chairman", "HO", "Accountant")
@@ -397,6 +398,7 @@ def create_journal(payload: JournalIn, user: User = Depends(require_accounting),
 def list_journal(business_unit_id: int, period: Optional[str] = None,
                  status: Optional[str] = None, source: Optional[str] = None,
                  user: User = Depends(require_accounting), db: Session = Depends(get_db)):
+    period = validate_period(period)
     q = db.query(JournalEntry).filter(JournalEntry.business_unit_id == business_unit_id)
     if status:
         q = q.filter(JournalEntry.status == status)
@@ -529,6 +531,7 @@ def _period_end(period: Optional[str]) -> Optional[date]:
 @router.get("/trial-balance")
 def trial_balance(business_unit_id: int, period: Optional[str] = None,
                   user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    period = validate_period(period)
     check_bu_access(user, business_unit_id)
     totals: dict[int, dict] = {}
     for line, acc, _e in _posted_lines(db, business_unit_id, _period_end(period)):
@@ -556,6 +559,7 @@ def trial_balance(business_unit_id: int, period: Optional[str] = None,
 @router.get("/ledger")
 def ledger(account_id: int, period: Optional[str] = None,
            user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    period = validate_period(period)
     acc = db.query(Account).filter(Account.id == account_id).first()
     if not acc:
         raise HTTPException(404, "Account not found")
@@ -583,6 +587,7 @@ def ledger(account_id: int, period: Optional[str] = None,
 @router.get("/reports/pl")
 def profit_loss(business_unit_id: int, period: Optional[str] = None,
                 user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    period = validate_period(period)
     check_bu_access(user, business_unit_id)
     income: dict[str, Decimal] = {}
     expense: dict[str, Decimal] = {}
@@ -607,6 +612,7 @@ def profit_loss(business_unit_id: int, period: Optional[str] = None,
 @router.get("/reports/balance-sheet")
 def balance_sheet(business_unit_id: int, period: Optional[str] = None,
                   user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    period = validate_period(period)
     check_bu_access(user, business_unit_id)
     groups: dict[str, dict[str, Decimal]] = {"asset": {}, "liability": {}, "equity": {}}
     retained = ZERO
@@ -659,6 +665,7 @@ def _all_posted_lines(db: Session, upto: Optional[date] = None):
 def consolidated_pl(period: Optional[str] = None, user: User = Depends(require_accounting),
                     db: Session = Depends(get_db)):
     """Group P&L: every BU summed by the shared account-code standard."""
+    period = validate_period(period)
     income: dict[str, Decimal] = {}
     expense: dict[str, Decimal] = {}
     names: dict[str, str] = {}
@@ -686,6 +693,7 @@ def consolidated_bs(period: Optional[str] = None, user: User = Depends(require_a
     Receivable (1180, asset) is eliminated against Intercompany Payable
     (2180, liability) up to the smaller side — group-internal balances are
     not real assets/liabilities of the group."""
+    period = validate_period(period)
     groups: dict[str, dict[str, Decimal]] = {"asset": {}, "liability": {}, "equity": {}}
     names: dict[str, str] = {}
     retained = ZERO
@@ -732,6 +740,7 @@ def consolidated_bs(period: Optional[str] = None, user: User = Depends(require_a
 def bu_comparison(period: Optional[str] = None, user: User = Depends(require_accounting),
                   db: Session = Depends(get_db)):
     """Per-BU P&L for a period — the group scoreboard."""
+    period = validate_period(period)
     per_bu: dict[int, dict[str, Decimal]] = {}
     for line, acc, e in _all_posted_lines(db, _period_end(period)):
         if period and period_of(e.entry_date) != period:
@@ -765,7 +774,7 @@ def list_periods(business_unit_id: int, user: User = Depends(require_accounting)
 
 class PeriodAction(BaseModel):
     business_unit_id: int
-    period: str = Field(pattern=r"^\d{4}-\d{2}$")
+    period: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
 @router.post("/periods/close")
@@ -969,7 +978,7 @@ def dispose_fixed_asset(asset_id: int, user: User = Depends(require_accounting),
 
 class DepreciateIn(BaseModel):
     business_unit_id: int
-    period: str = Field(pattern=r"^\d{4}-\d{2}$")
+    period: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
 @router.post("/fixed-assets/depreciate")
@@ -1235,6 +1244,7 @@ def export_report(report: str, format: str = "xlsx", business_unit_id: Optional[
 
     from fastapi.responses import StreamingResponse
 
+    period = validate_period(period)
     if report not in ("pl", "bs", "tb", "journal", "consolidated-pl", "consolidated-bs"):
         raise HTTPException(400, "report must be pl, bs, tb, journal, consolidated-pl or consolidated-bs")
     if not report.startswith("consolidated"):
@@ -1317,7 +1327,7 @@ def finance_summary(period: Optional[str] = None, user: User = Depends(require_a
                     db: Session = Depends(get_db)):
     """Group finance snapshot for the Chairman dashboard: this month's
     P&L, cash position (1110+1120), AR/AP outstanding, tax payable."""
-    period = period or date.today().strftime("%Y-%m")
+    period = validate_period(period) or date.today().strftime("%Y-%m")
     income = ZERO
     expense = ZERO
     cash = ZERO
@@ -1356,6 +1366,7 @@ def tax_report(business_unit_id: int, period: str, user: User = Depends(get_curr
                db: Session = Depends(get_db)):
     """Commercial tax (2130) movement for one BU + period: opening balance,
     tax charged, tax paid/filed, closing balance, with entry detail."""
+    period = validate_period(period)
     check_bu_access(user, business_unit_id)
     acc = account_by_code(db, business_unit_id, "2130")
     if not acc:
@@ -1430,7 +1441,7 @@ def list_budgets(business_unit_id: int, period: str, user: User = Depends(get_cu
 
 class BudgetIn(BaseModel):
     business_unit_id: int
-    period: str = Field(pattern=r"^\d{4}-\d{2}$")
+    period: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
     account_code: str
     amount: float = Field(ge=0)
 
@@ -1641,6 +1652,7 @@ def cash_flow_report(business_unit_id: int, period: str,
     """Direct-method cash flow for one month: every posted entry touching
     cash (1110/1120), classified operating / investing / financing by its
     counter-accounts."""
+    period = validate_period(period)
     check_bu_access(user, business_unit_id)
     y, m = map(int, period.split("-"))
     import calendar as _cal

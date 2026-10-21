@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from src.auth import get_current_user, require_roles
 from src.database import get_db
+from src.utils import validate_period
 from src.models import (
     ActionItem,
     AttendanceRecord,
@@ -960,12 +961,10 @@ def monthly_report(month: Optional[str] = None, user: User = Depends(require_adm
     from sqlalchemy import func
 
     today = date.today()
+    month = validate_period(month)
     if month:
-        try:
-            y, m = month.split("-")
-            month_start = date(int(y), int(m), 1)
-        except Exception:
-            raise HTTPException(400, "month must be YYYY-MM")
+        y, m = (int(x) for x in month.split("-"))
+        month_start = date(y, m, 1)
     else:
         month_start = date(today.year, today.month, 1)
     import calendar as _cal
@@ -2048,7 +2047,7 @@ def serialize_payroll(db: Session, run: PayrollRun) -> dict:
 
 class PayrollCreate(BaseModel):
     business_unit_id: int
-    period: str = Field(pattern=r"^\d{4}-\d{2}$")
+    period: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
 @router.get("/payroll-runs")
@@ -3390,11 +3389,9 @@ def list_attendance(business_unit_id: Optional[int] = None, month: Optional[str]
                     user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """One month of attendance records + per-employee status counts."""
     bu_id = bu_scope(user, business_unit_id)
+    month = validate_period(month)
     if month:
-        try:
-            y, m = (int(x) for x in month.split("-"))
-        except Exception:
-            raise HTTPException(400, "month must be YYYY-MM")
+        y, m = (int(x) for x in month.split("-"))
     else:
         today = date.today()
         y, m = today.year, today.month
