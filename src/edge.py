@@ -9,15 +9,23 @@ Per request, in order:
   1. Host allowlist          (settings.ALLOWED_HOSTS; /healthz exempt)
   2. Origin / CSRF check     (POST/PUT/PATCH/DELETE only)
   3. Request body size cap   (Content-Length up front + counted while streaming)
-  4. the app, with security headers + Cache-Control applied to its response,
+  4. Export rate budget      (expensive report/export paths only)
+  5. the app, with security headers + Cache-Control applied to its response,
      and any unhandled exception turned into a generic JSON 500.
 """
 import asyncio
 import json
 import logging
+import re
 import secrets
+import time
+from collections import deque
 from urllib.parse import urlsplit
 
+import jwt
+from starlette.requests import Request
+
+from src.client_ip import get_client_ip
 from src.config import settings
 
 _error_log = logging.getLogger("business_ops_tracker.error")
@@ -27,11 +35,44 @@ _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _MIB = 1024 * 1024
 _DEFAULT_BODY_CAP = 1 * _MIB
 _UPLOAD_BODY_CAP = 12 * _MIB
+# Every route that accepts an UploadFile must appear here (exact path) or in
+# _UPLOAD_PATH_PATTERNS, with this cap at or above the route's own app-side
+# limit — otherwise the 1 MB default cap rejects legitimate uploads before
+# the app ever sees them (audit finding L5: a 2 MB receipt photo got a 413
+# although the receipt endpoint allows 10 MB). tests/test_security_fixes.py
+# enumerates the UploadFile routes and asserts each one is covered.
 _UPLOAD_PATHS = {
-    "/api/ceo/submit-report",
-    "/api/ceo/profile",
-    "/api/ho/submit-report",
+    "/api/ceo/submit-report",   # attachment, app limit 10 MB
+    "/api/ceo/profile",         # profile photo, app limit 5 MB
+    "/api/ho/submit-report",    # attachment, app limit 10 MB
+    "/api/accounting/opening-balance",  # Excel import, no app-side limit
 }
+_UPLOAD_PATH_PATTERNS = (
+    re.compile(r"^/api/ops/expenses/\d+/receipt$"),  # receipt, app limit 10 MB
+)
+
+
+def is_upload_path(path: str) -> bool:
+    return path in _UPLOAD_PATHS or any(pattern.match(path) for pattern in _UPLOAD_PATH_PATTERNS)
+
+
+_EXPORT_PATH_PATTERNS = (
+    re.compile(r"^/api/ops/sales-customers/\d+/statement$"),
+    re.compile(r"^/api/ops/payroll-runs/\d+/lines/\d+/payslip$"),
+)
+
+
+def is_export_path(path: str) -> bool:
+    """The expensive report/export endpoints covered by the per-caller edge
+    budget (audit finding L2): every accounting report, any path containing
+    /export, the monthly chairman PDF, customer statements and payslip PDFs.
+    Normal API/dashboard traffic is deliberately NOT matched."""
+    return (
+        path.startswith("/api/accounting/reports/")
+        or "/export" in path
+        or path == "/api/ops/monthly-report"
+        or any(pattern.match(path) for pattern in _EXPORT_PATH_PATTERNS)
+    )
 
 # After an early rejection the unread request body is read and discarded
 # (bounded) before the connection closes. Closing a socket that still has
@@ -172,6 +213,11 @@ class EdgeMiddleware:
             origin for origin in (_origin_of(o) for o in settings.ALLOWED_ORIGINS) if origin
         }
 
+        # Export/report budget state (see _export_budget_retry).
+        self._export_limit = settings.EDGE_EXPORT_RATE_LIMIT
+        self._export_window = settings.EDGE_EXPORT_RATE_WINDOW
+        self._export_hits: dict[str, deque] = {}
+
     # ------------------------------------------------------------------ ASGI
 
     async def __call__(self, scope, receive, send) -> None:
@@ -206,7 +252,7 @@ class EdgeMiddleware:
                 return
 
             # 3. Body size cap — before any framework parsing or auth.
-            cap = _UPLOAD_BODY_CAP if path in _UPLOAD_PATHS else _DEFAULT_BODY_CAP
+            cap = _UPLOAD_BODY_CAP if is_upload_path(path) else _DEFAULT_BODY_CAP
             length = headers.get(b"content-length")
             if length is not None:
                 if not length.strip().isdigit():
@@ -217,6 +263,22 @@ class EdgeMiddleware:
                     return
         else:
             cap = 0
+
+        # 4. Export/report rate budget — expensive endpoints only; normal
+        # API and dashboard traffic (including the notification polling)
+        # never reaches this check.
+        if is_export_path(path):
+            retry = self._export_budget_retry(scope, headers)
+            if retry is not None:
+                await self._reject(
+                    send,
+                    path,
+                    429,
+                    "Too many report or export requests — please slow down",
+                    unread,
+                    extra_headers=[(b"retry-after", str(retry).encode("ascii"))],
+                )
+                return
 
         state = _RequestState()
         received = 0
@@ -304,6 +366,51 @@ class EdgeMiddleware:
         own = _origin_of(f"{scheme}://{host_header}")
         return own is not None and own == origin
 
+    def _export_budget_retry(self, scope, headers: dict[bytes, bytes]) -> int | None:
+        """Records one hit against the caller's export budget; returns the
+        Retry-After seconds when over budget, else None.
+
+        Sliding window held in process: the deploy is a single container,
+        so per-process state is exact (if that ever changes, move this to
+        the database like the auth throttles in src/throttle.py). Keyed by
+        the session username when the cookie carries a verifiable token —
+        decoded with the same pinned algorithm and required claims the
+        auth layer demands — else by client IP, resolved by the very same
+        helper the throttles use so the two never disagree about who
+        called. A forged cookie therefore only ever budgets the caller's
+        own IP bucket, never someone else's."""
+        key = None
+        token = None
+        for part in headers.get(b"cookie", b"").decode("latin-1").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == settings.COOKIE_NAME:
+                token = value
+                break
+        if token:
+            try:
+                payload = jwt.decode(
+                    token,
+                    settings.JWT_SECRET_KEY,
+                    algorithms=[settings.JWT_ALGORITHM],
+                    options={"require": ["exp", "sub", "tv"]},
+                )
+                if isinstance(payload.get("sub"), str):
+                    key = f"user:{payload['sub']}"
+            except jwt.InvalidTokenError:
+                key = None
+        if key is None:
+            key = f"ip:{get_client_ip(Request(scope)) or 'unknown'}"
+
+        now = time.monotonic()
+        hits = self._export_hits.setdefault(key, deque())
+        cutoff = now - self._export_window
+        while hits and hits[0] <= cutoff:
+            hits.popleft()
+        if len(hits) >= self._export_limit:
+            return max(1, int(hits[0] + self._export_window - now) + 1)
+        hits.append(now)
+        return None
+
     # -------------------------------------------------------------- headers
 
     def _decorate(self, path: str, status: int, raw_headers) -> list[tuple[bytes, bytes]]:
@@ -334,17 +441,18 @@ class EdgeMiddleware:
 
     # ------------------------------------------------------------- responses
 
-    async def _reject(self, send, path: str, status: int, detail: str, drain=None) -> None:
+    async def _reject(self, send, path: str, status: int, detail: str, drain=None, extra_headers=()) -> None:
         """Send a JSON error and close the connection. `drain` is the raw
         `receive` when part of the request body is still unread."""
-        await self._respond(send, path, status, {"detail": detail}, close=True, drain=drain)
+        await self._respond(send, path, status, {"detail": detail}, close=True, drain=drain, extra_headers=extra_headers)
 
-    async def _respond(self, send, path: str, status: int, payload: dict, close: bool = False, drain=None) -> None:
+    async def _respond(self, send, path: str, status: int, payload: dict, close: bool = False, drain=None, extra_headers=()) -> None:
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         raw_headers = [
             (b"content-type", b"application/json"),
             (b"content-length", str(len(body)).encode("ascii")),
             (b"cache-control", _NO_STORE),
+            *extra_headers,
         ]
         if close:
             raw_headers.append((b"connection", b"close"))

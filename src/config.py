@@ -196,6 +196,12 @@ class Settings:
         # enforce | report-only | off — report-only lets you click through the
         # app watching the browser console for violations before enforcing.
         self.CSP_MODE: str = os.getenv("CSP_MODE", "enforce").strip().lower()
+        # Per-caller budget for the expensive report/export endpoints,
+        # enforced by the edge middleware (src/edge.py). The auth endpoints
+        # have their own database-backed throttles; this one exists so a
+        # single signed-in account can't hammer PDF/Excel generation.
+        self.EDGE_EXPORT_RATE_LIMIT: int = int(os.getenv("EDGE_EXPORT_RATE_LIMIT", "60"))
+        self.EDGE_EXPORT_RATE_WINDOW: int = int(os.getenv("EDGE_EXPORT_RATE_WINDOW", "300"))
 
         # --- Cloudflare R2 ---
         self.R2_ACCOUNT_ID: str = os.getenv("R2_ACCOUNT_ID", "")
