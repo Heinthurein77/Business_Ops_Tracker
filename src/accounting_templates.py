@@ -89,9 +89,89 @@ TYPE_EXTRAS = {
         ("2180", "Intercompany Payable", "liability", "2100", False),
         ("1180", "Intercompany Receivable", "asset", "1100", False),
     ],
+    # --- 2026-10-21: templates for the group's other business natures.
+    # Codes never reuse a code with a different meaning (consolidation sums
+    # by code), so shared concepts share codes across templates
+    # (e.g. 6820 shrinkage/expiry, 2310 customer deposits).
+    "convenience": [
+        ("5110", "Store Supplies Consumed", "expense", "5000", False),
+        ("6510", "POS & Store Operating Costs", "expense", "6000", False),
+        ("6820", "Shrinkage, Spoilage & Expiry Write-off", "expense", "6000", False),
+    ],
+    "telecom": [
+        ("1190", "Prepaid Airtime & SIM Stock", "asset", "1100", False),
+        ("4310", "Operator Commission Income", "income", "4000", False),
+        ("4320", "Subscription & Package Income", "income", "4000", False),
+        ("6830", "Network & Airtime Costs", "expense", "6000", False),
+    ],
+    "furniture": [
+        ("1270", "Work in Progress — Furniture Orders", "asset", "1100", False),
+        ("2310", "Customer Deposits & Advances", "liability", "2100", False),
+        ("4330", "Installation & Delivery Income", "income", "4000", False),
+        ("5110", "Workshop Supplies Consumed", "expense", "5000", False),
+    ],
+    "cosmetics": [
+        ("5110", "Store Supplies Consumed", "expense", "5000", False),
+        ("6510", "POS & Store Operating Costs", "expense", "6000", False),
+        ("6820", "Shrinkage, Spoilage & Expiry Write-off", "expense", "6000", False),
+        ("4340", "Salon & Beauty Service Income", "income", "4000", False),
+    ],
+    "production": [
+        ("1310", "Raw Materials Inventory", "asset", "1100", False),
+        ("1320", "Work in Progress", "asset", "1100", False),
+        ("1330", "Finished Goods Inventory", "asset", "1100", False),
+        ("5210", "Direct Labour (Production)", "expense", "5000", False),
+        ("5220", "Factory Overhead", "expense", "5000", False),
+        ("5230", "Production Consumables", "expense", "5000", False),
+    ],
+    "principal": [
+        ("5120", "Warehouse Handling Costs", "expense", "5000", False),
+        ("5130", "Delivery Costs (COGS)", "expense", "5000", False),
+        ("1170", "Goods in Transit", "asset", "1100", False),
+        ("1410", "Consignment Stock (Principal-owned)", "asset", "1100", False),
+        ("1420", "Principal Claims Receivable", "asset", "1100", False),
+        ("4350", "Principal Commission & Incentive Income", "income", "4000", False),
+    ],
+    "content": [
+        ("4220", "Project / Contract Income", "income", "4000", False),
+        ("4360", "Retainer & Subscription Income", "income", "4000", False),
+        ("6270", "Freelancer & Contractor Costs", "expense", "6000", False),
+        ("6280", "Media Buying & Production Costs", "expense", "6000", False),
+        ("6610", "Software & Subscriptions", "expense", "6000", False),
+    ],
+    "real_estate": [
+        ("1510", "Land & Development Costs", "asset", "1100", False),
+        ("1520", "Properties Held for Sale", "asset", "1100", False),
+        ("1530", "Rental Properties", "asset", "1200", False),
+        ("2310", "Customer Deposits & Advances", "liability", "2100", False),
+        ("2320", "Rental Deposits Held", "liability", "2100", False),
+        ("4370", "Rental Income", "income", "4000", False),
+        ("4380", "Property Sales Income", "income", "4000", False),
+        ("6840", "Property Maintenance & Management", "expense", "6000", False),
+    ],
 }
 
-TEMPLATE_TYPES = ["retail", "distribution", "logistics", "services", "head_office"]
+TEMPLATE_TYPES = [
+    "retail", "distribution", "logistics", "services", "head_office",
+    "convenience", "telecom", "furniture", "cosmetics", "production",
+    "principal", "content", "real_estate",
+]
+
+TEMPLATE_LABELS = {
+    "retail": "Retail Shop",
+    "distribution": "Distribution",
+    "logistics": "Logistics & Transport",
+    "services": "Services",
+    "head_office": "Head Office",
+    "convenience": "Convenience Store",
+    "telecom": "Telecom",
+    "furniture": "Furniture",
+    "cosmetics": "Cosmetics & Beauty",
+    "production": "Production / Manufacturing",
+    "principal": "Principal Distribution",
+    "content": "Content Solution / Agency",
+    "real_estate": "Real Estate (အိမ်ခြံမြေ)",
+}
 
 
 def template_accounts(template_type: str) -> list[tuple]:

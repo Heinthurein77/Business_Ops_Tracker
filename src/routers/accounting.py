@@ -1568,3 +1568,149 @@ def settle_intercompany(txn_id: int, user: User = Depends(require_accounting),
     t.settled_at = datetime.utcnow()
     db.commit()
     return serialize_intercompany(t)
+
+
+# ------------------------------------------------------------------ cash flow + year-end close
+
+@router.get("/reports/cash-flow")
+def cash_flow_report(business_unit_id: int, period: str,
+                       user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Direct-method cash flow for one month: every posted entry touching
+    cash (1110/1120), classified operating / investing / financing by its
+    counter-accounts."""
+    check_bu_access(user, business_unit_id)
+    y, m = map(int, period.split("-"))
+    import calendar as _cal
+    start, end = date(y, m, 1), date(y, m, _cal.monthrange(y, m)[1])
+    cash_ids = {a.id for a in db.query(Account).filter(
+        Account.business_unit_id == business_unit_id,
+        Account.code.in_(("1110", "1120"))).all()}
+    if not cash_ids:
+        raise HTTPException(404, "Cash accounts not found — provision a chart of accounts first")
+
+    def cash_sum(upto: Optional[date] = None, frm: Optional[date] = None) -> Decimal:
+        q = db.query(func.coalesce(func.sum(JournalLine.debit - JournalLine.credit), 0)).join(
+            JournalEntry, JournalEntry.id == JournalLine.entry_id).filter(
+            JournalEntry.business_unit_id == business_unit_id,
+            JournalEntry.status == "posted",
+            JournalLine.account_id.in_(cash_ids))
+        if upto:
+            q = q.filter(JournalEntry.entry_date <= upto)
+        if frm:
+            q = q.filter(JournalEntry.entry_date >= frm)
+        return Decimal(str(q.scalar() or 0))
+
+    from datetime import timedelta as _td
+    opening = cash_sum(upto=start - _td(days=1))
+    entries = db.query(JournalEntry).filter(
+        JournalEntry.business_unit_id == business_unit_id,
+        JournalEntry.status == "posted",
+        JournalEntry.entry_date >= start, JournalEntry.entry_date <= end).order_by(
+        JournalEntry.entry_date, JournalEntry.id).all()
+    sections = {"operating": ZERO, "investing": ZERO, "financing": ZERO}
+    detail = []
+    for e in entries:
+        lines = db.query(JournalLine).filter(JournalLine.entry_id == e.id).all()
+        delta = sum((Decimal(str(l.debit or 0)) - Decimal(str(l.credit or 0)))
+                    for l in lines if l.account_id in cash_ids)
+        if delta == 0:
+            continue
+        category = "operating"
+        for l in lines:
+            if l.account_id in cash_ids:
+                continue
+            acc = db.query(Account).filter(Account.id == l.account_id).first()
+            if not acc:
+                continue
+            if acc.code.startswith("12") or acc.code == "1530":
+                category = "investing"
+                break
+            if acc.code in ("2140", "2200") or acc.account_type == "equity":
+                category = "financing"
+        sections[category] += delta
+        detail.append({"date": e.entry_date.isoformat(), "entry_no": e.entry_no,
+                       "description": e.description, "category": category,
+                       "amount": fmt(delta)})
+    net = sum(sections.values())
+    return {"period": period, "opening_cash": fmt(opening),
+            "operating": fmt(sections["operating"]), "investing": fmt(sections["investing"]),
+            "financing": fmt(sections["financing"]), "net_change": fmt(net),
+            "closing_cash": fmt(opening + net), "items": detail}
+
+
+class YearCloseIn(BaseModel):
+    business_unit_id: int
+    year: int
+
+
+@router.post("/year-close")
+def year_close(payload: YearCloseIn, user: User = Depends(require_roles("Chairman", "HO")),
+               db: Session = Depends(get_db)):
+    """Close a fiscal year: zero all income/expense accounts into
+    3200 Retained Earnings with one posted journal on Dec 31, then close
+    every period of the year. Run while December is still open."""
+    bu_id = payload.business_unit_id
+    bu = bu_or_404(db, bu_id)
+    if db.query(JournalEntry).filter(JournalEntry.business_unit_id == bu_id,
+                                     JournalEntry.source == "year_close",
+                                     JournalEntry.source_id == payload.year).first():
+        raise HTTPException(400, f"Year {payload.year} is already closed for this BU")
+    start, end = date(payload.year, 1, 1), date(payload.year, 12, 31)
+    rows = db.query(JournalLine, Account).join(
+        JournalEntry, JournalEntry.id == JournalLine.entry_id).join(
+        Account, Account.id == JournalLine.account_id).filter(
+        JournalEntry.business_unit_id == bu_id, JournalEntry.status == "posted",
+        JournalEntry.entry_date >= start, JournalEntry.entry_date <= end,
+        JournalEntry.source != "year_close",
+        Account.account_type.in_(("income", "expense"))).all()
+    balances: dict[int, dict] = {}
+    for line, acc in rows:
+        b = balances.setdefault(acc.id, {"account": acc, "net": ZERO})
+        b["net"] += Decimal(str(line.debit or 0)) - Decimal(str(line.credit or 0))
+    lines: list[dict] = []
+    total_income = ZERO
+    total_expense = ZERO
+    for b in balances.values():
+        acc, net = b["account"], b["net"]
+        if acc.account_type == "income":
+            credit_balance = -net
+            if credit_balance > 0:
+                lines.append({"account_id": acc.id, "debit": credit_balance, "credit": 0})
+                total_income += credit_balance
+            elif credit_balance < 0:
+                lines.append({"account_id": acc.id, "debit": 0, "credit": -credit_balance})
+                total_income += credit_balance
+        else:
+            if net > 0:
+                lines.append({"account_id": acc.id, "debit": 0, "credit": net})
+                total_expense += net
+            elif net < 0:
+                lines.append({"account_id": acc.id, "debit": -net, "credit": 0})
+                total_expense += net
+    if not lines:
+        raise HTTPException(400, "No income/expense activity to close for this year")
+    net_profit = total_income - total_expense
+    re_acc = account_by_code(db, bu_id, "3200")
+    if not re_acc:
+        raise HTTPException(400, "Retained Earnings account (3200) not found")
+    if net_profit > 0:
+        lines.append({"account_id": re_acc.id, "debit": 0, "credit": net_profit})
+    elif net_profit < 0:
+        lines.append({"account_id": re_acc.id, "debit": -net_profit, "credit": 0})
+    entry = create_entry(db, bu_id, end, f"Year-end close {payload.year} — profit to retained earnings",
+                         "year_close", user.id, lines, source_id=payload.year, post=True)
+    db.flush()
+    for mth in range(1, 13):
+        pstr = f"{payload.year}-{mth:02d}"
+        prow = db.query(FiscalPeriod).filter(FiscalPeriod.business_unit_id == bu_id,
+                                             FiscalPeriod.period == pstr).first()
+        if not prow:
+            prow = FiscalPeriod(business_unit_id=bu_id, period=pstr)
+            db.add(prow)
+        prow.status = "closed"
+        prow.closed_by_id = user.id
+        prow.closed_at = datetime.utcnow()
+    db.commit()
+    return {"year": payload.year, "entry_no": entry.entry_no,
+            "total_income": fmt(total_income), "total_expenses": fmt(total_expense),
+            "net_profit": fmt(net_profit)}

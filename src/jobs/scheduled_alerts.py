@@ -12,6 +12,7 @@ Both checks are idempotent/throttled in src/routers/ops.py:
 import sys
 
 from src.database import SessionLocal
+from src.routers.modules import run_check_batch_expiry
 from src.routers.ops import run_check_document_expiry, run_remind_missing_reports
 
 
@@ -22,6 +23,8 @@ def main() -> int:
         expiry = run_check_document_expiry(db, days=30)
         print(f"missing-report reminders sent: {reminded}")
         print(f"documents expiring soon: {expiry['checked']} (notifications sent: {expiry['notified']})")
+        batches = run_check_batch_expiry(db, days=30)
+        print(f"stock batches expiring soon: {batches['checked']} (notifications sent: {batches['notified']})")
         return 0
     except Exception as exc:
         print(f"scheduled_alerts failed: {exc}", file=sys.stderr)

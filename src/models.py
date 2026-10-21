@@ -516,6 +516,9 @@ class InventoryItem(Base):
     current_stock = Column(Numeric(14, 2), default=0, nullable=False)
     reorder_level = Column(Numeric(14, 2), default=0, nullable=False)
     unit_cost = Column(Numeric(14, 2), nullable=True)
+    brand = Column(String(120), nullable=True, index=True)
+    principal_id = Column(Integer, ForeignKey("suppliers.id"), nullable=True, index=True)
+    requires_expiry = Column(Boolean, default=False, nullable=False)  # cosmetics/food/telecom
     is_active = Column(Boolean, default=True, nullable=False)
     low_notified_at = Column(DateTime, nullable=True)  # last low-stock alert sent
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -556,6 +559,7 @@ class ExpenseRequest(Base):
     # Two-stage approval for large amounts: first (HO) -> final (Chairman).
     # Small expenses start at "final" (single-step, original behaviour).
     approval_stage = Column(String(10), default="final", nullable=False)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
     reviewed_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     review_notes = Column(Text, nullable=True)
     reviewed_at = Column(DateTime, nullable=True)
@@ -762,6 +766,7 @@ class PurchaseOrder(Base):
     status = Column(String(20), default="draft", nullable=False, index=True)
     currency = Column(String(3), default="MMK", nullable=False)
     exchange_rate = Column(Numeric(14, 4), default=1, nullable=False)  # MMK per 1 unit
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
     order_date = Column(Date, nullable=False)
     notes = Column(String(500), nullable=True)
     received_at = Column(DateTime, nullable=True)
@@ -824,6 +829,7 @@ class SalesInvoice(Base):
     invoice_date = Column(Date, nullable=False)
     due_date = Column(Date, nullable=True)
     tax_rate = Column(Numeric(5, 2), default=5, nullable=False)  # % commercial tax
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
     currency = Column(String(3), default="MMK", nullable=False)
     exchange_rate = Column(Numeric(14, 4), default=1, nullable=False)  # MMK per 1 unit
     notes = Column(String(500), nullable=True)
@@ -845,8 +851,10 @@ class SalesInvoiceLine(Base):
     description = Column(String(200), nullable=False)
     quantity = Column(Numeric(14, 2), default=1, nullable=False)
     unit_price = Column(Numeric(16, 2), nullable=False)
+    inventory_item_id = Column(Integer, ForeignKey("inventory_items.id"), nullable=True, index=True)
 
     invoice = relationship("SalesInvoice", back_populates="lines")
+    inventory_item = relationship("InventoryItem")
 
 
 class InvoicePayment(Base):
@@ -1058,3 +1066,180 @@ class IntercompanyTransaction(Base):
 
     from_business_unit = relationship("BusinessUnit", foreign_keys=[from_business_unit_id])
     to_business_unit = relationship("BusinessUnit", foreign_keys=[to_business_unit_id])
+
+
+# ------------------------------------------------------------------ nature modules (2026-10-21)
+
+class StockBatch(Base):
+    """A received batch/lot of an inventory item, with expiry.
+
+    Serves cosmetics/food (expiry + FEFO), telecom (SIM/device lots) and
+    principal distribution (batch claims). Stock-outs consume the
+    earliest-expiring batch first (FEFO).
+    """
+    __tablename__ = "stock_batches"
+
+    id = Column(Integer, primary_key=True, index=True)
+    item_id = Column(Integer, ForeignKey("inventory_items.id"), nullable=False, index=True)
+    batch_no = Column(String(80), nullable=False)
+    expiry_date = Column(Date, nullable=True, index=True)
+    quantity = Column(Numeric(14, 2), default=0, nullable=False)  # remaining
+    unit_cost = Column(Numeric(14, 2), nullable=True)
+    expiry_notified_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    item = relationship("InventoryItem")
+
+
+class Project(Base):
+    """A cost/revenue object: content project, logistics job, contract,
+    furniture order, property development — per-project P&L comes from
+    the invoices, POs and expenses linked to it."""
+    __tablename__ = "projects"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    project_type = Column(String(30), default="general", nullable=False, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True)
+    status = Column(String(20), default="active", nullable=False, index=True)  # active/completed/cancelled
+    start_date = Column(Date, nullable=True)
+    end_date = Column(Date, nullable=True)
+    notes = Column(Text, nullable=True)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+    customer = relationship("Customer")
+
+
+class Shipment(Base):
+    """Logistics job: one trip/load for a customer, with running costs."""
+    __tablename__ = "shipments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True)
+    reference = Column(String(60), nullable=True)
+    origin = Column(String(150), nullable=True)
+    destination = Column(String(150), nullable=True)
+    vehicle_no = Column(String(40), nullable=True)
+    driver_name = Column(String(120), nullable=True)
+    shipment_date = Column(Date, nullable=False)
+    status = Column(String(20), default="planned", nullable=False, index=True)  # planned/in_transit/delivered/cancelled
+    freight_charge = Column(Numeric(16, 2), default=0, nullable=False)
+    fuel_cost = Column(Numeric(16, 2), default=0, nullable=False)
+    toll_fees = Column(Numeric(16, 2), default=0, nullable=False)
+    driver_fees = Column(Numeric(16, 2), default=0, nullable=False)
+    other_costs = Column(Numeric(16, 2), default=0, nullable=False)
+    invoice_id = Column(Integer, ForeignKey("sales_invoices.id"), nullable=True)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+    customer = relationship("Customer")
+
+
+class ManufacturingBom(Base):
+    """Bill of materials: components needed to produce one finished item."""
+    __tablename__ = "manufacturing_boms"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    finished_item_id = Column(Integer, ForeignKey("inventory_items.id"), nullable=False, index=True)
+    name = Column(String(200), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    finished_item = relationship("InventoryItem", foreign_keys=[finished_item_id])
+    components = relationship("BomComponent", back_populates="bom", cascade="all, delete-orphan")
+
+
+class BomComponent(Base):
+    __tablename__ = "bom_components"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bom_id = Column(Integer, ForeignKey("manufacturing_boms.id"), nullable=False, index=True)
+    component_item_id = Column(Integer, ForeignKey("inventory_items.id"), nullable=False, index=True)
+    quantity_per_unit = Column(Numeric(14, 4), nullable=False)
+
+    bom = relationship("ManufacturingBom", back_populates="components")
+    component_item = relationship("InventoryItem", foreign_keys=[component_item_id])
+
+
+class ProductionOrder(Base):
+    """Produce `quantity` finished items from a BOM. Completing consumes
+    components at average cost; finished goods are stocked at
+    (materials + labour + overhead) / quantity."""
+    __tablename__ = "production_orders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    bom_id = Column(Integer, ForeignKey("manufacturing_boms.id"), nullable=False, index=True)
+    quantity = Column(Numeric(14, 2), nullable=False)
+    labour_cost = Column(Numeric(16, 2), default=0, nullable=False)
+    overhead_cost = Column(Numeric(16, 2), default=0, nullable=False)
+    materials_cost = Column(Numeric(16, 2), nullable=True)  # computed on completion
+    unit_cost = Column(Numeric(16, 2), nullable=True)       # computed on completion
+    status = Column(String(20), default="planned", nullable=False, index=True)  # planned/completed/cancelled
+    production_date = Column(Date, nullable=True)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    bom = relationship("ManufacturingBom")
+
+
+class PropertyUnit(Base):
+    """A real-estate unit (apartment/house/land/shop) held for sale or rent."""
+    __tablename__ = "property_units"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    development = Column(String(150), nullable=True)  # project/building name
+    unit_no = Column(String(60), nullable=False)
+    unit_type = Column(String(30), default="apartment", nullable=False)
+    size_sqft = Column(Numeric(12, 2), nullable=True)
+    asking_price = Column(Numeric(18, 2), nullable=True)
+    status = Column(String(20), default="available", nullable=False, index=True)  # available/reserved/sold/rented
+    sale_invoice_id = Column(Integer, ForeignKey("sales_invoices.id"), nullable=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+
+
+class Installment(Base):
+    """One scheduled payment on an invoice's installment plan (real-estate
+    and furniture sales). Invoice payments allocate FIFO across the plan."""
+    __tablename__ = "installments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    invoice_id = Column(Integer, ForeignKey("sales_invoices.id"), nullable=False, index=True)
+    seq = Column(Integer, nullable=False)
+    due_date = Column(Date, nullable=False, index=True)
+    amount = Column(Numeric(18, 2), nullable=False)
+    paid_amount = Column(Numeric(18, 2), default=0, nullable=False)
+
+    invoice = relationship("SalesInvoice")
+
+
+class LeaseContract(Base):
+    """Rental lease on a property unit: tenant, monthly rent, deposit."""
+    __tablename__ = "lease_contracts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    unit_id = Column(Integer, ForeignKey("property_units.id"), nullable=False, index=True)
+    tenant_id = Column(Integer, ForeignKey("customers.id"), nullable=False)
+    monthly_rent = Column(Numeric(16, 2), nullable=False)
+    deposit_amount = Column(Numeric(16, 2), default=0, nullable=False)
+    start_date = Column(Date, nullable=False)
+    end_date = Column(Date, nullable=True)
+    status = Column(String(20), default="active", nullable=False, index=True)  # active/ended
+    last_billed_period = Column(String(7), nullable=True)  # YYYY-MM
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    unit = relationship("PropertyUnit")
+    tenant = relationship("Customer")

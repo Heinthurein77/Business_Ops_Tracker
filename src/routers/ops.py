@@ -250,6 +250,9 @@ class InventoryItemIn(BaseModel):
     reorder_level: float = 0
     unit_cost: Optional[float] = None
     initial_stock: float = 0
+    brand: Optional[str] = None
+    principal_id: Optional[int] = None
+    requires_expiry: bool = False
 
 
 def serialize_inventory_item(item: InventoryItem) -> dict:
@@ -266,6 +269,9 @@ def serialize_inventory_item(item: InventoryItem) -> dict:
         "reorder_level": reorder,
         "is_low": stock <= reorder,
         "unit_cost": float(item.unit_cost) if item.unit_cost is not None else None,
+        "brand": getattr(item, "brand", None),
+        "principal_id": getattr(item, "principal_id", None),
+        "requires_expiry": bool(getattr(item, "requires_expiry", False)),
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,
     }
 
@@ -297,6 +303,8 @@ def create_inventory_item(payload: InventoryItemIn, user: User = Depends(get_cur
         current_stock=Decimal(str(payload.initial_stock)),
         reorder_level=Decimal(str(payload.reorder_level)),
         unit_cost=Decimal(str(payload.unit_cost)) if payload.unit_cost is not None else None,
+        brand=payload.brand, principal_id=payload.principal_id,
+        requires_expiry=payload.requires_expiry,
     )
     db.add(item)
     db.commit()
@@ -324,6 +332,11 @@ def record_movement(item_id: int, payload: MovementIn, user: User = Depends(get_
         item.current_stock = (item.current_stock or 0) + qty
     elif payload.movement_type == "out":
         item.current_stock = (item.current_stock or 0) - qty
+        try:
+            from src.routers.modules import consume_batches_fefo
+            consume_batches_fefo(db, item, qty)
+        except Exception:
+            pass  # batch tracking must never break a stock movement
     elif payload.movement_type == "adjustment":
         item.current_stock = qty
     else:
@@ -460,6 +473,7 @@ class ExpenseIn(BaseModel):
     category: Optional[str] = None
     description: Optional[str] = None
     receipt_url: Optional[str] = None
+    project_id: Optional[int] = None
 
 
 def serialize_expense(db: Session, e: ExpenseRequest) -> dict:
@@ -523,6 +537,7 @@ def submit_expense(payload: ExpenseIn, user: User = Depends(get_current_user), d
         receipt_url=payload.receipt_url,
         status="pending",
         approval_stage=stage,
+        project_id=payload.project_id,
     )
     db.add(e)
     db.commit()
@@ -1195,6 +1210,7 @@ class POIn(BaseModel):
     notes: Optional[str] = None
     currency: str = "MMK"
     exchange_rate: Optional[float] = None  # MMK per 1 unit; defaults to latest rate
+    project_id: Optional[int] = None
     lines: list[POLineIn] = Field(min_length=1)
 
 
@@ -1227,6 +1243,7 @@ def create_po(payload: POIn, user: User = Depends(get_current_user), db: Session
         currency=(payload.currency or "MMK").upper(),
         exchange_rate=(Decimal(str(payload.exchange_rate)) if payload.exchange_rate
                        else latest_rate(db, payload.currency)),
+        project_id=payload.project_id,
     )
     db.add(po)
     db.flush()
@@ -1446,6 +1463,7 @@ class InvoiceLineIn(BaseModel):
     description: str = Field(min_length=1, max_length=200)
     quantity: float = Field(gt=0, default=1)
     unit_price: float = Field(ge=0)
+    inventory_item_id: Optional[int] = None
 
 
 class InvoiceIn(BaseModel):
@@ -1457,6 +1475,7 @@ class InvoiceIn(BaseModel):
     notes: Optional[str] = None
     currency: str = "MMK"
     exchange_rate: Optional[float] = None  # MMK per 1 unit; defaults to latest rate
+    project_id: Optional[int] = None
     lines: list[InvoiceLineIn] = Field(min_length=1)
 
 
@@ -1490,13 +1509,15 @@ def create_invoice(payload: InvoiceIn, user: User = Depends(get_current_user), d
         currency=(payload.currency or "MMK").upper(),
         exchange_rate=(Decimal(str(payload.exchange_rate)) if payload.exchange_rate
                        else latest_rate(db, payload.currency)),
+        project_id=payload.project_id,
     )
     db.add(inv)
     db.flush()
     for ln in payload.lines:
         db.add(SalesInvoiceLine(invoice_id=inv.id, description=ln.description,
                                 quantity=Decimal(str(ln.quantity)),
-                                unit_price=Decimal(str(ln.unit_price))))
+                                unit_price=Decimal(str(ln.unit_price)),
+                                inventory_item_id=ln.inventory_item_id))
     db.commit()
     db.refresh(inv)
     return serialize_invoice(db, inv)
@@ -1550,6 +1571,20 @@ def send_invoice(invoice_id: int, user: User = Depends(get_current_user), db: Se
     bu_scope(user, inv.business_unit_id)
     if inv.status != "draft":
         raise HTTPException(400, f"Cannot send an invoice in status {inv.status}")
+    # Credit-limit enforcement: outstanding (other sent invoices of this
+    # customer, converted to MMK) + this invoice must stay within the limit.
+    cust = inv.customer
+    if cust is not None and getattr(cust, "credit_limit", None):
+        limit = Decimal(str(cust.credit_limit))
+        outstanding = Decimal("0")
+        for other in db.query(SalesInvoice).filter(
+                SalesInvoice.customer_id == cust.id,
+                SalesInvoice.status.in_(("sent", "partial"))).all():
+            outstanding += invoice_amounts(db, other)["balance"] * Decimal(str(getattr(other, "exchange_rate", 1) or 1))
+        this_total = invoice_amounts(db, inv)["total"] * Decimal(str(getattr(inv, "exchange_rate", 1) or 1))
+        if outstanding + this_total > limit:
+            raise HTTPException(400, f"Credit limit exceeded for {cust.name}: limit Ks {float(limit):,.0f}, "
+                                     f"outstanding Ks {float(outstanding):,.0f}, this invoice Ks {float(this_total):,.0f}")
     inv.status = "sent"
     inv.sent_at = datetime.utcnow()
     db.commit()
@@ -1582,6 +1617,17 @@ def record_payment(invoice_id: int, payload: PaymentIn, user: User = Depends(get
     inv.status = "paid" if a2["balance"] <= 0 else "partial"
     db.commit()
     _post_invoice_journal(db, inv, user.id, "payment", amt)
+    try:
+        from src.models import PropertyUnit as _PU
+        from src.routers.modules import allocate_installments
+        allocate_installments(db, inv.id)
+        if inv.status == "paid":
+            unit = db.query(_PU).filter(_PU.sale_invoice_id == inv.id).first()
+            if unit and unit.status == "reserved":
+                unit.status = "sold"
+                db.commit()
+    except Exception:
+        db.rollback()
     db.refresh(inv)
     return serialize_invoice(db, inv)
 
