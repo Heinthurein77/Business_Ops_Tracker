@@ -553,6 +553,9 @@ class ExpenseRequest(Base):
     description = Column(Text, nullable=True)
     receipt_url = Column(String(500), nullable=True)
     status = Column(String(20), default="pending", nullable=False, index=True)  # pending/approved/rejected
+    # Two-stage approval for large amounts: first (HO) -> final (Chairman).
+    # Small expenses start at "final" (single-step, original behaviour).
+    approval_stage = Column(String(10), default="final", nullable=False)
     reviewed_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     review_notes = Column(Text, nullable=True)
     reviewed_at = Column(DateTime, nullable=True)
@@ -757,6 +760,8 @@ class PurchaseOrder(Base):
     supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=False, index=True)
     po_no = Column(String(30), nullable=False, index=True)
     status = Column(String(20), default="draft", nullable=False, index=True)
+    currency = Column(String(3), default="MMK", nullable=False)
+    exchange_rate = Column(Numeric(14, 4), default=1, nullable=False)  # MMK per 1 unit
     order_date = Column(Date, nullable=False)
     notes = Column(String(500), nullable=True)
     received_at = Column(DateTime, nullable=True)
@@ -819,6 +824,8 @@ class SalesInvoice(Base):
     invoice_date = Column(Date, nullable=False)
     due_date = Column(Date, nullable=True)
     tax_rate = Column(Numeric(5, 2), default=5, nullable=False)  # % commercial tax
+    currency = Column(String(3), default="MMK", nullable=False)
+    exchange_rate = Column(Numeric(14, 4), default=1, nullable=False)  # MMK per 1 unit
     notes = Column(String(500), nullable=True)
     sent_at = Column(DateTime, nullable=True)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -993,3 +1000,61 @@ class BankTransaction(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     bank_account = relationship("BankAccount", back_populates="transactions")
+
+
+# ------------------------------------------------------------------ budgets, currency, intercompany (ERP B/C)
+
+class Budget(Base):
+    """Monthly budget per BU per account code (group code standard)."""
+    __tablename__ = "budgets"
+    __table_args__ = (
+        UniqueConstraint("business_unit_id", "period", "account_code", name="uq_budget_bu_period_code"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    period = Column(String(7), nullable=False, index=True)  # YYYY-MM
+    account_code = Column(String(20), nullable=False)
+    amount = Column(Numeric(16, 2), default=0, nullable=False)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+
+
+class ExchangeRate(Base):
+    """MMK per 1 unit of foreign currency (e.g. USD = 2100)."""
+    __tablename__ = "exchange_rates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    currency = Column(String(3), nullable=False, index=True)
+    rate_date = Column(Date, nullable=False, index=True)
+    rate = Column(Numeric(14, 4), nullable=False)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class IntercompanyTransaction(Base):
+    """A sale/charge from one BU (seller) to another (buyer).
+
+    Create posts: seller Dr 1180 Intercompany Receivable / Cr 4100 Sales;
+    buyer Dr <buyer_account_code> / Cr 2180 Intercompany Payable.
+    Settle posts the cash legs in both BUs. Group consolidation eliminates
+    the 1180/2180 balances (Phase 2).
+    """
+    __tablename__ = "intercompany_transactions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    from_business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    to_business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    amount = Column(Numeric(16, 2), nullable=False)
+    description = Column(String(300), nullable=True)
+    txn_date = Column(Date, nullable=False)
+    buyer_account_code = Column(String(20), default="6600", nullable=False)
+    status = Column(String(20), default="open", nullable=False, index=True)  # open/settled
+    settled_at = Column(DateTime, nullable=True)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    from_business_unit = relationship("BusinessUnit", foreign_keys=[from_business_unit_id])
+    to_business_unit = relationship("BusinessUnit", foreign_keys=[to_business_unit_id])

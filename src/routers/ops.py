@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -477,6 +477,9 @@ def serialize_expense(db: Session, e: ExpenseRequest) -> dict:
         "description": e.description,
         "receipt_url": e.receipt_url,
         "status": e.status,
+        "approval_stage": getattr(e, "approval_stage", "final") or "final",
+        "stage_label": ("Waiting HO review" if (getattr(e, "approval_stage", "final") == "first" and e.status == "pending")
+                        else "Waiting final approval" if e.status == "pending" else None),
         "review_notes": e.review_notes,
         "reviewed_at": e.reviewed_at.isoformat() if e.reviewed_at else None,
         "created_at": e.created_at.isoformat() if e.created_at else None,
@@ -498,29 +501,38 @@ def list_expenses(business_unit_id: Optional[int] = None, status: Optional[str] 
     return {"items": [serialize_expense(db, e) for e in rows]}
 
 
+# Expenses above this amount (Ks) go through two-stage approval:
+# HO reviews first, then the Chairman gives final approval.
+TWO_STAGE_THRESHOLD = Decimal("1000000")
+
+
 @router.post("/expenses")
 def submit_expense(payload: ExpenseIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     bu_id = bu_scope(user, payload.business_unit_id)
     if bu_id is None:
         raise HTTPException(400, "business_unit_id is required")
+    amount = Decimal(str(payload.amount))
+    stage = "first" if amount > TWO_STAGE_THRESHOLD else "final"
     e = ExpenseRequest(
         business_unit_id=bu_id,
         submitted_by_id=user.id,
         title=payload.title.strip(),
-        amount=Decimal(str(payload.amount)),
+        amount=amount,
         category=payload.category,
         description=payload.description,
         receipt_url=payload.receipt_url,
         status="pending",
+        approval_stage=stage,
     )
     db.add(e)
     db.commit()
     db.refresh(e)
-    # Notify Chairman/HO for approval
-    for approver in db.query(User).filter(User.role.in_(["Chairman", "HO"]), User.is_active == True).all():  # noqa: E712
+    # Notify the right approvers for this stage
+    roles = ["HO"] if stage == "first" else ["Chairman", "HO"]
+    for approver in db.query(User).filter(User.role.in_(roles), User.is_active == True).all():  # noqa: E712
         db.add(Notification(
             user_id=approver.id, type="expense_pending",
-            title="Expense awaiting approval",
+            title="Expense awaiting approval" if stage == "final" else "Expense awaiting HO review",
             message=f"{e.title} — Ks {float(e.amount):,.0f}", link="/admin/expenses",
         ))
     db.commit()
@@ -541,6 +553,23 @@ def review_expense(expense_id: int, payload: ExpenseReviewIn, user: User = Depen
         raise HTTPException(400, "Expense already reviewed")
     if payload.decision not in ("approved", "rejected"):
         raise HTTPException(400, "decision must be approved/rejected")
+    stage = getattr(e, "approval_stage", "final") or "final"
+    if stage == "first":
+        # Stage 1 of two-stage approval: HO only.
+        if user.role != "HO":
+            raise HTTPException(403, "Large expenses need HO review first")
+        if payload.decision == "approved":
+            e.approval_stage = "final"
+            e.review_notes = payload.notes
+            for chairman in db.query(User).filter(User.role == "Chairman", User.is_active == True).all():  # noqa: E712
+                db.add(Notification(
+                    user_id=chairman.id, type="expense_pending",
+                    title="Expense awaiting final approval",
+                    message=f"{e.title} — Ks {float(e.amount):,.0f} (HO approved)", link="/admin/expenses",
+                ))
+            db.commit()
+            return serialize_expense(db, e)
+        # rejected at stage 1 falls through to the normal rejection below
     e.status = payload.decision
     e.reviewed_by_id = user.id
     e.review_notes = payload.notes
@@ -557,6 +586,37 @@ def review_expense(expense_id: int, payload: ExpenseReviewIn, user: User = Depen
             auto_post_expense(db, e, user.id)
         except Exception:
             db.rollback()  # accounting must never break the approval flow
+    return serialize_expense(db, e)
+
+
+@router.post("/expenses/{expense_id}/receipt")
+async def upload_expense_receipt(expense_id: int, file: UploadFile = File(...),
+                                 user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Attach a receipt photo/file to an expense (R2 when configured)."""
+    from src.r2_storage import upload_fileobj
+    from src.upload_validation import content_matches_extension
+
+    e = db.query(ExpenseRequest).filter(ExpenseRequest.id == expense_id).first()
+    if not e:
+        raise HTTPException(404, "Expense not found")
+    if user.role == "CEO" and e.submitted_by_id != user.id:
+        raise HTTPException(403, "Not your expense")
+    data = await file.read()
+    if len(data) > 10 * 1024 * 1024:
+        raise HTTPException(400, "Receipt file is too large (max 10 MB)")
+    ext = (file.filename or "").rsplit(".", 1)[-1].lower()
+    if ext not in ("jpg", "jpeg", "png", "webp", "pdf"):
+        raise HTTPException(400, "Receipt must be an image or PDF")
+    from io import BytesIO
+    bio = BytesIO(data)
+    if not content_matches_extension(ext, bio):
+        raise HTTPException(400, "File content does not match its extension")
+    bio.seek(0)
+    url = upload_fileobj(bio, file.filename, folder="expense-receipts")
+    if not url:
+        raise HTTPException(503, "File storage is not available")
+    e.receipt_url = url
+    db.commit()
     return serialize_expense(db, e)
 
 
@@ -1111,6 +1171,8 @@ def serialize_po(db: Session, po: PurchaseOrder) -> dict:
         "supplier_name": po.supplier.name if po.supplier else None,
         "status": po.status, "order_date": po.order_date.isoformat() if po.order_date else None,
         "notes": po.notes, "total": float(po_total(po)),
+        "currency": getattr(po, "currency", "MMK") or "MMK",
+        "exchange_rate": float(getattr(po, "exchange_rate", 1) or 1),
         "received_at": po.received_at.isoformat() if po.received_at else None,
         "paid_at": po.paid_at.isoformat() if po.paid_at else None,
         "lines": [{"id": l.id, "item_name": l.item_name, "inventory_item_id": l.inventory_item_id,
@@ -1131,6 +1193,8 @@ class POIn(BaseModel):
     supplier_id: int
     order_date: date
     notes: Optional[str] = None
+    currency: str = "MMK"
+    exchange_rate: Optional[float] = None  # MMK per 1 unit; defaults to latest rate
     lines: list[POLineIn] = Field(min_length=1)
 
 
@@ -1155,10 +1219,14 @@ def create_po(payload: POIn, user: User = Depends(get_current_user), db: Session
     if not supplier:
         raise HTTPException(404, "Supplier not found")
     count = db.query(PurchaseOrder).filter(PurchaseOrder.business_unit_id == payload.business_unit_id).count()
+    from src.routers.accounting import latest_rate
     po = PurchaseOrder(
         business_unit_id=payload.business_unit_id, supplier_id=payload.supplier_id,
         po_no=f"PO-{payload.business_unit_id}-{count + 1:04d}", status="draft",
         order_date=payload.order_date, notes=payload.notes, created_by_id=user.id,
+        currency=(payload.currency or "MMK").upper(),
+        exchange_rate=(Decimal(str(payload.exchange_rate)) if payload.exchange_rate
+                       else latest_rate(db, payload.currency)),
     )
     db.add(po)
     db.flush()
@@ -1183,7 +1251,8 @@ def _post_po_journal(db: Session, po: PurchaseOrder, user_id: int, kind: str) ->
     """kind=receive: Dr 1140 Inventory / Cr 2110 AP. kind=pay: Dr 2110 / Cr 1110."""
     try:
         from src.routers.accounting import account_by_code, create_entry
-        total = po_total(po)
+        # Journals are MMK; foreign-currency POs convert at the PO rate.
+        total = po_total(po) * Decimal(str(getattr(po, "exchange_rate", 1) or 1))
         if total <= 0:
             return
         if kind == "receive":
@@ -1222,6 +1291,7 @@ def receive_po(po_id: int, user: User = Depends(get_current_user), db: Session =
     bu_scope(user, po.business_unit_id)
     if po.status not in ("draft", "ordered"):
         raise HTTPException(400, f"Cannot receive a PO in status {po.status}")
+    fx = Decimal(str(getattr(po, "exchange_rate", 1) or 1))
     for ln in po.lines:
         item = None
         if ln.inventory_item_id:
@@ -1232,14 +1302,14 @@ def receive_po(po_id: int, user: User = Depends(get_current_user), db: Session =
                 InventoryItem.name == ln.item_name, InventoryItem.is_active == True).first()  # noqa: E712
         if item is None:
             item = InventoryItem(business_unit_id=po.business_unit_id, name=ln.item_name,
-                                 current_stock=0, unit_cost=ln.unit_cost)
+                                 current_stock=0, unit_cost=ln.unit_cost * fx)
             db.add(item)
             db.flush()
         ln.inventory_item_id = item.id
         old_qty = Decimal(str(item.current_stock or 0))
         old_avg = Decimal(str(item.unit_cost or 0))
         in_qty = Decimal(str(ln.quantity))
-        in_cost = Decimal(str(ln.unit_cost))
+        in_cost = Decimal(str(ln.unit_cost)) * fx  # inventory is valued in MMK
         new_qty = old_qty + in_qty
         # Moving (weighted) average cost — the standard valuation formula.
         item.unit_cost = ((old_qty * old_avg + in_qty * in_cost) / new_qty) if new_qty > 0 else in_cost
@@ -1359,6 +1429,8 @@ def serialize_invoice(db: Session, inv: SalesInvoice) -> dict:
         "invoice_date": inv.invoice_date.isoformat() if inv.invoice_date else None,
         "due_date": inv.due_date.isoformat() if inv.due_date else None,
         "tax_rate": float(inv.tax_rate or 0), "notes": inv.notes,
+        "currency": getattr(inv, "currency", "MMK") or "MMK",
+        "exchange_rate": float(getattr(inv, "exchange_rate", 1) or 1),
         "subtotal": float(a["subtotal"]), "tax_amount": float(a["tax"]),
         "total": float(a["total"]), "paid": float(a["paid"]), "balance": float(a["balance"]),
         "lines": [{"id": l.id, "description": l.description, "quantity": float(l.quantity),
@@ -1383,6 +1455,8 @@ class InvoiceIn(BaseModel):
     due_date: Optional[date] = None
     tax_rate: float = 5
     notes: Optional[str] = None
+    currency: str = "MMK"
+    exchange_rate: Optional[float] = None  # MMK per 1 unit; defaults to latest rate
     lines: list[InvoiceLineIn] = Field(min_length=1)
 
 
@@ -1407,11 +1481,15 @@ def create_invoice(payload: InvoiceIn, user: User = Depends(get_current_user), d
     if not cust or cust.business_unit_id != payload.business_unit_id:
         raise HTTPException(404, "Customer not found in this BU")
     count = db.query(SalesInvoice).filter(SalesInvoice.business_unit_id == payload.business_unit_id).count()
+    from src.routers.accounting import latest_rate
     inv = SalesInvoice(
         business_unit_id=payload.business_unit_id, customer_id=payload.customer_id,
         invoice_no=f"INV-{payload.business_unit_id}-{count + 1:04d}", status="draft",
         invoice_date=payload.invoice_date, due_date=payload.due_date,
         tax_rate=Decimal(str(payload.tax_rate)), notes=payload.notes, created_by_id=user.id,
+        currency=(payload.currency or "MMK").upper(),
+        exchange_rate=(Decimal(str(payload.exchange_rate)) if payload.exchange_rate
+                       else latest_rate(db, payload.currency)),
     )
     db.add(inv)
     db.flush()
@@ -1435,6 +1513,9 @@ def _post_invoice_journal(db: Session, inv: SalesInvoice, user_id: int, kind: st
     try:
         from src.routers.accounting import account_by_code, create_entry
         bu = inv.business_unit_id
+        # Journals are MMK (functional currency); foreign-currency
+        # invoices convert at the invoice exchange rate.
+        fx = Decimal(str(getattr(inv, "exchange_rate", 1) or 1))
         if kind == "send":
             a = invoice_amounts(db, inv)
             ar = account_by_code(db, bu, "1130")
@@ -1442,10 +1523,10 @@ def _post_invoice_journal(db: Session, inv: SalesInvoice, user_id: int, kind: st
             tax_acc = account_by_code(db, bu, "2130")
             if not (ar and sales):
                 return
-            lines = [{"account_id": ar.id, "debit": a["total"], "credit": 0},
-                     {"account_id": sales.id, "debit": 0, "credit": a["subtotal"]}]
+            lines = [{"account_id": ar.id, "debit": a["total"] * fx, "credit": 0},
+                     {"account_id": sales.id, "debit": 0, "credit": a["subtotal"] * fx}]
             if a["tax"] > 0 and tax_acc:
-                lines.append({"account_id": tax_acc.id, "debit": 0, "credit": a["tax"]})
+                lines.append({"account_id": tax_acc.id, "debit": 0, "credit": a["tax"] * fx})
             create_entry(db, bu, inv.invoice_date, f"Invoice {inv.invoice_no} — {inv.customer.name if inv.customer else ''}",
                          "invoice", user_id, lines, source_id=inv.id, post=True)
         else:  # payment
@@ -1455,8 +1536,8 @@ def _post_invoice_journal(db: Session, inv: SalesInvoice, user_id: int, kind: st
                 return
             create_entry(db, bu, date.today(), f"Payment received {inv.invoice_no}",
                          "invoice", user_id,
-                         [{"account_id": cash.id, "debit": amount, "credit": 0},
-                          {"account_id": ar.id, "debit": 0, "credit": amount}],
+                         [{"account_id": cash.id, "debit": amount * fx, "credit": 0},
+                          {"account_id": ar.id, "debit": 0, "credit": amount * fx}],
                          source_id=inv.id, post=True)
         db.commit()
     except Exception:
@@ -1832,3 +1913,131 @@ def pay_payroll(run_id: int, user: User = Depends(require_roles("Chairman", "HO"
         db.rollback()
     db.refresh(run)
     return serialize_payroll(db, run)
+
+
+# ------------------------------------------------------- D10/D11: payslip & customer statement
+
+def _pdf_safe(t) -> str:
+    return str(t if t is not None else "").encode("latin-1", errors="replace").decode("latin-1")
+
+
+@router.get("/payroll-runs/{run_id}/lines/{line_id}/payslip")
+def payslip_pdf(run_id: int, line_id: int, user: User = Depends(require_admin),
+                db: Session = Depends(get_db)):
+    from io import BytesIO
+
+    from fastapi.responses import StreamingResponse
+    from fpdf import FPDF
+
+    run = db.query(PayrollRun).filter(PayrollRun.id == run_id).first()
+    if not run:
+        raise HTTPException(404, "Payroll run not found")
+    line = db.query(PayrollLine).filter(PayrollLine.id == line_id,
+                                        PayrollLine.run_id == run_id).first()
+    if not line or not line.employee:
+        raise HTTPException(404, "Payslip line not found")
+    bu = db.query(BusinessUnit).filter(BusinessUnit.id == run.business_unit_id).first()
+    emp = line.employee
+    pdf = FPDF(orientation="P", unit="mm", format="A5")
+    pdf.add_page()
+    pdf.set_font("helvetica", "B", 15)
+    pdf.cell(0, 9, "PAYSLIP", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.set_font("helvetica", "", 10)
+    pdf.cell(0, 6, _pdf_safe(f"{bu.name if bu else ''} — {run.period}"), new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.ln(4)
+    pdf.set_font("helvetica", "", 10)
+    rows = [
+        ("Employee", emp.name), ("Position", emp.position or "-"),
+        ("Period", run.period),
+        ("", ""),
+        ("Base salary", f"Ks {float(line.base_salary):,.0f}"),
+        ("Allowances", f"Ks {float(line.allowances):,.0f}"),
+        ("Gross pay", f"Ks {float(line.base_salary) + float(line.allowances):,.0f}"),
+        ("Deductions", f"Ks {float(line.deductions):,.0f}"),
+        ("NET PAY", f"Ks {float(line.base_salary) + float(line.allowances) - float(line.deductions):,.0f}"),
+    ]
+    for label, value in rows:
+        pdf.set_font("helvetica", "B" if label == "NET PAY" else "", 10)
+        pdf.cell(55, 7, _pdf_safe(label))
+        pdf.cell(0, 7, _pdf_safe(value), new_x="LMARGIN", new_y="NEXT")
+    buf = BytesIO(pdf.output())
+    return StreamingResponse(buf, media_type="application/pdf", headers={
+        "Content-Disposition": f'attachment; filename="payslip_{run.period}_{emp.name.replace(" ", "_")}.pdf"'})
+
+
+@router.get("/sales-customers/{customer_id}/statement")
+def customer_statement(customer_id: int, format: str = "pdf",
+                       user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from io import BytesIO
+
+    from fastapi.responses import StreamingResponse
+
+    cust = db.query(Customer).filter(Customer.id == customer_id).first()
+    if not cust:
+        raise HTTPException(404, "Customer not found")
+    if user.role == "CEO" and cust.business_unit_id != user.business_unit_id:
+        raise HTTPException(403, "Not your customer")
+    bu = db.query(BusinessUnit).filter(BusinessUnit.id == cust.business_unit_id).first()
+    invs = db.query(SalesInvoice).filter(SalesInvoice.customer_id == customer_id).order_by(
+        SalesInvoice.invoice_date, SalesInvoice.id).all()
+    rows = []
+    total_billed = Decimal("0")
+    total_paid = Decimal("0")
+    for inv in invs:
+        a = invoice_amounts(db, inv)
+        total_billed += a["total"]
+        total_paid += a["paid"]
+        overdue = (inv.status in ("sent", "partial") and inv.due_date is not None
+                   and inv.due_date < date.today() and a["balance"] > 0)
+        rows.append({
+            "date": inv.invoice_date.isoformat(), "invoice_no": inv.invoice_no,
+            "status": "overdue" if overdue else inv.status, "total": float(a["total"]), "paid": float(a["paid"]),
+            "balance": float(a["balance"]),
+            "currency": getattr(inv, "currency", "MMK") or "MMK",
+        })
+    balance = total_billed - total_paid
+    if format == "xlsx":
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Statement"
+        ws.append([f"Statement of Account — {cust.name}"])
+        ws.append([bu.name if bu else ""])
+        ws.append([])
+        ws.append(["Date", "Invoice", "Status", "Total", "Paid", "Balance", "Currency"])
+        for r in rows:
+            ws.append([r["date"], r["invoice_no"], r["status"], r["total"], r["paid"], r["balance"], r["currency"]])
+        ws.append([])
+        ws.append(["", "", "TOTALS", float(total_billed), float(total_paid), float(balance), ""])
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                 headers={"Content-Disposition": f'attachment; filename="statement_{cust.name.replace(" ", "_")}.xlsx"'})
+    from fpdf import FPDF
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.add_page()
+    pdf.set_font("helvetica", "B", 14)
+    pdf.cell(0, 9, "STATEMENT OF ACCOUNT", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("helvetica", "", 10)
+    pdf.cell(0, 6, _pdf_safe(f"{cust.name} — {bu.name if bu else ''}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, _pdf_safe(f"As of {date.today().isoformat()}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+    pdf.set_font("helvetica", "B", 9)
+    widths = [24, 30, 22, 34, 34, 34, 12]
+    for i, h in enumerate(["Date", "Invoice", "Status", "Total", "Paid", "Balance", "Cur"]):
+        pdf.cell(widths[i], 7, h, border=1)
+    pdf.ln()
+    pdf.set_font("helvetica", "", 9)
+    for r in rows:
+        vals = [r["date"], r["invoice_no"], r["status"], f'{r["total"]:,.0f}', f'{r["paid"]:,.0f}', f'{r["balance"]:,.0f}', r["currency"]]
+        for i, v in enumerate(vals):
+            pdf.cell(widths[i], 6.5, _pdf_safe(v), border=1)
+        pdf.ln()
+    pdf.ln(2)
+    pdf.set_font("helvetica", "B", 10)
+    pdf.cell(0, 7, _pdf_safe(f"Total billed: {float(total_billed):,.0f}   Paid: {float(total_paid):,.0f}   BALANCE DUE: {float(balance):,.0f}"),
+             new_x="LMARGIN", new_y="NEXT")
+    buf = BytesIO(pdf.output())
+    return StreamingResponse(buf, media_type="application/pdf", headers={
+        "Content-Disposition": f'attachment; filename="statement_{cust.name.replace(" ", "_")}.pdf"'})

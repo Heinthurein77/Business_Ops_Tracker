@@ -1261,3 +1261,310 @@ def export_report(report: str, format: str = "xlsx", business_unit_id: Optional[
             headers={"Content-Disposition": f'attachment; filename="{fname_base}.pdf"'})
 
     raise HTTPException(400, "format must be xlsx or pdf")
+
+
+# ------------------------------------------------------- B4/B6: finance summary & tax report
+
+@router.get("/finance-summary")
+def finance_summary(period: Optional[str] = None, user: User = Depends(require_accounting),
+                    db: Session = Depends(get_db)):
+    """Group finance snapshot for the Chairman dashboard: this month's
+    P&L, cash position (1110+1120), AR/AP outstanding, tax payable."""
+    period = period or date.today().strftime("%Y-%m")
+    income = ZERO
+    expense = ZERO
+    cash = ZERO
+    tax_payable = ZERO
+    provisioned = set()
+    for line, acc, e in _all_posted_lines(db):
+        provisioned.add(e.business_unit_id)
+        if period_of(e.entry_date) == period:
+            if acc.account_type == "income":
+                income += (line.credit or ZERO) - (line.debit or ZERO)
+            elif acc.account_type == "expense":
+                expense += (line.debit or ZERO) - (line.credit or ZERO)
+        if acc.code in ("1110", "1120"):
+            cash += (line.debit or ZERO) - (line.credit or ZERO)
+        elif acc.code == "2130":
+            tax_payable += (line.credit or ZERO) - (line.debit or ZERO)
+    from src.models import PurchaseOrder, SalesInvoice
+    from src.routers.ops import invoice_amounts, po_total
+
+    ar = ZERO
+    for inv in db.query(SalesInvoice).filter(SalesInvoice.status.in_(("sent", "partial"))).all():
+        ar += invoice_amounts(db, inv)["balance"] * Decimal(str(getattr(inv, "exchange_rate", 1) or 1))
+    ap = ZERO
+    for po in db.query(PurchaseOrder).filter(PurchaseOrder.status == "received").all():
+        ap += po_total(po) * Decimal(str(getattr(po, "exchange_rate", 1) or 1))
+    return {
+        "period": period, "has_books": len(provisioned) > 0,
+        "income": fmt(income), "expenses": fmt(expense), "net_profit": fmt(income - expense),
+        "cash_position": fmt(cash), "ar_outstanding": fmt(ar), "ap_outstanding": fmt(ap),
+        "tax_payable": fmt(tax_payable),
+    }
+
+
+@router.get("/reports/tax")
+def tax_report(business_unit_id: int, period: str, user: User = Depends(get_current_user),
+               db: Session = Depends(get_db)):
+    """Commercial tax (2130) movement for one BU + period: opening balance,
+    tax charged, tax paid/filed, closing balance, with entry detail."""
+    check_bu_access(user, business_unit_id)
+    acc = account_by_code(db, business_unit_id, "2130")
+    if not acc:
+        # fall back to any (inactive) 2130 row or report zeroes
+        acc = db.query(Account).filter(Account.business_unit_id == business_unit_id,
+                                       Account.code == "2130").first()
+    opening = ZERO
+    charged = ZERO
+    paid = ZERO
+    items = []
+    if acc:
+        for line, a, e in _posted_lines(db, business_unit_id):
+            if a.id != acc.id:
+                continue
+            cr = line.credit or ZERO
+            dr = line.debit or ZERO
+            if period_of(e.entry_date) < period:
+                opening += cr - dr
+            elif period_of(e.entry_date) == period:
+                charged += cr
+                paid += dr
+                items.append({"date": e.entry_date.isoformat(), "entry_no": e.entry_no,
+                              "description": e.description,
+                              "charged": fmt(cr), "paid": fmt(dr)})
+    return {
+        "period": period, "account_code": "2130",
+        "opening_balance": fmt(opening), "tax_charged": fmt(charged),
+        "tax_paid": fmt(paid), "closing_balance": fmt(opening + charged - paid),
+        "items": items,
+    }
+
+
+# ------------------------------------------------------- B5: budgets vs actual
+
+from src.models import Budget, ExchangeRate, IntercompanyTransaction
+
+
+@router.get("/budgets")
+def list_budgets(business_unit_id: int, period: str, user: User = Depends(get_current_user),
+                 db: Session = Depends(get_db)):
+    """Budget rows for a BU + period, each with the month's actuals and variance."""
+    check_bu_access(user, business_unit_id)
+    actuals: dict[str, Decimal] = {}
+    types: dict[str, str] = {}
+    names: dict[str, str] = {}
+    for a in db.query(Account).filter(Account.business_unit_id == business_unit_id).all():
+        types[a.code] = a.account_type
+        names[a.code] = a.name
+    for line, acc, e in _posted_lines(db, business_unit_id):
+        if period_of(e.entry_date) != period or acc.account_type not in ("income", "expense"):
+            continue
+        if acc.account_type == "income":
+            actuals[acc.code] = actuals.get(acc.code, ZERO) + (line.credit or ZERO) - (line.debit or ZERO)
+        else:
+            actuals[acc.code] = actuals.get(acc.code, ZERO) + (line.debit or ZERO) - (line.credit or ZERO)
+    items = []
+    for b in db.query(Budget).filter(Budget.business_unit_id == business_unit_id,
+                                     Budget.period == period).order_by(Budget.account_code).all():
+        actual = actuals.get(b.account_code, ZERO)
+        budget = Decimal(str(b.amount or 0))
+        var = actual - budget
+        items.append({
+            "id": b.id, "account_code": b.account_code, "name": names.get(b.account_code, b.account_code),
+            "account_type": types.get(b.account_code, ""), "budget": fmt(budget),
+            "actual": fmt(actual), "variance": fmt(var),
+            "variance_pct": fmt(var / budget * 100) if budget else None,
+        })
+    return {"items": items,
+            "total_budget": fmt(sum(Decimal(str(i["budget"])) for i in items)),
+            "total_actual": fmt(sum(Decimal(str(i["actual"])) for i in items))}
+
+
+class BudgetIn(BaseModel):
+    business_unit_id: int
+    period: str = Field(pattern=r"^\d{4}-\d{2}$")
+    account_code: str
+    amount: float = Field(ge=0)
+
+
+@router.put("/budgets")
+def upsert_budget(payload: BudgetIn, user: User = Depends(require_accounting),
+                  db: Session = Depends(get_db)):
+    bu_or_404(db, payload.business_unit_id)
+    row = db.query(Budget).filter(Budget.business_unit_id == payload.business_unit_id,
+                                  Budget.period == payload.period,
+                                  Budget.account_code == payload.account_code).first()
+    if not row:
+        row = Budget(business_unit_id=payload.business_unit_id, period=payload.period,
+                     account_code=payload.account_code, created_by_id=user.id)
+        db.add(row)
+    row.amount = Decimal(str(payload.amount))
+    db.commit()
+    return {"ok": True, "id": row.id}
+
+
+@router.delete("/budgets/{budget_id}")
+def delete_budget(budget_id: int, user: User = Depends(require_accounting),
+                  db: Session = Depends(get_db)):
+    row = db.query(Budget).filter(Budget.id == budget_id).first()
+    if not row:
+        raise HTTPException(404, "Budget not found")
+    db.delete(row)
+    db.commit()
+    return {"ok": True}
+
+
+# ------------------------------------------------------- B7: exchange rates
+
+class ExchangeRateIn(BaseModel):
+    currency: str = Field(min_length=3, max_length=3)
+    rate_date: date
+    rate: float = Field(gt=0)
+
+
+@router.get("/exchange-rates")
+def list_exchange_rates(currency: str = "USD", user: User = Depends(require_accounting),
+                        db: Session = Depends(get_db)):
+    rows = db.query(ExchangeRate).filter(ExchangeRate.currency == currency.upper()).order_by(
+        ExchangeRate.rate_date.desc()).limit(30).all()
+    return {"currency": currency.upper(),
+            "latest": ({"rate": fmt(rows[0].rate), "rate_date": rows[0].rate_date.isoformat()} if rows else None),
+            "items": [{"id": r.id, "rate_date": r.rate_date.isoformat(), "rate": fmt(r.rate)} for r in rows]}
+
+
+@router.post("/exchange-rates")
+def create_exchange_rate(payload: ExchangeRateIn, user: User = Depends(require_accounting),
+                         db: Session = Depends(get_db)):
+    r = ExchangeRate(currency=payload.currency.upper(), rate_date=payload.rate_date,
+                     rate=Decimal(str(payload.rate)), created_by_id=user.id)
+    db.add(r)
+    db.commit()
+    return {"ok": True, "id": r.id}
+
+
+def latest_rate(db: Session, currency: str) -> Decimal:
+    if not currency or currency.upper() == "MMK":
+        return Decimal("1")
+    row = db.query(ExchangeRate).filter(ExchangeRate.currency == currency.upper()).order_by(
+        ExchangeRate.rate_date.desc()).first()
+    return Decimal(str(row.rate)) if row else Decimal("1")
+
+
+# ------------------------------------------------------- C9: intercompany
+
+INTERCOMPANY_ACCOUNTS = [
+    ("1180", "Intercompany Receivable", "asset", "1100"),
+    ("2180", "Intercompany Payable", "liability", "2100"),
+]
+
+
+def _ensure_intercompany_accounts(db: Session, bu_id: int) -> None:
+    for code, name, acc_type, parent_code in INTERCOMPANY_ACCOUNTS:
+        if account_by_code(db, bu_id, code):
+            continue
+        parent = account_by_code(db, bu_id, parent_code)
+        db.add(Account(business_unit_id=bu_id, code=code, name=name, account_type=acc_type,
+                       parent_id=parent.id if parent else None, is_system=True))
+    db.flush()
+
+
+def serialize_intercompany(t: IntercompanyTransaction) -> dict:
+    return {
+        "id": t.id, "from_business_unit_id": t.from_business_unit_id,
+        "from_bu_name": t.from_business_unit.name if t.from_business_unit else None,
+        "to_business_unit_id": t.to_business_unit_id,
+        "to_bu_name": t.to_business_unit.name if t.to_business_unit else None,
+        "amount": fmt(t.amount), "description": t.description,
+        "txn_date": t.txn_date.isoformat() if t.txn_date else None,
+        "buyer_account_code": t.buyer_account_code, "status": t.status,
+        "settled_at": t.settled_at.isoformat() if t.settled_at else None,
+    }
+
+
+class IntercompanyIn(BaseModel):
+    from_business_unit_id: int
+    to_business_unit_id: int
+    amount: float = Field(gt=0)
+    description: Optional[str] = None
+    txn_date: date
+    buyer_account_code: str = "6600"
+
+
+@router.get("/intercompany")
+def list_intercompany(user: User = Depends(require_accounting), db: Session = Depends(get_db)):
+    rows = db.query(IntercompanyTransaction).order_by(
+        IntercompanyTransaction.txn_date.desc(), IntercompanyTransaction.id.desc()).limit(200).all()
+    return {"items": [serialize_intercompany(t) for t in rows]}
+
+
+@router.post("/intercompany")
+def create_intercompany(payload: IntercompanyIn, user: User = Depends(require_accounting),
+                        db: Session = Depends(get_db)):
+    if payload.from_business_unit_id == payload.to_business_unit_id:
+        raise HTTPException(400, "Seller and buyer must be different BUs")
+    bu_or_404(db, payload.from_business_unit_id)
+    bu_or_404(db, payload.to_business_unit_id)
+    for bu_id in (payload.from_business_unit_id, payload.to_business_unit_id):
+        if not db.query(Account).filter(Account.business_unit_id == bu_id).first():
+            raise HTTPException(400, "Both BUs need a chart of accounts first (Chart of Accounts tab)")
+    _ensure_intercompany_accounts(db, payload.from_business_unit_id)
+    _ensure_intercompany_accounts(db, payload.to_business_unit_id)
+    db.commit()
+    t = IntercompanyTransaction(**payload.model_dump(), created_by_id=user.id)
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+    amt = Decimal(str(t.amount))
+    seller_recv = account_by_code(db, t.from_business_unit_id, "1180")
+    seller_sales = account_by_code(db, t.from_business_unit_id, "4100")
+    buyer_exp = account_by_code(db, t.to_business_unit_id, t.buyer_account_code)
+    buyer_pay = account_by_code(db, t.to_business_unit_id, "2180")
+    if not (seller_recv and seller_sales and buyer_exp and buyer_pay):
+        raise HTTPException(400, "Required accounts missing in one of the BUs")
+    create_entry(db, t.from_business_unit_id, t.txn_date,
+                 f"Intercompany sale to {t.to_business_unit.name if t.to_business_unit else ''}: {t.description or ''}",
+                 "intercompany", user.id,
+                 [{"account_id": seller_recv.id, "debit": amt, "credit": 0},
+                  {"account_id": seller_sales.id, "debit": 0, "credit": amt}],
+                 source_id=t.id, post=True)
+    create_entry(db, t.to_business_unit_id, t.txn_date,
+                 f"Intercompany charge from {t.from_business_unit.name if t.from_business_unit else ''}: {t.description or ''}",
+                 "intercompany", user.id,
+                 [{"account_id": buyer_exp.id, "debit": amt, "credit": 0},
+                  {"account_id": buyer_pay.id, "debit": 0, "credit": amt}],
+                 source_id=t.id, post=True)
+    db.commit()
+    return serialize_intercompany(t)
+
+
+@router.post("/intercompany/{txn_id}/settle")
+def settle_intercompany(txn_id: int, user: User = Depends(require_accounting),
+                        db: Session = Depends(get_db)):
+    t = db.query(IntercompanyTransaction).filter(IntercompanyTransaction.id == txn_id).first()
+    if not t:
+        raise HTTPException(404, "Intercompany transaction not found")
+    if t.status != "open":
+        raise HTTPException(400, "Already settled")
+    amt = Decimal(str(t.amount))
+    today_d = date.today()
+    seller_recv = account_by_code(db, t.from_business_unit_id, "1180")
+    seller_cash = account_by_code(db, t.from_business_unit_id, "1110")
+    buyer_pay = account_by_code(db, t.to_business_unit_id, "2180")
+    buyer_cash = account_by_code(db, t.to_business_unit_id, "1110")
+    if not (seller_recv and seller_cash and buyer_pay and buyer_cash):
+        raise HTTPException(400, "Required accounts missing in one of the BUs")
+    create_entry(db, t.to_business_unit_id, today_d,
+                 f"Intercompany settlement paid: {t.description or ''}", "intercompany", user.id,
+                 [{"account_id": buyer_pay.id, "debit": amt, "credit": 0},
+                  {"account_id": buyer_cash.id, "debit": 0, "credit": amt}],
+                 source_id=t.id, post=True)
+    create_entry(db, t.from_business_unit_id, today_d,
+                 f"Intercompany settlement received: {t.description or ''}", "intercompany", user.id,
+                 [{"account_id": seller_cash.id, "debit": amt, "credit": 0},
+                  {"account_id": seller_recv.id, "debit": 0, "credit": amt}],
+                 source_id=t.id, post=True)
+    t.status = "settled"
+    t.settled_at = datetime.utcnow()
+    db.commit()
+    return serialize_intercompany(t)
