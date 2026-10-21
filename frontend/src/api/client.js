@@ -290,6 +290,31 @@ export const api = {
     if (period) q.set('period', period);
     return `/api/accounting/reports/export?${q.toString()}`;
   },
+  // ---- ERP B/C/D additions ----
+  accFinanceSummary: () => getJson('/api/accounting/finance-summary'),
+  accTaxReport: (buId, period) => getJson(`/api/accounting/reports/tax?business_unit_id=${buId}&period=${period}`),
+  accBudgets: (buId, period) => getJson(`/api/accounting/budgets?business_unit_id=${buId}&period=${period}`),
+  accSaveBudget: (payload) => fetch('/api/accounting/budgets', {
+    method: 'PUT', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
+  }).then(handle),
+  accDeleteBudget: (id) => fetch(`/api/accounting/budgets/${id}`, { method: 'DELETE', credentials: 'include' }).then(handle),
+  accExchangeRates: (currency = 'USD') => getJson(`/api/accounting/exchange-rates?currency=${currency}`),
+  accCreateRate: (payload) => fetch('/api/accounting/exchange-rates', {
+    method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
+  }).then(handle),
+  accIntercompany: () => getJson('/api/accounting/intercompany'),
+  accCreateIntercompany: (payload) => fetch('/api/accounting/intercompany', {
+    method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
+  }).then(handle),
+  accSettleIntercompany: (id) => fetch(`/api/accounting/intercompany/${id}/settle`, { method: 'POST', credentials: 'include' }).then(handle),
+  opsUploadReceipt: async (expenseId, file) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await fetch(`/api/ops/expenses/${expenseId}/receipt`, { method: 'POST', credentials: 'include', body: fd });
+    return handle(res);
+  },
+  opsPayslipUrl: (runId, lineId) => `/api/ops/payroll-runs/${runId}/lines/${lineId}/payslip`,
+  opsStatementUrl: (customerId, format) => `/api/ops/sales-customers/${customerId}/statement?format=${format}`,
 };
 
 export { ApiError };

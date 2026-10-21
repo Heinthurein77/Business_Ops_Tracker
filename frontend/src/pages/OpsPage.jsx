@@ -64,11 +64,11 @@ export default function OpsPage() {
   const [suppliers, setSuppliers] = useState([]);
   const [supForm, setSupForm] = useState({ name: '', contact_person: '', phone: '' });
   const [pos, setPos] = useState([]);
-  const [poForm, setPoForm] = useState({ supplier_id: '', order_date: new Date().toISOString().slice(0, 10), lines: [{ item_name: '', quantity: '', unit_cost: '' }] });
+  const [poForm, setPoForm] = useState({ supplier_id: '', order_date: new Date().toISOString().slice(0, 10), currency: 'MMK', exchange_rate: '', lines: [{ item_name: '', quantity: '', unit_cost: '' }] });
   const [salesCustomers, setSalesCustomers] = useState([]);
   const [custForm, setCustForm] = useState({ name: '', phone: '' });
   const [invoices, setInvoices] = useState([]);
-  const [invCreate, setInvCreate] = useState({ customer_id: '', invoice_date: new Date().toISOString().slice(0, 10), due_date: '', tax_rate: 5, lines: [{ description: '', quantity: 1, unit_price: '' }] });
+  const [invCreate, setInvCreate] = useState({ customer_id: '', invoice_date: new Date().toISOString().slice(0, 10), due_date: '', tax_rate: 5, currency: 'MMK', exchange_rate: '', lines: [{ description: '', quantity: 1, unit_price: '' }] });
   const [payAmt, setPayAmt] = useState({});
   const [agingData, setAgingData] = useState(null);
   const [employees, setEmployees] = useState([]);
@@ -168,8 +168,8 @@ export default function OpsPage() {
     const lines = invCreate.lines.filter((l) => l.description.trim()).map((l) => ({ description: l.description.trim(), quantity: Number(l.quantity) || 1, unit_price: Number(l.unit_price) || 0 }));
     if (!invCreate.customer_id || lines.length === 0 || !buId) { setError('Pick a customer and add at least one line'); return; }
     try {
-      await api.createInvoice({ business_unit_id: Number(buId), customer_id: Number(invCreate.customer_id), invoice_date: invCreate.invoice_date, due_date: invCreate.due_date || undefined, tax_rate: Number(invCreate.tax_rate) || 0, lines });
-      setInvCreate({ customer_id: '', invoice_date: new Date().toISOString().slice(0, 10), due_date: '', tax_rate: 5, lines: [{ description: '', quantity: 1, unit_price: '' }] });
+      await api.createInvoice({ business_unit_id: Number(buId), customer_id: Number(invCreate.customer_id), invoice_date: invCreate.invoice_date, due_date: invCreate.due_date || undefined, tax_rate: Number(invCreate.tax_rate) || 0, currency: invCreate.currency, exchange_rate: invCreate.exchange_rate === '' ? undefined : Number(invCreate.exchange_rate), lines });
+      setInvCreate({ customer_id: '', invoice_date: new Date().toISOString().slice(0, 10), due_date: '', tax_rate: 5, currency: 'MMK', exchange_rate: '', lines: [{ description: '', quantity: 1, unit_price: '' }] });
       setNotice('Invoice created (draft). Send it to post to the ledger.');
       setTimeout(() => setNotice(''), 4000);
       load();
@@ -191,7 +191,7 @@ export default function OpsPage() {
     const lines = poForm.lines.filter((l) => l.item_name.trim()).map((l) => ({ item_name: l.item_name.trim(), quantity: Number(l.quantity) || 0, unit_cost: Number(l.unit_cost) || 0 }));
     if (!poForm.supplier_id || lines.length === 0 || !buId) { setError('Pick a supplier and add at least one line'); return; }
     try {
-      await api.createPO({ business_unit_id: Number(buId), supplier_id: Number(poForm.supplier_id), order_date: poForm.order_date, lines });
+      await api.createPO({ business_unit_id: Number(buId), supplier_id: Number(poForm.supplier_id), order_date: poForm.order_date, currency: poForm.currency, exchange_rate: poForm.exchange_rate === '' ? undefined : Number(poForm.exchange_rate), lines });
       setPoForm({ supplier_id: '', order_date: new Date().toISOString().slice(0, 10), lines: [{ item_name: '', quantity: '', unit_cost: '' }] });
       setNotice('Purchase order created (draft).');
       setTimeout(() => setNotice(''), 4000);
@@ -419,6 +419,11 @@ export default function OpsPage() {
                   {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.scope})</option>)}
                 </select>
                 <input type="date" value={poForm.order_date} onChange={(e) => setPoForm({ ...poForm, order_date: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <select value={poForm.currency} onChange={(e) => setPoForm({ ...poForm, currency: e.target.value })} title="Currency" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                  <option value="MMK">MMK</option>
+                  <option value="USD">USD</option>
+                </select>
+                {poForm.currency !== 'MMK' && <input type="number" value={poForm.exchange_rate} onChange={(e) => setPoForm({ ...poForm, exchange_rate: e.target.value })} placeholder="Ks per 1 USD (blank = latest)" title="Exchange rate" className="w-52 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />}
               </div>
               {poForm.lines.map((l, idx) => (
                 <div key={idx} className="flex flex-wrap gap-2">
@@ -508,6 +513,11 @@ export default function OpsPage() {
                   <input type="date" value={invCreate.invoice_date} onChange={(e) => setInvCreate({ ...invCreate, invoice_date: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
                   <input type="date" value={invCreate.due_date} onChange={(e) => setInvCreate({ ...invCreate, due_date: e.target.value })} title="Due date" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
                   <input type="number" value={invCreate.tax_rate} onChange={(e) => setInvCreate({ ...invCreate, tax_rate: e.target.value })} title="Commercial tax %" className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                  <select value={invCreate.currency} onChange={(e) => setInvCreate({ ...invCreate, currency: e.target.value })} title="Currency" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                    <option value="MMK">MMK</option>
+                    <option value="USD">USD</option>
+                  </select>
+                  {invCreate.currency !== 'MMK' && <input type="number" value={invCreate.exchange_rate} onChange={(e) => setInvCreate({ ...invCreate, exchange_rate: e.target.value })} placeholder="Ks per 1 USD (blank = latest)" title="Exchange rate" className="w-52 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />}
                 </div>
                 {invCreate.lines.map((l, idx) => (
                   <div key={idx} className="flex flex-wrap gap-2">
@@ -526,7 +536,7 @@ export default function OpsPage() {
                   <li key={inv.id} className="py-3">
                     <div className="flex items-center justify-between gap-3 flex-wrap">
                       <div>
-                        <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">{inv.invoice_no} <span className="font-normal text-slate-400">· {inv.customer_name} · {money(inv.total)}</span></p>
+                        <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">{inv.invoice_no} <span className="font-normal text-slate-400">· {inv.customer_name} · {money(inv.total)}</span>{inv.currency && inv.currency !== 'MMK' && <span className="ml-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300">{inv.currency} @{Number(inv.exchange_rate).toLocaleString()}</span>}</p>
                         <p className="text-xs text-slate-400">{inv.invoice_date}{inv.due_date ? ` · due ${inv.due_date}` : ''} · paid {money(inv.paid)} · balance {money(inv.balance)}</p>
                       </div>
                       <div className="flex items-center gap-2 flex-wrap">
@@ -555,7 +565,10 @@ export default function OpsPage() {
                 {salesCustomers.map((c) => (
                   <li key={c.id} className="py-2.5 flex items-center justify-between">
                     <p className="text-sm font-medium text-slate-800 dark:text-slate-200">{c.name} <span className="text-xs text-slate-400 font-normal">{c.phone || ''}</span></p>
-                    <button onClick={async () => { await api.deleteSalesCustomer(c.id); load(); }} className="text-xs font-semibold text-red-500 hover:underline">Remove</button>
+                    <span className="flex items-center gap-3">
+                      <span className="text-xs"><span className="text-slate-400 mr-1">Statement:</span><a href={api.opsStatementUrl(c.id, 'pdf')} className="font-semibold text-red-500 hover:underline">PDF</a> <a href={api.opsStatementUrl(c.id, 'xlsx')} className="font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Excel</a></span>
+                      <button onClick={async () => { await api.deleteSalesCustomer(c.id); load(); }} className="text-xs font-semibold text-red-500 hover:underline">Remove</button>
+                    </span>
                   </li>
                 ))}
                 {salesCustomers.length === 0 && <li className="py-6 text-center text-sm text-slate-400">No customers yet</li>}
@@ -664,6 +677,7 @@ export default function OpsPage() {
                               ) : <span className="tabular-nums">{money(l.deductions)}</span>}
                             </td>
                             <td className="py-1.5 text-right tabular-nums font-semibold">{money(l.net)}</td>
+                            <td className="py-1.5 pl-3 text-right whitespace-nowrap"><a href={api.opsPayslipUrl(run.id, l.id)} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">Payslip</a></td>
                           </tr>
                         ))}
                       </tbody>
@@ -687,6 +701,10 @@ export default function OpsPage() {
                   </div>
                   <div className="flex items-center gap-2">
                     <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[e.status]}`}>{e.status}</span>
+                    {e.status === 'pending' && e.stage_label && <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300">{e.stage_label}</span>}
+                    {e.receipt_url
+                      ? <a href={e.receipt_url} target="_blank" rel="noreferrer" className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">Receipt</a>
+                      : <label className="text-xs font-semibold text-slate-400 hover:text-brand-600 cursor-pointer hover:underline">+ Receipt<input type="file" accept="image/*,.pdf" className="hidden" onChange={async (ev) => { const f = ev.target.files?.[0]; if (f) { try { await api.opsUploadReceipt(e.id, f); load(); } catch (err) { setError(err.message); } } }} /></label>}
                     {e.status === 'pending' && <>
                       <button onClick={() => review(e, 'approved')} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Approve</button>
                       <button onClick={() => review(e, 'rejected')} className="text-xs font-semibold text-red-500 hover:underline">Reject</button>

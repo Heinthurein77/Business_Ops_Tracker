@@ -4,6 +4,7 @@ import Chart from 'react-apexcharts';
 import { api } from '../api/client';
 import AdminSidebar, { displayNameOf } from '../components/AdminSidebar';
 import CeoProfileCard from '../components/CeoProfileCard';
+import FinanceStrip from '../components/FinanceStrip';
 import Footer from '../components/Footer';
 import QuadrantStatusCircle from '../components/QuadrantStatusCircle';
 import { useAuth } from '../context/AuthContext';
@@ -354,6 +355,9 @@ export default function AdminDashboardPage() {
             </Link>
           </div>
         </section>
+
+        {/* GROUP FINANCE — accounting snapshot (ERP) */}
+        <FinanceStrip />
 
         {/* CEO PROFILE CARD */}
         <CeoProfileCard

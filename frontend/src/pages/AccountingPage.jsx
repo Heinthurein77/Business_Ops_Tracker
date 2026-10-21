@@ -83,6 +83,13 @@ export default function AccountingPage() {
   const [ruleEdits, setRuleEdits] = useState({});
   const [obDate, setObDate] = useState(today());
   const [obFile, setObFile] = useState(null);
+  const [budgets, setBudgets] = useState(null);
+  const [budgetForm, setBudgetForm] = useState({ account_code: '', amount: '' });
+  const [tax, setTax] = useState(null);
+  const [rates, setRates] = useState(null);
+  const [rateForm, setRateForm] = useState({ rate_date: today(), rate: '' });
+  const [icTxns, setIcTxns] = useState([]);
+  const [icForm, setIcForm] = useState({ from_business_unit_id: '', to_business_unit_id: '', amount: '', description: '', txn_date: today(), buyer_account_code: '6600' });
 
   useEffect(() => {
     api.adminOverview().then((d) => {
@@ -109,11 +116,14 @@ export default function AccountingPage() {
         setTb(await api.accTrialBalance(bu, period));
         setPl(await api.accPL(bu, period));
         setBs(await api.accBS(bu, period));
+        setTax(await api.accTaxReport(bu, period).catch(() => null));
+        setBudgets(await api.accBudgets(bu, period).catch(() => null));
       }
       if (tab === 'group') {
         setGpl(await api.accConsolidatedPL(period));
         setGbs(await api.accConsolidatedBS(period));
         setGcomp((await api.accBuComparison(period)).items);
+        setIcTxns((await api.accIntercompany().catch(() => ({ items: [] }))).items);
       }
       if (tab === 'journal') setJournal((await api.accJournal(bu, {})).items);
       if (tab === 'periods') setPeriods((await api.accPeriods(bu)).items);
@@ -130,6 +140,7 @@ export default function AccountingPage() {
           edits[d.source_field] = { dr: eff.debit_account_code, cr: eff.credit_account_code, scope: buRule ? 'BU override' : groupRule ? 'Group rule' : 'Built-in default' };
         }
         setRuleEdits(edits);
+        setRates(await api.accExchangeRates('USD').catch(() => null));
       }
       if (tab === 'bank') {
         const list = (await api.accBankAccounts(bu)).items;
@@ -204,6 +215,49 @@ export default function AccountingPage() {
       const entry = await api.accUploadOpeningBalance(Number(buId), obDate, obFile);
       flash(`Opening balances posted as ${entry.entry_no} for ${buName}.`);
       setObFile(null);
+    } catch (err) { setError(err.message); }
+  }
+
+  async function saveBudget(e) {
+    e.preventDefault();
+    if (!budgetForm.account_code || budgetForm.amount === '') { setError('Pick an account and enter the budget amount'); return; }
+    try {
+      await api.accSaveBudget({ business_unit_id: Number(buId), period, account_code: budgetForm.account_code, amount: Number(budgetForm.amount) });
+      flash(`Budget saved for ${period}.`);
+      setBudgetForm({ account_code: '', amount: '' });
+      load();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function saveRate(e) {
+    e.preventDefault();
+    if (!rateForm.rate) { setError('Enter the USD rate'); return; }
+    try {
+      await api.accCreateRate({ currency: 'USD', rate_date: rateForm.rate_date, rate: Number(rateForm.rate) });
+      flash('USD exchange rate saved.');
+      setRateForm({ rate_date: today(), rate: '' });
+      load();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function createIntercompany(e) {
+    e.preventDefault();
+    if (!icForm.from_business_unit_id || !icForm.to_business_unit_id || !icForm.amount) {
+      setError('Pick both BUs and an amount for the intercompany transaction'); return;
+    }
+    try {
+      await api.accCreateIntercompany({ ...icForm, from_business_unit_id: Number(icForm.from_business_unit_id), to_business_unit_id: Number(icForm.to_business_unit_id), amount: Number(icForm.amount), description: icForm.description || null });
+      flash('Intercompany transaction posted in both BUs.');
+      setIcForm({ from_business_unit_id: '', to_business_unit_id: '', amount: '', description: '', txn_date: today(), buyer_account_code: '6600' });
+      load();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function settleIntercompany(id) {
+    try {
+      await api.accSettleIntercompany(id);
+      flash('Intercompany transaction settled — cash posted in both BUs.');
+      load();
     } catch (err) { setError(err.message); }
   }
 
@@ -356,6 +410,53 @@ export default function AccountingPage() {
                 </tbody>
               </table>
             </section>
+
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-1.5">Budget vs Actual — {period}</h2>
+              <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">Monthly budget per account for {buName}; variance compares posted actuals.</p>
+              <form onSubmit={saveBudget} className="flex flex-wrap items-end gap-3 mb-4">
+                <select value={budgetForm.account_code} onChange={(e) => setBudgetForm((f) => ({ ...f, account_code: e.target.value }))} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                  <option value="">Select account…</option>
+                  {postable.filter((a) => ['income', 'expense'].includes(a.account_type)).map((a) => <option key={a.id} value={a.code}>{a.code} — {a.name}</option>)}
+                </select>
+                <input type="number" min="0" step="any" value={budgetForm.amount} onChange={(e) => setBudgetForm((f) => ({ ...f, amount: e.target.value }))} placeholder="Budget amount" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm w-44" />
+                <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Save budget</button>
+              </form>
+              <table className="w-full text-sm min-w-[560px]">
+                <thead className="text-left text-xs uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                  <tr><th className="py-2 pr-3">Account</th><th className="py-2 pr-3 text-right">Budget</th><th className="py-2 pr-3 text-right">Actual</th><th className="py-2 pr-3 text-right">Variance</th><th className="py-2" /></tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {(budgets?.items || []).map((i) => (
+                    <tr key={i.id}>
+                      <td className="py-2 pr-3 font-medium">{i.account_code} — {i.name}</td>
+                      <td className="py-2 pr-3 text-right tabular-nums">{money(i.budget)}</td>
+                      <td className="py-2 pr-3 text-right tabular-nums">{money(i.actual)}</td>
+                      <td className={`py-2 pr-3 text-right tabular-nums font-semibold ${i.variance < 0 ? 'text-red-500' : 'text-emerald-600 dark:text-emerald-400'}`}>{money(i.variance)}{i.variance_pct !== null && i.variance_pct !== undefined ? ` (${Number(i.variance_pct).toFixed(0)}%)` : ''}</td>
+                      <td className="py-2 text-right"><button onClick={async () => { await api.accDeleteBudget(i.id); load(); }} className="text-xs font-semibold text-red-500 hover:underline">Remove</button></td>
+                    </tr>
+                  ))}
+                  {(!budgets || budgets.items.length === 0) && <tr><td colSpan={5} className="py-6 text-center text-slate-400">No budgets set for this month yet</td></tr>}
+                </tbody>
+              </table>
+            </section>
+
+            {tax && (
+              <section className={`${GLASS} p-6`}>
+                <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-4">Commercial Tax (2130) — {period}</h2>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {[['Opening balance', tax.opening_balance], ['Tax charged', tax.tax_charged], ['Tax paid / filed', tax.tax_paid], ['Closing balance', tax.closing_balance]].map(([label, v]) => (
+                    <div key={label} className="rounded-xl border border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40 px-3.5 py-3">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{label}</p>
+                      <p className="mt-1 text-base font-bold text-slate-900 dark:text-slate-100">{money(v)}</p>
+                    </div>
+                  ))}
+                </div>
+                {tax.items.length > 0 && (
+                  <p className="mt-3 text-xs text-slate-400">{tax.items.length} tax entr{tax.items.length === 1 ? 'y' : 'ies'} this period — see the Journal tab for detail.</p>
+                )}
+              </section>
+            )}
           </div>
         )}
 
@@ -430,6 +531,51 @@ export default function AccountingPage() {
                 </>}
               </section>
             </div>
+
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-1.5">Intercompany Transactions</h2>
+              <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">One BU charges another: posts Dr Intercompany Receivable / Cr Sales in the seller and Dr expense / Cr Intercompany Payable in the buyer. Settle posts the cash legs. Consolidation eliminates the balances.</p>
+              <form onSubmit={createIntercompany} className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 mb-5">
+                <select value={icForm.from_business_unit_id} onChange={(e) => setIcForm((f) => ({ ...f, from_business_unit_id: e.target.value }))} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                  <option value="">Seller BU…</option>
+                  {bus.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                </select>
+                <select value={icForm.to_business_unit_id} onChange={(e) => setIcForm((f) => ({ ...f, to_business_unit_id: e.target.value }))} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                  <option value="">Buyer BU…</option>
+                  {bus.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                </select>
+                <input type="number" min="0" step="any" value={icForm.amount} onChange={(e) => setIcForm((f) => ({ ...f, amount: e.target.value }))} placeholder="Amount (Ks)" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <select value={icForm.buyer_account_code} onChange={(e) => setIcForm((f) => ({ ...f, buyer_account_code: e.target.value }))} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                  <option value="5100">Buyer: 5100 COGS</option>
+                  <option value="6100">Buyer: 6100 Rent</option>
+                  <option value="6200">Buyer: 6200 Salaries</option>
+                  <option value="6400">Buyer: 6400 Transport</option>
+                  <option value="6600">Buyer: 6600 Office/Admin</option>
+                  <option value="1140">Buyer: 1140 Inventory</option>
+                </select>
+                <input type="date" value={icForm.txn_date} onChange={(e) => setIcForm((f) => ({ ...f, txn_date: e.target.value }))} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <input value={icForm.description} onChange={(e) => setIcForm((f) => ({ ...f, description: e.target.value }))} placeholder="Description" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Post intercompany</button>
+              </form>
+              <table className="w-full text-sm min-w-[640px]">
+                <thead className="text-left text-xs uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                  <tr><th className="py-2 pr-3">Date</th><th className="py-2 pr-3">Seller → Buyer</th><th className="py-2 pr-3">Description</th><th className="py-2 pr-3 text-right">Amount</th><th className="py-2 pr-3">Status</th><th className="py-2" /></tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {icTxns.map((t) => (
+                    <tr key={t.id}>
+                      <td className="py-2 pr-3 whitespace-nowrap">{t.txn_date}</td>
+                      <td className="py-2 pr-3">{t.from_bu_name} → {t.to_bu_name}</td>
+                      <td className="py-2 pr-3 text-slate-500">{t.description || '—'}</td>
+                      <td className="py-2 pr-3 text-right tabular-nums font-semibold">{money(t.amount)}</td>
+                      <td className="py-2 pr-3"><span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${t.status === 'settled' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300'}`}>{t.status}</span></td>
+                      <td className="py-2 text-right">{t.status === 'open' && <button onClick={() => settleIntercompany(t.id)} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">Settle</button>}</td>
+                    </tr>
+                  ))}
+                  {icTxns.length === 0 && <tr><td colSpan={6} className="py-6 text-center text-slate-400">No intercompany transactions yet</td></tr>}
+                </tbody>
+              </table>
+            </section>
           </div>
         )}
 
@@ -713,6 +859,16 @@ export default function AccountingPage() {
                   </tbody>
                 </table>
               </div>
+            </section>
+
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-1.5">Exchange Rates — USD</h2>
+              <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">MMK per 1 USD. USD invoices and purchase orders convert to MMK in the journal at the document rate; new documents pre-fill the latest rate.{rates?.latest && <> Latest: <strong className="text-slate-700 dark:text-slate-200">Ks {Number(rates.latest.rate).toLocaleString()}</strong> ({rates.latest.rate_date})</>}</p>
+              <form onSubmit={saveRate} className="flex flex-wrap items-end gap-3">
+                <input type="date" value={rateForm.rate_date} onChange={(e) => setRateForm((f) => ({ ...f, rate_date: e.target.value }))} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <input type="number" min="0" step="any" value={rateForm.rate} onChange={(e) => setRateForm((f) => ({ ...f, rate: e.target.value }))} placeholder="Ks per 1 USD" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm w-44" />
+                <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Save rate</button>
+              </form>
             </section>
           </div>
         )}
