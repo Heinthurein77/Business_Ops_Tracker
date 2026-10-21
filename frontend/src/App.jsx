@@ -22,6 +22,7 @@ import CeoProfilesPage from './pages/CeoProfilesPage';
 import BusinessUnitDetailPage from './pages/BusinessUnitDetailPage';
 import HeadOfficePage from './pages/HeadOfficePage';
 import ManageUsersPage from './pages/ManageUsersPage';
+import BusinessUnitsPage from './pages/BusinessUnitsPage';
 
 function RootRedirect() {
   const { user, loading } = useAuth();
@@ -172,6 +173,14 @@ export default function App() {
             element={
               <ProtectedRoute roles={['Chairman', 'HO']}>
                 <HeadOfficePage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/business-units"
+            element={
+              <ProtectedRoute roles={['Chairman', 'HO']}>
+                <BusinessUnitsPage />
               </ProtectedRoute>
             }
           />

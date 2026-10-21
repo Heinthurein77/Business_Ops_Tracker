@@ -318,6 +318,12 @@ export const api = {
     const res = await fetch(`/api/ops/expenses/${expenseId}/receipt`, { method: 'POST', credentials: 'include', body: fd });
     return handle(res);
   },
+  // ---- Business units (management) ----
+  adminBusinessUnits: () => getJson('/api/admin/business-units'),
+  adminCreateBU: (payload) => postJson('/api/admin/business-units', payload),
+  adminUpdateBU: (id, payload) => fetch(`/api/admin/business-units/${id}`, {
+    method: 'PATCH', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
+  }).then(handle),
   opsPayslipUrl: (runId, lineId) => `/api/ops/payroll-runs/${runId}/lines/${lineId}/payslip`,
   opsStatementUrl: (customerId, format) => `/api/ops/sales-customers/${customerId}/statement?format=${format}`,
   // ---- Nature modules (batches, projects, shipments, production, real estate, principal) ----

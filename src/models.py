@@ -59,6 +59,7 @@ class BusinessUnit(Base):
     id = Column(Integer, primary_key=True, index=True)
     code = Column(String(20), unique=True, nullable=False, index=True)
     name = Column(String(120), nullable=False)
+    nature = Column(String(30), nullable=True, index=True)  # CoA template key, e.g. retail/production/real_estate
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     users = relationship("User", back_populates="business_unit")

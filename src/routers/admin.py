@@ -1516,3 +1516,113 @@ def export_excel(
             "Cache-Control": "no-store",
         },
     )
+
+
+# ------------------------------------------------------------------ business unit management
+
+from pydantic import BaseModel as _BaseModel, Field as _Field  # noqa: E402
+
+from src.accounting_templates import TEMPLATE_LABELS, TEMPLATE_TYPES  # noqa: E402
+from src.models import Account  # noqa: E402
+
+
+def _serialize_bu_admin(db: Session, bu: BusinessUnit) -> dict:
+    account_count = db.query(Account).filter(Account.business_unit_id == bu.id).count()
+    user_count = db.query(User).filter(User.business_unit_id == bu.id).count()
+    ceo = db.query(User).filter(User.business_unit_id == bu.id, User.role == "CEO",
+                                User.is_active == True).first()  # noqa: E712
+    return {
+        "id": bu.id, "code": bu.code, "name": bu.name,
+        "nature": getattr(bu, "nature", None),
+        "nature_label": TEMPLATE_LABELS.get(getattr(bu, "nature", None) or "", "—"),
+        "user_count": user_count,
+        "ceo_name": (ceo.full_name or ceo.username) if ceo else None,
+        "account_count": account_count,
+        "has_books": account_count > 0,
+        "created_at": bu.created_at.isoformat() if bu.created_at else None,
+    }
+
+
+def _next_bu_code(db: Session) -> str:
+    nums = []
+    for (code,) in db.query(BusinessUnit.code).all():
+        if code and code.startswith("BU") and code[2:].isdigit():
+            nums.append(int(code[2:]))
+    return f"BU{(max(nums) + 1) if nums else 1}"
+
+
+class BUCreateIn(_BaseModel):
+    name: str = _Field(min_length=1, max_length=120)
+    nature: str = "retail"
+
+
+class BUUpdateIn(_BaseModel):
+    name: Optional[str] = None
+    nature: Optional[str] = None
+
+
+@router.get("/business-units")
+def list_business_units(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    bus = db.query(BusinessUnit).order_by(BusinessUnit.id).all()
+    return {"items": [_serialize_bu_admin(db, bu) for bu in bus],
+            "natures": [{"key": k, "label": TEMPLATE_LABELS.get(k, k)} for k in TEMPLATE_TYPES]}
+
+
+@router.post("/business-units")
+def create_business_unit(payload: BUCreateIn, user: User = Depends(require_admin),
+                         db: Session = Depends(get_db)):
+    """Create a BU and provision its chart of accounts from the nature template."""
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(400, "Name is required")
+    if payload.nature not in TEMPLATE_TYPES:
+        raise HTTPException(400, f"nature must be one of {TEMPLATE_TYPES}")
+    if db.query(BusinessUnit).filter(func.lower(BusinessUnit.name) == name.lower()).first():
+        raise HTTPException(400, f"A business unit named '{name}' already exists")
+    bu = BusinessUnit(code=_next_bu_code(db), name=name, nature=payload.nature)
+    db.add(bu)
+    db.commit()
+    db.refresh(bu)
+    from src.routers.accounting import provision_bu
+    provision = provision_bu(bu.id, template=payload.nature, user=user, db=db)
+    out = _serialize_bu_admin(db, bu)
+    out["provision"] = provision
+    return out
+
+
+@router.patch("/business-units/{bu_id}")
+def update_business_unit(bu_id: int, payload: BUUpdateIn, user: User = Depends(require_admin),
+                         db: Session = Depends(get_db)):
+    """Rename a BU and/or set its nature. Setting a nature on a BU with no
+    chart of accounts yet provisions it; a BU that already has books keeps
+    its existing chart (only the label changes)."""
+    bu = db.query(BusinessUnit).filter(BusinessUnit.id == bu_id).first()
+    if not bu:
+        raise HTTPException(404, "Business unit not found")
+    note = None
+    if payload.name is not None:
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(400, "Name cannot be empty")
+        dup = db.query(BusinessUnit).filter(func.lower(BusinessUnit.name) == name.lower(),
+                                            BusinessUnit.id != bu_id).first()
+        if dup:
+            raise HTTPException(400, f"A business unit named '{name}' already exists")
+        bu.name = name
+    if payload.nature is not None:
+        if payload.nature not in TEMPLATE_TYPES:
+            raise HTTPException(400, f"nature must be one of {TEMPLATE_TYPES}")
+        bu.nature = payload.nature
+        db.commit()
+        has_accounts = db.query(Account).filter(Account.business_unit_id == bu.id).count() > 0
+        if has_accounts:
+            note = "Nature label updated — existing chart of accounts unchanged."
+        else:
+            from src.routers.accounting import provision_bu
+            provision_bu(bu.id, template=payload.nature, user=user, db=db)
+            note = f"Chart of accounts created from the {TEMPLATE_LABELS.get(payload.nature, payload.nature)} template."
+    db.commit()
+    db.refresh(bu)
+    out = _serialize_bu_admin(db, bu)
+    out["note"] = note
+    return out
