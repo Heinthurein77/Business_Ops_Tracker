@@ -813,20 +813,34 @@ async def opening_balance(business_unit_id: int, as_of: date,
     except Exception:
         raise HTTPException(400, "Could not read the Excel file")
     ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    # Map columns by header name so both the 3-column layout
+    # (account_code|debit|credit) and the template layout
+    # (account_code|account_name|debit|credit) work.
+    header = [str(c or "").strip().lower() for c in (rows[0] if rows else [])]
+    try:
+        ci_code = header.index("account_code")
+        ci_dr = header.index("debit")
+        ci_cr = header.index("credit")
+    except ValueError:
+        ci_code, ci_dr, ci_cr = 0, 1, 2
     lines = []
-    for i, row in enumerate(ws.iter_rows(values_only=True)):
+    for i, row in enumerate(rows):
         if i == 0:
             continue  # header
-        if not row or not row[0]:
+        if not row or not row[ci_code]:
             continue
-        code = str(row[0]).strip()
+        code = str(row[ci_code]).strip()
         acc = account_by_code(db, business_unit_id, code)
         if not acc:
             raise HTTPException(400, f"Row {i + 1}: account code {code} not found in this BU")
         if acc.is_header:
             raise HTTPException(400, f"Row {i + 1}: {code} is a header account")
-        dr = Decimal(str(row[1] or 0))
-        cr = Decimal(str(row[2] or 0)) if len(row) > 2 else ZERO
+        try:
+            dr = Decimal(str(row[ci_dr] or 0))
+            cr = Decimal(str(row[ci_cr] or 0)) if len(row) > ci_cr else ZERO
+        except Exception:
+            raise HTTPException(400, f"Row {i + 1}: debit/credit must be numbers")
         if dr == 0 and cr == 0:
             continue
         lines.append({"account_id": acc.id, "debit": dr, "credit": cr})
@@ -1068,3 +1082,182 @@ def bank_reconciliation(bank_id: int, user: User = Depends(require_accounting),
         "difference": (fmt(Decimal(str(ledger_balance)) - Decimal(str(info["statement_balance"])))
                        if ledger_balance is not None else None),
     }
+
+
+# ------------------------------------------------------- go-live: opening balance template & report exports
+
+@router.get("/opening-balance/template")
+def opening_balance_template(business_unit_id: int, user: User = Depends(require_accounting),
+                             db: Session = Depends(get_db)):
+    """Excel template listing the BU's postable accounts — accountants fill
+    in debit/credit opening balances and upload it back."""
+    from io import BytesIO
+
+    from fastapi.responses import StreamingResponse
+    from openpyxl import Workbook
+
+    bu = bu_or_404(db, business_unit_id)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Opening Balances"
+    ws.append(["account_code", "account_name", "debit", "credit"])
+    accounts = db.query(Account).filter(
+        Account.business_unit_id == business_unit_id,
+        Account.is_active == True, Account.is_header == False).order_by(Account.code).all()  # noqa: E712
+    for a in accounts:
+        ws.append([a.code, a.name, None, None])
+    ws.column_dimensions["A"].width = 14
+    ws.column_dimensions["B"].width = 40
+    ws.column_dimensions["C"].width = 18
+    ws.column_dimensions["D"].width = 18
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="opening_balances_{bu.code or bu.id}.xlsx"'})
+
+
+def _export_rows(report: str, db: Session, user: User, business_unit_id: Optional[int],
+                 period: Optional[str]) -> tuple[str, list[str], list[list]]:
+    """(title, header, rows) for the requested report — shared by xlsx + pdf."""
+    if report == "tb":
+        d = trial_balance(business_unit_id=business_unit_id, period=period, user=user, db=db)
+        rows = [[i["code"], i["name"], i["debit"], i["credit"], f'{i["balance"]} {i["balance_side"]}']
+                for i in d["items"]]
+        rows.append(["", "TOTAL", d["total_debit"], d["total_credit"], ""])
+        return "Trial Balance", ["Code", "Account", "Debit", "Credit", "Balance"], rows
+    if report == "pl":
+        d = profit_loss(business_unit_id=business_unit_id, period=period, user=user, db=db)
+        rows = [["INCOME", "", ""]]
+        rows += [[i["code"] + " " + i["name"], "", i["amount"]] for i in d["income"]]
+        rows.append(["", "Total Income", d["total_income"]])
+        rows.append(["EXPENSES", "", ""])
+        rows += [[i["code"] + " " + i["name"], "", i["amount"]] for i in d["expenses"]]
+        rows.append(["", "Total Expenses", d["total_expenses"]])
+        rows.append(["", "NET PROFIT", d["net_profit"]])
+        return "Profit & Loss", ["Account", "", "Amount"], rows
+    if report in ("bs", "consolidated-bs"):
+        d = (balance_sheet(business_unit_id=business_unit_id, period=period, user=user, db=db)
+             if report == "bs" else consolidated_bs(period=period, user=user, db=db))
+        rows = [["ASSETS", "", ""]]
+        rows += [[i["code"] + " " + i["name"], "", i["amount"]] for i in d["assets"]]
+        rows.append(["", "Total Assets", d["total_assets"]])
+        rows.append(["LIABILITIES", "", ""])
+        rows += [[i["code"] + " " + i["name"], "", i["amount"]] for i in d["liabilities"]]
+        rows.append(["", "Total Liabilities", d["total_liabilities"]])
+        rows.append(["EQUITY", "", ""])
+        rows += [[i["code"] + " " + i["name"], "", i["amount"]] for i in d["equity"]]
+        rows.append(["", "Total Equity", d["total_equity"]])
+        rows.append(["", "Total Liabilities + Equity", d["total_liabilities_equity"]])
+        return ("Balance Sheet" if report == "bs" else "Consolidated Balance Sheet"), ["Account", "", "Amount"], rows
+    if report == "consolidated-pl":
+        d = consolidated_pl(period=period, user=user, db=db)
+        rows = [["INCOME", "", ""]]
+        rows += [[i["code"] + " " + i["name"], "", i["amount"]] for i in d["income"]]
+        rows.append(["", "Total Income", d["total_income"]])
+        rows.append(["EXPENSES", "", ""])
+        rows += [[i["code"] + " " + i["name"], "", i["amount"]] for i in d["expenses"]]
+        rows.append(["", "Total Expenses", d["total_expenses"]])
+        rows.append(["", "GROUP NET PROFIT", d["net_profit"]])
+        return "Consolidated Profit & Loss", ["Account", "", "Amount"], rows
+    if report == "journal":
+        q = db.query(JournalEntry).filter(
+            JournalEntry.business_unit_id == business_unit_id,
+            JournalEntry.status == "posted")
+        entries = q.order_by(JournalEntry.entry_date, JournalEntry.id).all()
+        if period:
+            entries = [e for e in entries if period_of(e.entry_date) == period]
+        rows = []
+        for e in entries:
+            for l in e.lines:
+                rows.append([e.entry_date.isoformat(), e.entry_no,
+                             l.account.code if l.account else "",
+                             l.account.name if l.account else "",
+                             e.description or "", fmt(l.debit), fmt(l.credit)])
+        return "Journal", ["Date", "Entry No", "Code", "Account", "Description", "Debit", "Credit"], rows
+    raise HTTPException(400, f"Unknown report: {report}")
+
+
+@router.get("/reports/export")
+def export_report(report: str, format: str = "xlsx", business_unit_id: Optional[int] = None,
+                  period: Optional[str] = None, user: User = Depends(get_current_user),
+                  db: Session = Depends(get_db)):
+    """Download P&L / balance sheet / trial balance / journal as Excel or PDF."""
+    from io import BytesIO
+
+    from fastapi.responses import StreamingResponse
+
+    if report not in ("pl", "bs", "tb", "journal", "consolidated-pl", "consolidated-bs"):
+        raise HTTPException(400, "report must be pl, bs, tb, journal, consolidated-pl or consolidated-bs")
+    if not report.startswith("consolidated"):
+        if not business_unit_id:
+            raise HTTPException(400, "business_unit_id is required for this report")
+        check_bu_access(user, business_unit_id)
+    elif user.role == "CEO":
+        raise HTTPException(403, "Consolidated reports are group-level")
+    bu = bu_or_404(db, business_unit_id) if business_unit_id else None
+    title, header, rows = _export_rows(report, db, user, business_unit_id, period)
+    subtitle = f"{bu.name if bu else 'ABC Group'} — {period or 'all periods'}"
+    fname_base = f"{report}_{(bu.code or 'group') if bu else 'group'}_{period or 'all'}"
+
+    if format == "xlsx":
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = title[:31]
+        ws.append([title])
+        ws.append([subtitle])
+        ws.append([])
+        ws.append(header)
+        for cell in ws[4]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="1F3864")
+        for r in rows:
+            ws.append(r)
+        for col in ws.columns:
+            letter = col[0].column_letter
+            ws.column_dimensions[letter].width = max(14, min(46, max((len(str(c.value or "")) for c in col), default=14) + 2))
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return StreamingResponse(
+            buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{fname_base}.xlsx"'})
+
+    if format == "pdf":
+        from fpdf import FPDF
+
+        def safe(t):
+            return str(t if t is not None else "").encode("latin-1", errors="replace").decode("latin-1")
+
+        pdf = FPDF(orientation="P", unit="mm", format="A4")
+        pdf.add_page()
+        pdf.set_font("helvetica", "B", 15)
+        pdf.cell(0, 9, safe(title), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("helvetica", "", 10)
+        pdf.cell(0, 6, safe(subtitle), new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(3)
+        n = len(header)
+        widths = [190 / n] * n
+        if n >= 5:
+            widths = [22, 18, 14, 42, 44, 25, 25][:n]
+            widths = [w * 190 / sum(widths) for w in widths]
+        pdf.set_font("helvetica", "B", 9)
+        for i, h in enumerate(header):
+            pdf.cell(widths[i], 7, safe(h), border=1)
+        pdf.ln()
+        pdf.set_font("helvetica", "", 9)
+        for r in rows:
+            for i, v in enumerate(r):
+                txt = f"{v:,.2f}" if isinstance(v, (int, float)) else safe(v)
+                pdf.cell(widths[i], 6.5, txt[:44], border=1)
+            pdf.ln()
+        buf = BytesIO(pdf.output())
+        return StreamingResponse(
+            buf, media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{fname_base}.pdf"'})
+
+    raise HTTPException(400, "format must be xlsx or pdf")

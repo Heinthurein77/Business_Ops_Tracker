@@ -13,6 +13,7 @@ const TABS = [
   { key: 'assets', label: 'Fixed Assets' },
   { key: 'bank', label: 'Bank' },
   { key: 'periods', label: 'Periods' },
+  { key: 'setup', label: 'Setup' },
 ];
 
 const TEMPLATES = [
@@ -22,6 +23,12 @@ const TEMPLATES = [
   { key: 'services', label: 'Services' },
   { key: 'head_office', label: 'Head Office' },
 ];
+
+const RULE_LABELS = {
+  'daily_financial.revenue': 'Daily report — Revenue',
+  'daily_financial.expenses': 'Daily report — Expenses',
+  expense_request: 'Approved expense request',
+};
 
 const SRC_BADGE = {
   manual: 'bg-slate-500/10 border-slate-500/20 text-slate-600 dark:text-slate-300',
@@ -72,6 +79,10 @@ export default function AccountingPage() {
   const [bankTxns, setBankTxns] = useState([]);
   const [recon, setRecon] = useState(null);
   const [txnForm, setTxnForm] = useState({ txn_date: today(), description: '', deposit: '', withdrawal: '' });
+  const [rulesData, setRulesData] = useState(null);
+  const [ruleEdits, setRuleEdits] = useState({});
+  const [obDate, setObDate] = useState(today());
+  const [obFile, setObFile] = useState(null);
 
   useEffect(() => {
     api.adminOverview().then((d) => {
@@ -107,6 +118,19 @@ export default function AccountingPage() {
       if (tab === 'journal') setJournal((await api.accJournal(bu, {})).items);
       if (tab === 'periods') setPeriods((await api.accPeriods(bu)).items);
       if (tab === 'assets') setAssets((await api.accFixedAssets(bu)).items);
+      if (tab === 'setup') {
+        const data = await api.accPostingRules();
+        setRulesData(data);
+        const buNum = Number(buId);
+        const edits = {};
+        for (const d of data.defaults) {
+          const buRule = data.items.find((r) => r.business_unit_id === buNum && r.source_field === d.source_field);
+          const groupRule = data.items.find((r) => r.business_unit_id === null && r.source_field === d.source_field);
+          const eff = buRule || groupRule || d;
+          edits[d.source_field] = { dr: eff.debit_account_code, cr: eff.credit_account_code, scope: buRule ? 'BU override' : groupRule ? 'Group rule' : 'Built-in default' };
+        }
+        setRuleEdits(edits);
+      }
       if (tab === 'bank') {
         const list = (await api.accBankAccounts(bu)).items;
         setBankAccounts(list);
@@ -162,6 +186,26 @@ export default function AccountingPage() {
   async function postEntry(id) { try { await api.accPostJournal(id); load(); } catch (e) { setError(e.message); } }
   async function reverseEntry(id) { try { await api.accReverseJournal(id); flash('Entry reversed.'); load(); } catch (e) { setError(e.message); } }
   async function deleteEntry(id) { try { await api.accDeleteJournal(id); load(); } catch (e) { setError(e.message); } }
+
+  async function saveRule(field) {
+    const edit = ruleEdits[field];
+    if (!edit) return;
+    try {
+      await api.accSavePostingRule({ business_unit_id: Number(buId), source_field: field, debit_account_code: edit.dr, credit_account_code: edit.cr });
+      flash(`Posting rule saved for ${buName} — ${field}.`);
+      load();
+    } catch (e) { setError(e.message); }
+  }
+
+  async function uploadOpening(e) {
+    e.preventDefault();
+    if (!obFile) { setError('Choose the filled opening-balance Excel file first'); return; }
+    try {
+      const entry = await api.accUploadOpeningBalance(Number(buId), obDate, obFile);
+      flash(`Opening balances posted as ${entry.entry_no} for ${buName}.`);
+      setObFile(null);
+    } catch (err) { setError(err.message); }
+  }
 
   async function addAsset(e) {
     e.preventDefault();
@@ -243,6 +287,16 @@ export default function AccountingPage() {
 
         {tab === 'reports' && (
           <div className="space-y-6">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
+              <span className="font-bold uppercase tracking-wider text-slate-400">Export {period}:</span>
+              {[['pl', 'P&L'], ['bs', 'Balance Sheet'], ['tb', 'Trial Balance'], ['journal', 'Journal']].map(([r, label]) => (
+                <span key={r} className="flex items-center gap-1.5">
+                  <span className="font-semibold text-slate-600 dark:text-slate-300">{label}</span>
+                  <a href={api.accExportUrl(r, 'xlsx', Number(buId), period)} className="font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Excel</a>
+                  <a href={api.accExportUrl(r, 'pdf', Number(buId), period)} className="font-semibold text-red-500 hover:underline">PDF</a>
+                </span>
+              ))}
+            </div>
             {pl && (
               <section className="grid sm:grid-cols-3 gap-4">
                 {[
@@ -307,6 +361,16 @@ export default function AccountingPage() {
 
         {tab === 'group' && (
           <div className="space-y-6">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
+              <span className="font-bold uppercase tracking-wider text-slate-400">Export group {period}:</span>
+              {[['consolidated-pl', 'Consolidated P&L'], ['consolidated-bs', 'Consolidated Balance Sheet']].map(([r, label]) => (
+                <span key={r} className="flex items-center gap-1.5">
+                  <span className="font-semibold text-slate-600 dark:text-slate-300">{label}</span>
+                  <a href={api.accExportUrl(r, 'xlsx', null, period)} className="font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Excel</a>
+                  <a href={api.accExportUrl(r, 'pdf', null, period)} className="font-semibold text-red-500 hover:underline">PDF</a>
+                </span>
+              ))}
+            </div>
             {gpl && (
               <section className="grid sm:grid-cols-3 gap-4">
                 {[
@@ -595,6 +659,61 @@ export default function AccountingPage() {
                 </table>
               </section>
             )}
+          </div>
+        )}
+
+        {tab === 'setup' && (
+          <div className="space-y-6">
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-1.5">Opening Balances — {buName}</h2>
+              <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">Starting a BU on the system: download the template (it lists this BU's accounts), fill in each account's opening debit/credit from the accountants' books, then upload it back. The sheet must balance — one posted opening entry is created.</p>
+              <div className="flex flex-wrap items-end gap-3">
+                <a href={api.accOpeningTemplateUrl(Number(buId))} className="whitespace-nowrap text-sm font-semibold bg-slate-600 hover:bg-slate-700 text-white px-4 py-2.5 rounded-lg transition-colors">Download template</a>
+                <label className="block">
+                  <span className="block text-xs font-semibold text-slate-400 mb-1">As of date</span>
+                  <input type="date" value={obDate} onChange={(e) => setObDate(e.target.value)} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                </label>
+                <form onSubmit={uploadOpening} className="flex items-end gap-3 flex-wrap">
+                  <label className="block">
+                    <span className="block text-xs font-semibold text-slate-400 mb-1">Filled Excel file</span>
+                    <input type="file" accept=".xlsx" onChange={(e) => setObFile(e.target.files?.[0] || null)} className="block text-sm text-slate-500 file:mr-3 file:rounded-lg file:border-0 file:bg-slate-100 dark:file:bg-slate-800 file:px-3 file:py-2.5 file:text-sm file:font-semibold" />
+                  </label>
+                  <button type="submit" className="whitespace-nowrap bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Upload & post opening</button>
+                </form>
+              </div>
+            </section>
+
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-1.5">Auto-Posting Rules — {buName}</h2>
+              <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">Which accounts automatic journal entries use. Saving here creates a BU override for {buName}; other BUs keep the group rule.</p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm min-w-[680px]">
+                  <thead className="text-left text-xs uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                    <tr><th className="py-2 pr-3">Source</th><th className="py-2 pr-3">Debit account</th><th className="py-2 pr-3">Credit account</th><th className="py-2 pr-3">Current scope</th><th className="py-2" /></tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {Object.entries(ruleEdits).map(([field, edit]) => (
+                      <tr key={field}>
+                        <td className="py-2.5 pr-3 font-medium">{RULE_LABELS[field] || field}<span className="block text-xs text-slate-400 font-normal">{field}</span></td>
+                        <td className="py-2.5 pr-3">
+                          <select value={edit.dr} onChange={(e) => setRuleEdits((r) => ({ ...r, [field]: { ...edit, dr: e.target.value } }))} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-2 text-sm">
+                            {postable.map((a) => <option key={a.id} value={a.code}>{a.code} — {a.name}</option>)}
+                          </select>
+                        </td>
+                        <td className="py-2.5 pr-3">
+                          <select value={edit.cr} onChange={(e) => setRuleEdits((r) => ({ ...r, [field]: { ...edit, cr: e.target.value } }))} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-2 text-sm">
+                            {postable.map((a) => <option key={a.id} value={a.code}>{a.code} — {a.name}</option>)}
+                          </select>
+                        </td>
+                        <td className="py-2.5 pr-3 text-slate-500">{edit.scope}</td>
+                        <td className="py-2.5 text-right"><button onClick={() => saveRule(field)} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">Save for this BU</button></td>
+                      </tr>
+                    ))}
+                    {Object.keys(ruleEdits).length === 0 && <tr><td colSpan={5} className="py-6 text-center text-slate-400">Loading rules…</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </section>
           </div>
         )}
 

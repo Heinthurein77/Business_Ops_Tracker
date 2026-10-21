@@ -270,6 +270,26 @@ export const api = {
     method: 'PATCH', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify({ is_reconciled: isReconciled }),
   }).then(handle),
   accReconciliation: (bankId) => getJson(`/api/accounting/bank-accounts/${bankId}/reconciliation`),
+  // ---- Go-live setup (opening balances, posting rules, exports) ----
+  accPostingRules: () => getJson('/api/accounting/posting-rules'),
+  accSavePostingRule: (payload) => fetch('/api/accounting/posting-rules', {
+    method: 'PUT', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
+  }).then(handle),
+  accOpeningTemplateUrl: (buId) => `/api/accounting/opening-balance/template?business_unit_id=${buId}`,
+  accUploadOpeningBalance: async (buId, asOf, file) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await fetch(`/api/accounting/opening-balance?business_unit_id=${buId}&as_of=${asOf}`, {
+      method: 'POST', credentials: 'include', body: fd,
+    });
+    return handle(res);
+  },
+  accExportUrl: (report, format, buId, period) => {
+    const q = new URLSearchParams({ report, format });
+    if (buId) q.set('business_unit_id', buId);
+    if (period) q.set('period', period);
+    return `/api/accounting/reports/export?${q.toString()}`;
+  },
 };
 
 export { ApiError };

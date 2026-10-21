@@ -137,3 +137,76 @@ def test_closed_period_blocks_posting(db):
         create_entry(db, db.test_bu_id, date(2026, 10, 15), "x", "manual", None,
                      [line(db, "1110", debit=1), line(db, "4100", credit=1)], post=True)
     assert "closed" in exc.value.detail
+
+
+# ---- go-live additions: exports + opening balance upload ----
+
+def test_export_rows_trial_balance(db):
+    from src.routers.accounting import _export_rows
+    create_entry(db, db.test_bu_id, date(2026, 10, 1), "sale", "manual", None,
+                 [line(db, "1110", debit=500), line(db, "4100", credit=500)], post=True)
+    db.commit()
+    user = type("U", (), {"role": "Chairman", "business_unit_id": None})()
+    title, header, rows = _export_rows("tb", db, user, db.test_bu_id, "2026-10")
+    assert title == "Trial Balance"
+    assert rows[-1][1] == "TOTAL"
+    assert rows[-1][2] == rows[-1][3] == 500.0
+
+
+def test_opening_balance_upload_accepts_template_layout(db):
+    import asyncio
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    from src.routers.accounting import opening_balance
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["account_code", "account_name", "debit", "credit"])
+    ws.append(["1110", "Cash on Hand", 2000000, None])
+    ws.append(["3100", "Owner Capital", None, 2000000])
+    buf = BytesIO()
+    wb.save(buf)
+
+    class FakeUpload:
+        filename = "ob.xlsx"
+        async def read(self):
+            return buf.getvalue()
+
+    user = type("U", (), {"id": None, "role": "Accountant", "business_unit_id": None})()
+    out = asyncio.get_event_loop().run_until_complete(
+        opening_balance(business_unit_id=db.test_bu_id, as_of=date(2026, 10, 1),
+                        file=FakeUpload(), user=user, db=db))
+    assert out["status"] == "posted"
+    assert out["total_debit"] == 2000000
+
+
+def test_opening_balance_rejects_unbalanced(db):
+    import asyncio
+    from io import BytesIO
+
+    from fastapi import HTTPException
+    from openpyxl import Workbook
+
+    from src.routers.accounting import opening_balance
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["account_code", "debit", "credit"])
+    ws.append(["1110", 1000, None])
+    ws.append(["3100", None, 900])
+    buf = BytesIO()
+    wb.save(buf)
+
+    class FakeUpload:
+        filename = "ob.xlsx"
+        async def read(self):
+            return buf.getvalue()
+
+    user = type("U", (), {"id": None, "role": "Accountant", "business_unit_id": None})()
+    with pytest.raises(HTTPException) as exc:
+        asyncio.get_event_loop().run_until_complete(
+            opening_balance(business_unit_id=db.test_bu_id, as_of=date(2026, 10, 1),
+                            file=FakeUpload(), user=user, db=db))
+    assert "do not balance" in exc.value.detail
