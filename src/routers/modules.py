@@ -764,3 +764,258 @@ def run_check_batch_expiry(db: Session, days: int = 30) -> dict:
         b.expiry_notified_at = datetime.utcnow()
     db.commit()
     return {"checked": len(batches), "notified": notified}
+
+
+# ------------------------------------------------------------------ stock transfers between BUs (ERP completion)
+
+def serialize_transfer(db: Session, t) -> dict:
+    total = sum((Decimal(str(l.quantity)) * Decimal(str(l.unit_cost or 0)) for l in t.lines), Decimal("0"))
+    return {
+        "id": t.id, "transfer_no": t.transfer_no,
+        "from_business_unit_id": t.from_business_unit_id,
+        "from_bu_name": t.from_business_unit.name if t.from_business_unit else None,
+        "to_business_unit_id": t.to_business_unit_id,
+        "to_bu_name": t.to_business_unit.name if t.to_business_unit else None,
+        "status": t.status, "notes": t.notes,
+        "total_cost": float(total),
+        "sent_at": t.sent_at.isoformat() if t.sent_at else None,
+        "received_at": t.received_at.isoformat() if t.received_at else None,
+        "created_at": t.created_at.isoformat() if t.created_at else None,
+        "lines": [{"id": l.id, "inventory_item_id": l.inventory_item_id,
+                   "item_name": l.inventory_item.name if l.inventory_item else None,
+                   "dest_inventory_item_id": l.dest_inventory_item_id,
+                   "quantity": float(l.quantity),
+                   "unit_cost": float(l.unit_cost or 0)} for l in t.lines],
+    }
+
+
+class TransferLineIn(BaseModel):
+    inventory_item_id: int
+    quantity: float = Field(gt=0)
+
+
+class StockTransferIn(BaseModel):
+    from_business_unit_id: int
+    to_business_unit_id: int
+    notes: Optional[str] = None
+    lines: list[TransferLineIn] = Field(min_length=1)
+
+
+def _transfer_or_404(db: Session, transfer_id: int):
+    from src.models import StockTransfer
+    t = db.query(StockTransfer).filter(StockTransfer.id == transfer_id).first()
+    if not t:
+        raise HTTPException(404, "Stock transfer not found")
+    return t
+
+
+def _post_transfer_journal(db: Session, bu_id: int, lines_spec, user_id: int,
+                           transfer_id: int, description: str) -> None:
+    """Best-effort journal in one BU's books (PO/invoice helper pattern)."""
+    try:
+        from src.routers.accounting import create_entry
+        create_entry(db, bu_id, date.today(), description, "stock_transfer",
+                     user_id, lines_spec, source_id=transfer_id, post=True)
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
+@router.get("/stock-transfers")
+def list_stock_transfers(from_business_unit_id: Optional[int] = None,
+                         to_business_unit_id: Optional[int] = None,
+                         status: Optional[str] = None,
+                         user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from src.models import StockTransfer
+    if user.role == "CEO":
+        from_business_unit_id = user.business_unit_id
+    q = db.query(StockTransfer)
+    if from_business_unit_id:
+        q = q.filter(StockTransfer.from_business_unit_id == from_business_unit_id)
+    if to_business_unit_id:
+        q = q.filter(StockTransfer.to_business_unit_id == to_business_unit_id)
+    if status:
+        q = q.filter(StockTransfer.status == status)
+    rows = q.order_by(StockTransfer.id.desc()).limit(200).all()
+    return {"items": [serialize_transfer(db, t) for t in rows]}
+
+
+@router.post("/stock-transfers")
+def create_stock_transfer(payload: StockTransferIn, user: User = Depends(get_current_user),
+                          db: Session = Depends(get_db)):
+    from src.models import StockTransfer, StockTransferLine
+    bu_scope(user, payload.from_business_unit_id)
+    if payload.from_business_unit_id == payload.to_business_unit_id:
+        raise HTTPException(400, "Source and destination must be different BUs")
+    if not db.query(BusinessUnit).filter(BusinessUnit.id == payload.to_business_unit_id).first():
+        raise HTTPException(404, "Destination business unit not found")
+    for ln in payload.lines:
+        item = db.query(InventoryItem).filter(InventoryItem.id == ln.inventory_item_id).first()
+        if not item or item.business_unit_id != payload.from_business_unit_id:
+            raise HTTPException(400, f"Item {ln.inventory_item_id} does not belong to the source BU")
+    count = db.query(StockTransfer).filter(
+        StockTransfer.from_business_unit_id == payload.from_business_unit_id).count()
+    t = StockTransfer(from_business_unit_id=payload.from_business_unit_id,
+                      to_business_unit_id=payload.to_business_unit_id,
+                      transfer_no=f"TRF-{payload.from_business_unit_id}-{count + 1:04d}",
+                      status="draft", notes=payload.notes, created_by_id=user.id)
+    db.add(t)
+    db.flush()
+    for ln in payload.lines:
+        db.add(StockTransferLine(transfer_id=t.id, inventory_item_id=ln.inventory_item_id,
+                                 quantity=Decimal(str(ln.quantity))))
+    db.commit()
+    db.refresh(t)
+    return serialize_transfer(db, t)
+
+
+@router.post("/stock-transfers/{transfer_id}/send")
+def send_stock_transfer(transfer_id: int, user: User = Depends(get_current_user),
+                        db: Session = Depends(get_db)):
+    """Stock out of the source BU at moving-average cost; the source BU's
+    books post Dr 1180 Intercompany Receivable / Cr 1140 Inventory."""
+    from src.models import StockMovement as SM
+    t = _transfer_or_404(db, transfer_id)
+    bu_scope(user, t.from_business_unit_id)
+    if t.status != "draft":
+        raise HTTPException(400, f"Cannot send a transfer in status {t.status}")
+    for ln in t.lines:
+        item = ln.inventory_item
+        if Decimal(str(item.current_stock or 0)) < Decimal(str(ln.quantity)):
+            raise HTTPException(400, f"Not enough stock of {item.name} in the source BU")
+    total_cost = Decimal("0")
+    for ln in t.lines:
+        item = ln.inventory_item
+        qty = Decimal(str(ln.quantity))
+        cost = Decimal(str(item.unit_cost or 0))
+        ln.unit_cost = cost
+        total_cost += qty * cost
+        item.current_stock = Decimal(str(item.current_stock or 0)) - qty
+        item.updated_at = datetime.utcnow()
+        db.add(SM(item_id=item.id, movement_type="out", quantity=qty,
+                  reason=f"Stock transfer {t.transfer_no} to BU {t.to_business_unit_id}",
+                  recorded_by_id=user.id))
+        if getattr(item, "requires_expiry", False):
+            consume_batches_fefo(db, item, qty)
+    t.status = "in_transit"
+    t.sent_at = datetime.utcnow()
+    db.commit()
+    if total_cost > 0:
+        try:
+            from src.routers.accounting import _ensure_intercompany_accounts, account_by_code
+            _ensure_intercompany_accounts(db, t.from_business_unit_id)
+            db.commit()
+            recv = account_by_code(db, t.from_business_unit_id, "1180")
+            inv_acc = account_by_code(db, t.from_business_unit_id, "1140")
+            if recv and inv_acc:
+                _post_transfer_journal(
+                    db, t.from_business_unit_id,
+                    [{"account_id": recv.id, "debit": total_cost, "credit": 0},
+                     {"account_id": inv_acc.id, "debit": 0, "credit": total_cost}],
+                    user.id, t.id,
+                    f"Stock transfer {t.transfer_no} sent to {t.to_business_unit.name if t.to_business_unit else ''}")
+        except Exception:
+            db.rollback()
+    db.refresh(t)
+    return serialize_transfer(db, t)
+
+
+@router.post("/stock-transfers/{transfer_id}/receive")
+def receive_stock_transfer(transfer_id: int, user: User = Depends(get_current_user),
+                           db: Session = Depends(get_db)):
+    """Stock into the destination BU at the transfer cost (moving average
+    updated); destination books post Dr 1140 / Cr 2180."""
+    from src.models import StockMovement as SM
+    t = _transfer_or_404(db, transfer_id)
+    if user.role == "CEO" and user.business_unit_id not in (t.from_business_unit_id, t.to_business_unit_id):
+        raise HTTPException(403, "Not your business unit")
+    if t.status != "in_transit":
+        raise HTTPException(400, f"Cannot receive a transfer in status {t.status}")
+    total_cost = Decimal("0")
+    for ln in t.lines:
+        src_item = ln.inventory_item
+        qty = Decimal(str(ln.quantity))
+        cost = Decimal(str(ln.unit_cost or 0))
+        total_cost += qty * cost
+        dst = db.query(InventoryItem).filter(
+            InventoryItem.business_unit_id == t.to_business_unit_id,
+            InventoryItem.name == src_item.name, InventoryItem.is_active == True).first()  # noqa: E712
+        if dst is None:
+            dst = InventoryItem(business_unit_id=t.to_business_unit_id, name=src_item.name,
+                                sku=src_item.sku, category=src_item.category, unit=src_item.unit,
+                                current_stock=0, reorder_level=src_item.reorder_level,
+                                unit_cost=cost, brand=getattr(src_item, "brand", None),
+                                principal_id=getattr(src_item, "principal_id", None),
+                                requires_expiry=getattr(src_item, "requires_expiry", False))
+            db.add(dst)
+            db.flush()
+        old_qty = Decimal(str(dst.current_stock or 0))
+        old_avg = Decimal(str(dst.unit_cost or 0))
+        new_qty = old_qty + qty
+        dst.unit_cost = ((old_qty * old_avg + qty * cost) / new_qty) if new_qty > 0 else cost
+        dst.current_stock = new_qty
+        dst.updated_at = datetime.utcnow()
+        ln.dest_inventory_item_id = dst.id
+        db.add(SM(item_id=dst.id, movement_type="in", quantity=qty,
+                  reason=f"Stock transfer {t.transfer_no} from BU {t.from_business_unit_id}",
+                  recorded_by_id=user.id))
+    t.status = "received"
+    t.received_at = datetime.utcnow()
+    db.commit()
+    if total_cost > 0:
+        try:
+            from src.routers.accounting import _ensure_intercompany_accounts, account_by_code
+            _ensure_intercompany_accounts(db, t.to_business_unit_id)
+            db.commit()
+            inv_acc = account_by_code(db, t.to_business_unit_id, "1140")
+            pay = account_by_code(db, t.to_business_unit_id, "2180")
+            if inv_acc and pay:
+                _post_transfer_journal(
+                    db, t.to_business_unit_id,
+                    [{"account_id": inv_acc.id, "debit": total_cost, "credit": 0},
+                     {"account_id": pay.id, "debit": 0, "credit": total_cost}],
+                    user.id, t.id,
+                    f"Stock transfer {t.transfer_no} received from {t.from_business_unit.name if t.from_business_unit else ''}")
+        except Exception:
+            db.rollback()
+    db.refresh(t)
+    return serialize_transfer(db, t)
+
+
+@router.post("/stock-transfers/{transfer_id}/cancel")
+def cancel_stock_transfer(transfer_id: int, user: User = Depends(get_current_user),
+                          db: Session = Depends(get_db)):
+    """Draft: nothing posted, just cancel. In-transit: reverse the source
+    journal and restock the source BU. Received transfers cannot cancel."""
+    from src.models import JournalEntry, StockMovement as SM
+    from src.routers.ops import restock_batches
+    t = _transfer_or_404(db, transfer_id)
+    bu_scope(user, t.from_business_unit_id)
+    if t.status == "draft":
+        t.status = "cancelled"
+        db.commit()
+        db.refresh(t)
+        return serialize_transfer(db, t)
+    if t.status != "in_transit":
+        raise HTTPException(400, f"Cannot cancel a transfer in status {t.status}")
+    for ln in t.lines:
+        item = ln.inventory_item
+        qty = Decimal(str(ln.quantity))
+        item.current_stock = Decimal(str(item.current_stock or 0)) + qty
+        item.updated_at = datetime.utcnow()
+        db.add(SM(item_id=item.id, movement_type="in", quantity=qty,
+                  reason=f"Stock transfer {t.transfer_no} cancelled",
+                  recorded_by_id=user.id))
+        if getattr(item, "requires_expiry", False):
+            restock_batches(db, item, qty, batch_no="TRF-RETURN")
+    from src.routers.accounting import _reverse_entry
+    entries = db.query(JournalEntry).filter(
+        JournalEntry.source == "stock_transfer", JournalEntry.source_id == t.id,
+        JournalEntry.business_unit_id == t.from_business_unit_id,
+        JournalEntry.status == "posted", JournalEntry.reversed_by_id == None).all()  # noqa: E711
+    for e in entries:
+        _reverse_entry(db, e, user.id)
+    t.status = "cancelled"
+    db.commit()
+    db.refresh(t)
+    return serialize_transfer(db, t)

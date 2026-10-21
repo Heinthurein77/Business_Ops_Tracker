@@ -673,6 +673,11 @@ class JournalEntry(Base):
     # manual / daily_financial / expense / opening / reversal
     source_id = Column(Integer, nullable=True)
     status = Column(String(20), default="draft", nullable=False, index=True)  # draft / posted
+    # ERP completion: large manual entries created by an Accountant need a
+    # Chairman/HO approval before posting. not_required / pending /
+    # approved / rejected. Auto-posted and admin-created entries stay
+    # "not_required" and behave exactly as before.
+    approval_status = Column(String(20), default="not_required", nullable=False)
     reversal_of_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)
     reversed_by_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -765,6 +770,10 @@ class PurchaseOrder(Base):
     supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=False, index=True)
     po_no = Column(String(30), nullable=False, index=True)
     status = Column(String(20), default="draft", nullable=False, index=True)
+    # ERP completion: two-stage approval for large POs (mirrors expenses).
+    # None = no approval needed (total <= threshold); otherwise
+    # first (HO) -> final (Chairman) -> approved / rejected.
+    approval_stage = Column(String(10), nullable=True)
     currency = Column(String(3), default="MMK", nullable=False)
     exchange_rate = Column(Numeric(14, 4), default=1, nullable=False)  # MMK per 1 unit
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
@@ -853,6 +862,9 @@ class SalesInvoiceLine(Base):
     quantity = Column(Numeric(14, 2), default=1, nullable=False)
     unit_price = Column(Numeric(16, 2), nullable=False)
     inventory_item_id = Column(Integer, ForeignKey("inventory_items.id"), nullable=True, index=True)
+    # ERP completion: optional JSON list of serial numbers sold on this
+    # line (marked sold in ItemSerial when the invoice is sent).
+    serial_nos = Column(Text, nullable=True)
 
     invoice = relationship("SalesInvoice", back_populates="lines")
     inventory_item = relationship("InventoryItem")
@@ -945,6 +957,10 @@ class PayrollLine(Base):
     base_salary = Column(Numeric(16, 2), default=0, nullable=False)
     allowances = Column(Numeric(16, 2), default=0, nullable=False)
     deductions = Column(Numeric(16, 2), default=0, nullable=False)
+    # ERP completion: portion of this line's deductions that repays staff
+    # advances (set at pay time from approved StaffAdvance rows; credited
+    # to the advances account 1240 instead of 2120 when the run is paid).
+    advance_deduction = Column(Numeric(16, 2), default=0, nullable=False)
 
     run = relationship("PayrollRun", back_populates="lines")
     employee = relationship("Employee")
@@ -1244,3 +1260,277 @@ class LeaseContract(Base):
 
     unit = relationship("PropertyUnit")
     tenant = relationship("Customer")
+
+
+# ------------------------------------------------------------------ ERP completion (2026-10-21)
+
+class PosSale(Base):
+    """Point-of-sale counter sale (convenience / telecom / furniture shops).
+
+    Posts its own journals (sale + COGS, source="pos_sale") and moves
+    stock immediately. Deliberately does NOT touch DailyFinancial — the
+    CEO daily report must not double-count POS revenue.
+    """
+    __tablename__ = "pos_sales"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True, index=True)
+    customer_name = Column(String(150), nullable=True)  # walk-in name when no customer record
+    payment_method = Column(String(20), default="cash", nullable=False)  # cash/bank
+    tax_rate = Column(Numeric(5, 2), default=0, nullable=False)  # % commercial tax
+    status = Column(String(20), default="completed", nullable=False, index=True)  # completed/void
+    sale_date = Column(Date, nullable=False, default=date.today, index=True)
+    sold_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    voided_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+    customer = relationship("Customer")
+    lines = relationship("PosSaleLine", back_populates="sale", cascade="all, delete-orphan")
+
+
+class PosSaleLine(Base):
+    __tablename__ = "pos_sale_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sale_id = Column(Integer, ForeignKey("pos_sales.id"), nullable=False, index=True)
+    inventory_item_id = Column(Integer, ForeignKey("inventory_items.id"), nullable=False, index=True)
+    description = Column(String(200), nullable=False)
+    quantity = Column(Numeric(14, 2), nullable=False)
+    unit_price = Column(Numeric(16, 2), nullable=False)
+    unit_cost = Column(Numeric(16, 2), default=0, nullable=False)  # moving-avg cost at sale time
+    serial_nos = Column(Text, nullable=True)  # JSON list, optional
+
+    sale = relationship("PosSale", back_populates="lines")
+    inventory_item = relationship("InventoryItem")
+
+
+class Quotation(Base):
+    """Price quotation: draft -> sent -> accepted/rejected -> converted.
+
+    Quotations never post journals; converting creates a draft
+    SalesInvoice that follows the normal invoice flow.
+    """
+    __tablename__ = "quotations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=False, index=True)
+    quote_no = Column(String(30), nullable=False, index=True)
+    status = Column(String(20), default="draft", nullable=False, index=True)
+    quote_date = Column(Date, nullable=False)
+    valid_until = Column(Date, nullable=True)
+    tax_rate = Column(Numeric(5, 2), default=5, nullable=False)
+    currency = Column(String(3), default="MMK", nullable=False)
+    exchange_rate = Column(Numeric(14, 4), default=1, nullable=False)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
+    notes = Column(String(500), nullable=True)
+    converted_invoice_id = Column(Integer, ForeignKey("sales_invoices.id"), nullable=True)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+    customer = relationship("Customer")
+    lines = relationship("QuotationLine", back_populates="quotation", cascade="all, delete-orphan")
+
+
+class QuotationLine(Base):
+    __tablename__ = "quotation_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    quotation_id = Column(Integer, ForeignKey("quotations.id"), nullable=False, index=True)
+    description = Column(String(200), nullable=False)
+    quantity = Column(Numeric(14, 2), default=1, nullable=False)
+    unit_price = Column(Numeric(16, 2), nullable=False)
+    inventory_item_id = Column(Integer, ForeignKey("inventory_items.id"), nullable=True, index=True)
+
+    quotation = relationship("Quotation", back_populates="lines")
+
+
+class SalesReturn(Base):
+    """Credit note: goods returned against a sent invoice.
+
+    Restocks items and reverses revenue/tax/AR proportionally
+    (Dr 4100 / Dr 2130 / Cr 1130). The return total reduces the invoice
+    balance in invoice_amounts().
+    """
+    __tablename__ = "sales_returns"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    invoice_id = Column(Integer, ForeignKey("sales_invoices.id"), nullable=False, index=True)
+    return_no = Column(String(30), nullable=False, index=True)
+    status = Column(String(20), default="posted", nullable=False, index=True)
+    return_date = Column(Date, nullable=False, default=date.today)
+    reason = Column(String(300), nullable=True)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+    invoice = relationship("SalesInvoice")
+    lines = relationship("SalesReturnLine", back_populates="sales_return", cascade="all, delete-orphan")
+
+
+class SalesReturnLine(Base):
+    __tablename__ = "sales_return_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    return_id = Column(Integer, ForeignKey("sales_returns.id"), nullable=False, index=True)
+    invoice_line_id = Column(Integer, ForeignKey("sales_invoice_lines.id"), nullable=False, index=True)
+    quantity = Column(Numeric(14, 2), nullable=False)
+    unit_price = Column(Numeric(16, 2), nullable=False)
+
+    sales_return = relationship("SalesReturn", back_populates="lines")
+    invoice_line = relationship("SalesInvoiceLine")
+
+
+class PurchaseReturn(Base):
+    """Debit note: goods returned to a supplier against a received PO.
+
+    Stocks out at PO line cost and posts Dr 2110 AP / Cr 1140 Inventory.
+    """
+    __tablename__ = "purchase_returns"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    po_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=False, index=True)
+    return_no = Column(String(30), nullable=False, index=True)
+    status = Column(String(20), default="posted", nullable=False, index=True)
+    return_date = Column(Date, nullable=False, default=date.today)
+    reason = Column(String(300), nullable=True)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    business_unit = relationship("BusinessUnit")
+    po = relationship("PurchaseOrder")
+    lines = relationship("PurchaseReturnLine", back_populates="purchase_return", cascade="all, delete-orphan")
+
+
+class PurchaseReturnLine(Base):
+    __tablename__ = "purchase_return_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    return_id = Column(Integer, ForeignKey("purchase_returns.id"), nullable=False, index=True)
+    po_line_id = Column(Integer, ForeignKey("purchase_order_lines.id"), nullable=False, index=True)
+    quantity = Column(Numeric(14, 2), nullable=False)
+    unit_cost = Column(Numeric(16, 2), nullable=False)
+
+    purchase_return = relationship("PurchaseReturn", back_populates="lines")
+    po_line = relationship("PurchaseOrderLine")
+
+
+class ItemSerial(Base):
+    """One physical unit of a stock item, tracked by serial / IMEI.
+
+    Unique per (business unit, item, serial number). Sold via invoice
+    lines or POS lines that carry serial_nos; warranty tracked per unit.
+    """
+    __tablename__ = "item_serials"
+    __table_args__ = (
+        UniqueConstraint("business_unit_id", "inventory_item_id", "serial_no",
+                         name="uq_serial_bu_item_no"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    inventory_item_id = Column(Integer, ForeignKey("inventory_items.id"), nullable=False, index=True)
+    serial_no = Column(String(120), nullable=False, index=True)
+    status = Column(String(20), default="in_stock", nullable=False, index=True)  # in_stock/sold/returned/defective
+    purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True)
+    sales_invoice_id = Column(Integer, ForeignKey("sales_invoices.id"), nullable=True)
+    pos_sale_id = Column(Integer, ForeignKey("pos_sales.id"), nullable=True)
+    warranty_until = Column(Date, nullable=True)
+    sold_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    inventory_item = relationship("InventoryItem")
+    business_unit = relationship("BusinessUnit")
+
+
+class StaffAdvance(Base):
+    """Salary advance / staff loan, repaid by monthly payroll deductions.
+
+    Approve posts Dr 1240 Staff Advances / Cr 1110 Cash in the employee's
+    BU. Each paid payroll run deducts min(monthly_deduction, remaining)
+    per advance and credits 1240 instead of 2120 for that portion.
+    """
+    __tablename__ = "staff_advances"
+
+    id = Column(Integer, primary_key=True, index=True)
+    employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    amount = Column(Numeric(16, 2), nullable=False)
+    remaining_amount = Column(Numeric(16, 2), nullable=False)
+    monthly_deduction = Column(Numeric(16, 2), nullable=False)
+    advance_date = Column(Date, nullable=False, default=date.today)
+    reason = Column(String(300), nullable=True)
+    status = Column(String(20), default="pending", nullable=False, index=True)  # pending/approved/rejected/settled
+    journal_entry_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)
+    requested_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    employee = relationship("Employee")
+    business_unit = relationship("BusinessUnit")
+
+
+class StockTransfer(Base):
+    """Formal inter-BU stock transfer with in-transit state.
+
+    Send: stock out of source BU, journal (source books) Dr 1180 / Cr 1140
+    at moving-average cost. Receive: stock into destination BU at the
+    transfer cost, journal (destination books) Dr 1140 / Cr 2180.
+    """
+    __tablename__ = "stock_transfers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    from_business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    to_business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    transfer_no = Column(String(30), nullable=False, index=True)
+    status = Column(String(20), default="draft", nullable=False, index=True)  # draft/in_transit/received/cancelled
+    notes = Column(String(500), nullable=True)
+    sent_at = Column(DateTime, nullable=True)
+    received_at = Column(DateTime, nullable=True)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    from_business_unit = relationship("BusinessUnit", foreign_keys=[from_business_unit_id])
+    to_business_unit = relationship("BusinessUnit", foreign_keys=[to_business_unit_id])
+    lines = relationship("StockTransferLine", back_populates="transfer", cascade="all, delete-orphan")
+
+
+class StockTransferLine(Base):
+    __tablename__ = "stock_transfer_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    transfer_id = Column(Integer, ForeignKey("stock_transfers.id"), nullable=False, index=True)
+    inventory_item_id = Column(Integer, ForeignKey("inventory_items.id"), nullable=False, index=True)
+    dest_inventory_item_id = Column(Integer, ForeignKey("inventory_items.id"), nullable=True)
+    quantity = Column(Numeric(14, 2), nullable=False)
+    unit_cost = Column(Numeric(16, 2), nullable=True)  # source moving-avg cost, set at send
+
+    transfer = relationship("StockTransfer", back_populates="lines")
+    inventory_item = relationship("InventoryItem", foreign_keys=[inventory_item_id])
+    dest_item = relationship("InventoryItem", foreign_keys=[dest_inventory_item_id])
+
+
+class AttendanceRecord(Base):
+    """One employee's attendance for one day (HR & payroll completion)."""
+    __tablename__ = "attendance_records"
+    __table_args__ = (
+        UniqueConstraint("employee_id", "record_date", name="uq_attendance_emp_date"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False, index=True)
+    record_date = Column(Date, nullable=False, index=True)
+    status = Column(String(20), nullable=False)  # present/absent/late/leave/half_day
+    note = Column(String(300), nullable=True)
+    recorded_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    employee = relationship("Employee")
+    business_unit = relationship("BusinessUnit")

@@ -96,6 +96,7 @@ def serialize_entry(db: Session, e: JournalEntry, with_lines: bool = True) -> di
         "entry_date": e.entry_date.isoformat() if e.entry_date else None,
         "description": e.description, "reference": e.reference,
         "source": e.source, "source_id": e.source_id, "status": e.status,
+        "approval_status": getattr(e, "approval_status", None) or "not_required",
         "reversal_of_id": e.reversal_of_id, "reversed_by_id": e.reversed_by_id,
         "total_debit": fmt(sum((l.debit or ZERO) for l in e.lines)),
         "total_credit": fmt(sum((l.credit or ZERO) for l in e.lines)),
@@ -380,6 +381,13 @@ def create_journal(payload: JournalIn, user: User = Depends(require_accounting),
     e = create_entry(db, payload.business_unit_id, payload.entry_date,
                      payload.description or "", "manual", user.id, lines,
                      reference=payload.reference)
+    # ERP completion: large manual entries written by an Accountant need
+    # Chairman/HO approval before they can be posted. Entries by
+    # Chairman/HO, and anything at or under the threshold, post as before.
+    from src.routers.ops import TWO_STAGE_THRESHOLD
+    total_debit = sum(Decimal(str(ln.get("debit") or 0)) for ln in lines)
+    if user.role == "Accountant" and total_debit > TWO_STAGE_THRESHOLD:
+        e.approval_status = "pending"
     db.commit()
     db.refresh(e)
     return serialize_entry(db, e)
@@ -417,6 +425,11 @@ def post_journal(entry_id: int, user: User = Depends(require_accounting),
         raise HTTPException(404, "Journal entry not found")
     if e.status == "posted":
         raise HTTPException(400, "Entry already posted")
+    approval = getattr(e, "approval_status", None) or "not_required"
+    if approval == "pending":
+        raise HTTPException(400, "Entry is awaiting approval — a Chairman/HO must approve it before posting")
+    if approval == "rejected":
+        raise HTTPException(400, "Entry was rejected and cannot be posted")
     ensure_period_open(db, e.business_unit_id, e.entry_date)
     lines = [{"account_id": l.account_id, "debit": l.debit, "credit": l.credit}
              for l in e.lines]
@@ -424,6 +437,40 @@ def post_journal(entry_id: int, user: User = Depends(require_accounting),
     e.status = "posted"
     e.posted_by_id = user.id
     e.posted_at = datetime.utcnow()
+    db.commit()
+    db.refresh(e)
+    return serialize_entry(db, e)
+
+
+@router.post("/journal/{entry_id}/approve")
+def approve_journal(entry_id: int, user: User = Depends(require_admin),
+                    db: Session = Depends(get_db)):
+    """Approve a large Accountant-created entry so it can be posted.
+    Chairman/HO only, and never the entry's own creator."""
+    e = db.query(JournalEntry).filter(JournalEntry.id == entry_id).first()
+    if not e:
+        raise HTTPException(404, "Journal entry not found")
+    if (getattr(e, "approval_status", None) or "not_required") != "pending":
+        raise HTTPException(400, "Entry is not awaiting approval")
+    if e.created_by_id is not None and e.created_by_id == user.id:
+        raise HTTPException(403, "You cannot approve your own journal entry")
+    e.approval_status = "approved"
+    db.commit()
+    db.refresh(e)
+    return serialize_entry(db, e)
+
+
+@router.post("/journal/{entry_id}/reject-approval")
+def reject_journal_approval(entry_id: int, user: User = Depends(require_admin),
+                            db: Session = Depends(get_db)):
+    e = db.query(JournalEntry).filter(JournalEntry.id == entry_id).first()
+    if not e:
+        raise HTTPException(404, "Journal entry not found")
+    if (getattr(e, "approval_status", None) or "not_required") != "pending":
+        raise HTTPException(400, "Entry is not awaiting approval")
+    if e.created_by_id is not None and e.created_by_id == user.id:
+        raise HTTPException(403, "You cannot reject your own journal entry")
+    e.approval_status = "rejected"
     db.commit()
     db.refresh(e)
     return serialize_entry(db, e)
@@ -1466,6 +1513,22 @@ def _ensure_intercompany_accounts(db: Session, bu_id: int) -> None:
         parent = account_by_code(db, bu_id, parent_code)
         db.add(Account(business_unit_id=bu_id, code=code, name=name, account_type=acc_type,
                        parent_id=parent.id if parent else None, is_system=True))
+    db.flush()
+
+
+def _ensure_advance_account(db: Session, bu_id: int) -> None:
+    """BUs provisioned before the staff-advances feature lack account 1240
+    (it is in the base template now); create it on demand, same pattern as
+    the intercompany accounts."""
+    from src.accounting_templates import STAFF_ADVANCE_ACCOUNT_CODE
+    if account_by_code(db, bu_id, STAFF_ADVANCE_ACCOUNT_CODE):
+        return
+    if not db.query(Account).filter(Account.business_unit_id == bu_id).first():
+        return  # no chart of accounts at all — nothing to add to
+    parent = account_by_code(db, bu_id, "1100")
+    db.add(Account(business_unit_id=bu_id, code=STAFF_ADVANCE_ACCOUNT_CODE,
+                   name="Staff Advances & Loans", account_type="asset",
+                   parent_id=parent.id if parent else None, is_system=True))
     db.flush()
 
 

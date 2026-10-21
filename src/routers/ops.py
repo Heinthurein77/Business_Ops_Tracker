@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -18,6 +18,7 @@ from src.auth import get_current_user, require_roles
 from src.database import get_db
 from src.models import (
     ActionItem,
+    AttendanceRecord,
     BusinessUnit,
     Customer,
     CustomerMetric,
@@ -26,15 +27,26 @@ from src.models import (
     ExpenseRequest,
     InventoryItem,
     InvoicePayment,
+    ItemSerial,
+    JournalEntry,
     LeaveRequest,
     LicenseDocument,
     Notification,
     PayrollLine,
     PayrollRun,
+    PosSale,
+    PosSaleLine,
     PurchaseOrder,
     PurchaseOrderLine,
+    PurchaseReturn,
+    PurchaseReturnLine,
+    Quotation,
+    QuotationLine,
     SalesInvoice,
     SalesInvoiceLine,
+    SalesReturn,
+    SalesReturnLine,
+    StaffAdvance,
     StaffRecord,
     StockMovement,
     Supplier,
@@ -54,6 +66,64 @@ def bu_scope(user: User, bu_id: Optional[int]) -> Optional[int]:
             raise HTTPException(403, "CEOs can only access their own business unit")
         return user.business_unit_id
     return bu_id
+
+
+def _serial_list(raw) -> list:
+    """Serial numbers are stored as a JSON list in a Text column."""
+    if not raw:
+        return []
+    try:
+        import json
+        val = json.loads(raw)
+        return [str(s) for s in val] if isinstance(val, list) else []
+    except Exception:
+        return []
+
+
+def _mark_line_serials_sold(db: Session, bu_id: int, lines, invoice_id=None, pos_sale_id=None) -> None:
+    """Validate + mark serials sold for invoice/POS lines carrying serial_nos.
+
+    Raises 400 when a serial is unknown for the line's item or not in
+    stock. Lines without an inventory item or without serials are skipped.
+    """
+    for ln in lines:
+        serials = _serial_list(getattr(ln, "serial_nos", None))
+        if not serials:
+            continue
+        item_id = getattr(ln, "inventory_item_id", None)
+        if not item_id:
+            raise HTTPException(400, "Serial numbers need a stock item on the line")
+        for sn in serials:
+            row = db.query(ItemSerial).filter(
+                ItemSerial.business_unit_id == bu_id,
+                ItemSerial.inventory_item_id == item_id,
+                ItemSerial.serial_no == sn).first()
+            if not row:
+                raise HTTPException(400, f"Serial {sn} is not registered for this item")
+            if row.status != "in_stock":
+                raise HTTPException(400, f"Serial {sn} is not in stock (status: {row.status})")
+            row.status = "sold"
+            row.sales_invoice_id = invoice_id
+            row.pos_sale_id = pos_sale_id
+            row.sold_at = datetime.utcnow()
+
+
+def restock_batches(db: Session, item: InventoryItem, qty: Decimal, batch_no: str = "RETURN") -> None:
+    """Put `qty` back into an item's batches (voids / transfer cancels).
+
+    FEFO consumption doesn't record which batch a sale took from, so the
+    quantity goes back onto the earliest-expiring batch (or a new batch
+    when the item has none).
+    """
+    from src.models import StockBatch
+    batch = (db.query(StockBatch).filter(StockBatch.item_id == item.id)
+             .order_by(StockBatch.expiry_date.is_(None), StockBatch.expiry_date,
+                       StockBatch.id).first())
+    if batch:
+        batch.quantity = Decimal(str(batch.quantity or 0)) + qty
+    else:
+        db.add(StockBatch(item_id=item.id, batch_no=batch_no, quantity=qty,
+                          unit_cost=item.unit_cost))
 
 
 def serialize_action_item(db: Session, item: ActionItem) -> dict:
@@ -1186,6 +1256,10 @@ def serialize_po(db: Session, po: PurchaseOrder) -> dict:
         "supplier_name": po.supplier.name if po.supplier else None,
         "status": po.status, "order_date": po.order_date.isoformat() if po.order_date else None,
         "notes": po.notes, "total": float(po_total(po)),
+        "approval_stage": getattr(po, "approval_stage", None),
+        "stage_label": ("Waiting HO review" if getattr(po, "approval_stage", None) == "first" and po.status == "draft"
+                        else "Waiting final approval" if getattr(po, "approval_stage", None) == "final" and po.status == "draft"
+                        else "Approval rejected" if getattr(po, "approval_stage", None) == "rejected" else None),
         "currency": getattr(po, "currency", "MMK") or "MMK",
         "exchange_rate": float(getattr(po, "exchange_rate", 1) or 1),
         "received_at": po.received_at.isoformat() if po.received_at else None,
@@ -1236,14 +1310,21 @@ def create_po(payload: POIn, user: User = Depends(get_current_user), db: Session
         raise HTTPException(404, "Supplier not found")
     count = db.query(PurchaseOrder).filter(PurchaseOrder.business_unit_id == payload.business_unit_id).count()
     from src.routers.accounting import latest_rate
+    fx = (Decimal(str(payload.exchange_rate)) if payload.exchange_rate
+          else latest_rate(db, payload.currency))
+    # ERP completion: POs over the two-stage threshold (in MMK, like the
+    # journals) start at approval stage "first" and cannot be ordered
+    # until HO + Chairman have approved.
+    total_mmk = sum((Decimal(str(l.quantity)) * Decimal(str(l.unit_cost)) for l in payload.lines),
+                    Decimal("0")) * Decimal(str(fx or 1))
     po = PurchaseOrder(
         business_unit_id=payload.business_unit_id, supplier_id=payload.supplier_id,
         po_no=f"PO-{payload.business_unit_id}-{count + 1:04d}", status="draft",
         order_date=payload.order_date, notes=payload.notes, created_by_id=user.id,
         currency=(payload.currency or "MMK").upper(),
-        exchange_rate=(Decimal(str(payload.exchange_rate)) if payload.exchange_rate
-                       else latest_rate(db, payload.currency)),
+        exchange_rate=fx,
         project_id=payload.project_id,
+        approval_stage="first" if total_mmk > TWO_STAGE_THRESHOLD else None,
     )
     db.add(po)
     db.flush()
@@ -1296,8 +1377,89 @@ def order_po(po_id: int, user: User = Depends(get_current_user), db: Session = D
     bu_scope(user, po.business_unit_id)
     if po.status != "draft":
         raise HTTPException(400, f"Cannot order a PO in status {po.status}")
+    stage = getattr(po, "approval_stage", None)
+    if stage in ("first", "final"):
+        raise HTTPException(400, "This PO is over the approval threshold and is still awaiting approval")
+    if stage == "rejected":
+        raise HTTPException(400, "This PO's approval was rejected — edit and resubmit it first")
     po.status = "ordered"
     db.commit()
+    return serialize_po(db, po)
+
+
+@router.post("/purchase-orders/{po_id}/approve")
+def approve_po(po_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Two-stage approval, mirroring expenses: HO clears stage "first",
+    the Chairman gives the final approval."""
+    po = _po_or_404(db, po_id)
+    if po.status != "draft":
+        raise HTTPException(400, "Only draft POs can be approved")
+    stage = getattr(po, "approval_stage", None)
+    if stage == "first":
+        if user.role != "HO":
+            raise HTTPException(403, "Large POs need HO review first")
+        po.approval_stage = "final"
+    elif stage == "final":
+        if user.role != "Chairman":
+            raise HTTPException(403, "Final PO approval is the Chairman's")
+        po.approval_stage = "approved"
+    else:
+        raise HTTPException(400, "This PO is not awaiting approval")
+    db.commit()
+    db.refresh(po)
+    return serialize_po(db, po)
+
+
+@router.post("/purchase-orders/{po_id}/reject-approval")
+def reject_po_approval(po_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    po = _po_or_404(db, po_id)
+    if po.status != "draft":
+        raise HTTPException(400, "Only draft POs can be rejected")
+    stage = getattr(po, "approval_stage", None)
+    if stage == "first" and user.role != "HO":
+        raise HTTPException(403, "Large POs need HO review first")
+    if stage == "final" and user.role != "Chairman":
+        raise HTTPException(403, "Final PO approval is the Chairman's")
+    if stage not in ("first", "final"):
+        raise HTTPException(400, "This PO is not awaiting approval")
+    po.approval_stage = "rejected"
+    db.commit()
+    db.refresh(po)
+    return serialize_po(db, po)
+
+
+class POUpdate(BaseModel):
+    notes: Optional[str] = None
+    lines: Optional[list[POLineIn]] = None
+
+
+@router.patch("/purchase-orders/{po_id}")
+def update_po(po_id: int, payload: POUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Edit a draft PO. Editing a rejected PO resubmits it: the approval
+    stage is recomputed from the new total."""
+    po = _po_or_404(db, po_id)
+    bu_scope(user, po.business_unit_id)
+    if po.status != "draft":
+        raise HTTPException(400, "Only draft POs can be edited")
+    if payload.notes is not None:
+        po.notes = payload.notes
+    if payload.lines is not None:
+        if not payload.lines:
+            raise HTTPException(400, "A PO needs at least one line")
+        for old in list(po.lines):
+            db.delete(old)
+        db.flush()
+        for ln in payload.lines:
+            db.add(PurchaseOrderLine(po_id=po.id, item_name=ln.item_name,
+                                     inventory_item_id=ln.inventory_item_id,
+                                     quantity=Decimal(str(ln.quantity)),
+                                     unit_cost=Decimal(str(ln.unit_cost))))
+        db.flush()
+    if getattr(po, "approval_stage", None) in ("rejected", "first", "final"):
+        total_mmk = po_total(po) * Decimal(str(getattr(po, "exchange_rate", 1) or 1))
+        po.approval_stage = "first" if total_mmk > TWO_STAGE_THRESHOLD else None
+    db.commit()
+    db.refresh(po)
     return serialize_po(db, po)
 
 
@@ -1420,6 +1582,22 @@ def delete_sales_customer(customer_id: int, user: User = Depends(get_current_use
     return {"ok": True}
 
 
+def sales_returns_total(db: Session, inv: SalesInvoice) -> tuple[Decimal, Decimal, Decimal]:
+    """(net, tax, total) of posted sales returns against this invoice.
+
+    Each return line reverses at the invoice line's price; tax is the
+    invoice's rate applied to the returned net — the same split the send
+    journal used, proportionally.
+    """
+    rows = (db.query(SalesReturnLine)
+            .join(SalesReturn, SalesReturnLine.return_id == SalesReturn.id)
+            .filter(SalesReturn.invoice_id == inv.id,
+                    SalesReturn.status == "posted").all())
+    net = sum((Decimal(str(l.quantity)) * Decimal(str(l.unit_price)) for l in rows), Decimal("0"))
+    tax = (net * Decimal(str(inv.tax_rate or 0)) / Decimal("100")).quantize(Decimal("0.01"))
+    return net, tax, net + tax
+
+
 def invoice_amounts(db: Session, inv: SalesInvoice) -> dict:
     subtotal = sum((Decimal(str(l.quantity)) * Decimal(str(l.unit_price)) for l in inv.lines), Decimal("0"))
     tax = (subtotal * Decimal(str(inv.tax_rate or 0)) / Decimal("100")).quantize(Decimal("0.01"))
@@ -1429,7 +1607,11 @@ def invoice_amounts(db: Session, inv: SalesInvoice) -> dict:
     paid = db.query(func.coalesce(func.sum(InvoicePayment.amount), 0)).filter(
         InvoicePayment.invoice_id == inv.id).scalar()
     paid = Decimal(str(paid or 0))
-    return {"subtotal": subtotal, "tax": tax, "total": total, "paid": paid, "balance": total - paid}
+    # ERP completion: posted credit notes (sales returns) reduce what the
+    # customer still owes. Defaults to 0 when there are no returns.
+    _, _, returns = sales_returns_total(db, inv)
+    return {"subtotal": subtotal, "tax": tax, "total": total, "paid": paid,
+            "returns": returns, "balance": total - returns - paid}
 
 
 def serialize_invoice(db: Session, inv: SalesInvoice) -> dict:
@@ -1450,8 +1632,11 @@ def serialize_invoice(db: Session, inv: SalesInvoice) -> dict:
         "exchange_rate": float(getattr(inv, "exchange_rate", 1) or 1),
         "subtotal": float(a["subtotal"]), "tax_amount": float(a["tax"]),
         "total": float(a["total"]), "paid": float(a["paid"]), "balance": float(a["balance"]),
+        "returns": float(a.get("returns") or 0),
         "lines": [{"id": l.id, "description": l.description, "quantity": float(l.quantity),
                    "unit_price": float(l.unit_price),
+                   "serial_nos": _serial_list(getattr(l, "serial_nos", None)),
+                   "inventory_item_id": l.inventory_item_id,
                    "line_total": float(Decimal(str(l.quantity)) * Decimal(str(l.unit_price)))} for l in inv.lines],
         "payments": [{"id": p.id, "amount": float(p.amount),
                       "payment_date": p.payment_date.isoformat() if p.payment_date else None,
@@ -1464,6 +1649,7 @@ class InvoiceLineIn(BaseModel):
     quantity: float = Field(gt=0, default=1)
     unit_price: float = Field(ge=0)
     inventory_item_id: Optional[int] = None
+    serial_nos: Optional[list[str]] = None  # optional serial/IMEI numbers sold
 
 
 class InvoiceIn(BaseModel):
@@ -1513,11 +1699,13 @@ def create_invoice(payload: InvoiceIn, user: User = Depends(get_current_user), d
     )
     db.add(inv)
     db.flush()
+    import json as _json
     for ln in payload.lines:
         db.add(SalesInvoiceLine(invoice_id=inv.id, description=ln.description,
                                 quantity=Decimal(str(ln.quantity)),
                                 unit_price=Decimal(str(ln.unit_price)),
-                                inventory_item_id=ln.inventory_item_id))
+                                inventory_item_id=ln.inventory_item_id,
+                                serial_nos=_json.dumps(ln.serial_nos) if ln.serial_nos else None))
     db.commit()
     db.refresh(inv)
     return serialize_invoice(db, inv)
@@ -1585,6 +1773,8 @@ def send_invoice(invoice_id: int, user: User = Depends(get_current_user), db: Se
         if outstanding + this_total > limit:
             raise HTTPException(400, f"Credit limit exceeded for {cust.name}: limit Ks {float(limit):,.0f}, "
                                      f"outstanding Ks {float(outstanding):,.0f}, this invoice Ks {float(this_total):,.0f}")
+    # Serial-tracked lines: validate + mark the units sold with this invoice.
+    _mark_line_serials_sold(db, inv.business_unit_id, inv.lines, invoice_id=inv.id)
     inv.status = "sent"
     inv.sent_at = datetime.utcnow()
     db.commit()
@@ -1823,18 +2013,26 @@ def review_leave(leave_id: int, payload: LeaveReview, user: User = Depends(requi
 
 def serialize_payroll(db: Session, run: PayrollRun) -> dict:
     lines = []
-    totals = {"gross": Decimal("0"), "deductions": Decimal("0"), "net": Decimal("0")}
+    totals = {"gross": Decimal("0"), "deductions": Decimal("0"), "net": Decimal("0"),
+              "advance_deductions": Decimal("0")}
     for l in run.lines:
         gross = Decimal(str(l.base_salary or 0)) + Decimal(str(l.allowances or 0))
-        net = gross - Decimal(str(l.deductions or 0))
+        adv_ded = Decimal(str(getattr(l, "advance_deduction", 0) or 0))
+        # Displayed deductions include the staff-advance repayment portion.
+        all_deductions = Decimal(str(l.deductions or 0)) + adv_ded
+        net = gross - all_deductions
         totals["gross"] += gross
-        totals["deductions"] += Decimal(str(l.deductions or 0))
+        totals["deductions"] += all_deductions
+        totals["advance_deductions"] += adv_ded
         totals["net"] += net
         lines.append({
             "id": l.id, "employee_id": l.employee_id,
             "employee_name": l.employee.name if l.employee else None,
             "base_salary": float(l.base_salary or 0), "allowances": float(l.allowances or 0),
-            "deductions": float(l.deductions or 0), "gross": float(gross), "net": float(net),
+            "deductions": float(all_deductions),
+            "manual_deductions": float(l.deductions or 0),
+            "advance_deduction": float(adv_ded),
+            "gross": float(gross), "net": float(net),
         })
     return {
         "id": run.id, "business_unit_id": run.business_unit_id,
@@ -1843,6 +2041,7 @@ def serialize_payroll(db: Session, run: PayrollRun) -> dict:
         "paid_at": run.paid_at.isoformat() if run.paid_at else None,
         "lines": lines,
         "total_gross": float(totals["gross"]), "total_deductions": float(totals["deductions"]),
+        "total_advance_deductions": float(totals["advance_deductions"]),
         "total_net": float(totals["net"]),
     }
 
@@ -1935,6 +2134,40 @@ def pay_payroll(run_id: int, user: User = Depends(require_roles("Chairman", "HO"
         raise HTTPException(404, "Payroll run not found")
     if run.status != "approved":
         raise HTTPException(400, "Payroll must be approved before paying")
+    # ERP completion: staff-advance repayments are applied HERE, at pay
+    # time — the safest hook. A run can only transition approved -> paid
+    # once, so a deduction can never double-apply, and there is no un-pay
+    # path that would need to restore balances. Each line collects
+    # min(monthly_deduction, remaining) per open advance, capped so the
+    # net pay never goes below zero.
+    for line in run.lines:
+        if Decimal(str(getattr(line, "advance_deduction", 0) or 0)) > 0:
+            continue
+        gross = Decimal(str(line.base_salary or 0)) + Decimal(str(line.allowances or 0))
+        capacity = gross - Decimal(str(line.deductions or 0))
+        if capacity <= 0:
+            continue
+        advances = (db.query(StaffAdvance)
+                    .filter(StaffAdvance.employee_id == line.employee_id,
+                            StaffAdvance.status == "approved",
+                            StaffAdvance.remaining_amount > 0)
+                    .order_by(StaffAdvance.advance_date, StaffAdvance.id).all())
+        collected = Decimal("0")
+        for adv in advances:
+            if collected >= capacity:
+                break
+            take = min(Decimal(str(adv.monthly_deduction or 0)),
+                       Decimal(str(adv.remaining_amount or 0)),
+                       capacity - collected)
+            if take <= 0:
+                continue
+            adv.remaining_amount = Decimal(str(adv.remaining_amount)) - take
+            if adv.remaining_amount <= 0:
+                adv.remaining_amount = Decimal("0")
+                adv.status = "settled"
+            collected += take
+        line.advance_deduction = collected
+    db.flush()
     totals = serialize_payroll(db, run)
     run.status = "paid"
     run.paid_at = datetime.utcnow()
@@ -1949,9 +2182,20 @@ def pay_payroll(run_id: int, user: User = Depends(require_roles("Chairman", "HO"
             lines = [{"account_id": sal.id, "debit": Decimal(str(totals["total_gross"])), "credit": 0},
                      {"account_id": cash.id, "debit": 0, "credit": Decimal(str(totals["total_net"]))}]
             if totals["total_deductions"] > 0:
-                acc = account_by_code(db, bu, "2120")
-                if acc:
-                    lines.append({"account_id": acc.id, "debit": 0, "credit": Decimal(str(totals["total_deductions"]))})
+                # The advance-repayment portion credits 1240 (reducing the
+                # receivable); the rest credits 2120 as before.
+                adv_total = Decimal(str(totals.get("total_advance_deductions") or 0))
+                other_ded = Decimal(str(totals["total_deductions"])) - adv_total
+                if other_ded > 0:
+                    acc = account_by_code(db, bu, "2120")
+                    if acc:
+                        lines.append({"account_id": acc.id, "debit": 0, "credit": other_ded})
+                if adv_total > 0:
+                    from src.routers.accounting import _ensure_advance_account
+                    _ensure_advance_account(db, bu)
+                    adv_acc = account_by_code(db, bu, "1240")
+                    if adv_acc:
+                        lines.append({"account_id": adv_acc.id, "debit": 0, "credit": adv_total})
             create_entry(db, bu, date(int(y), int(m), 1), f"Payroll {run.period} — {run.business_unit.name if run.business_unit else ''}",
                          "payroll", user.id, lines, source_id=run.id, post=True)
             db.commit()
@@ -2087,3 +2331,1125 @@ def customer_statement(customer_id: int, format: str = "pdf",
     buf = BytesIO(pdf.output())
     return StreamingResponse(buf, media_type="application/pdf", headers={
         "Content-Disposition": f'attachment; filename="statement_{cust.name.replace(" ", "_")}.pdf"'})
+
+
+# ================================================================== POS counter sales (ERP completion)
+
+def _pos_amounts(sale: PosSale) -> dict:
+    subtotal = sum((Decimal(str(l.quantity)) * Decimal(str(l.unit_price)) for l in sale.lines), Decimal("0"))
+    tax = (subtotal * Decimal(str(sale.tax_rate or 0)) / Decimal("100")).quantize(Decimal("0.01"))
+    cogs = sum((Decimal(str(l.quantity)) * Decimal(str(l.unit_cost or 0)) for l in sale.lines), Decimal("0"))
+    return {"subtotal": subtotal, "tax": tax, "total": subtotal + tax, "cogs": cogs}
+
+
+def serialize_pos_sale(db: Session, sale: PosSale) -> dict:
+    a = _pos_amounts(sale)
+    return {
+        "id": sale.id, "business_unit_id": sale.business_unit_id,
+        "bu_name": sale.business_unit.name if sale.business_unit else None,
+        "customer_id": sale.customer_id,
+        "customer_name": sale.customer.name if sale.customer else sale.customer_name,
+        "payment_method": sale.payment_method, "tax_rate": float(sale.tax_rate or 0),
+        "status": sale.status,
+        "sale_date": sale.sale_date.isoformat() if sale.sale_date else None,
+        "subtotal": float(a["subtotal"]), "tax_amount": float(a["tax"]),
+        "total": float(a["total"]), "cogs": float(a["cogs"]),
+        "gross_profit": float(a["subtotal"] - a["cogs"]),
+        "lines": [{"id": l.id, "inventory_item_id": l.inventory_item_id,
+                   "description": l.description, "quantity": float(l.quantity),
+                   "unit_price": float(l.unit_price), "unit_cost": float(l.unit_cost or 0),
+                   "serial_nos": _serial_list(l.serial_nos)} for l in sale.lines],
+        "created_at": sale.created_at.isoformat() if sale.created_at else None,
+    }
+
+
+class PosLineIn(BaseModel):
+    inventory_item_id: int
+    quantity: float = Field(gt=0)
+    unit_price: float = Field(ge=0)
+    serial_nos: Optional[list[str]] = None
+
+
+class PosSaleIn(BaseModel):
+    business_unit_id: int
+    customer_id: Optional[int] = None
+    customer_name: Optional[str] = None
+    payment_method: str = "cash"  # cash/bank
+    tax_rate: float = 0
+    sale_date: Optional[date] = None
+    lines: list[PosLineIn] = Field(min_length=1)
+
+
+def _post_pos_journals(db: Session, sale: PosSale, user_id: int) -> None:
+    """Sale: Dr 1110/1120 (by payment method) / Cr 4100 net / Cr 2130 tax.
+    COGS: Dr 5100 / Cr 1140 at moving-average cost. Best-effort, like the
+    PO/invoice journal helpers — a missing CoA never blocks a sale."""
+    try:
+        from src.routers.accounting import account_by_code, create_entry
+        a = _pos_amounts(sale)
+        bu = sale.business_unit_id
+        when = sale.sale_date or date.today()
+        if a["total"] > 0:
+            cash = account_by_code(db, bu, "1120" if sale.payment_method == "bank" else "1110")
+            sales_acc = account_by_code(db, bu, "4100")
+            tax_acc = account_by_code(db, bu, "2130")
+            if cash and sales_acc:
+                lines = [{"account_id": cash.id, "debit": a["total"], "credit": 0},
+                         {"account_id": sales_acc.id, "debit": 0, "credit": a["subtotal"]}]
+                if a["tax"] > 0 and tax_acc:
+                    lines.append({"account_id": tax_acc.id, "debit": 0, "credit": a["tax"]})
+                create_entry(db, bu, when, f"POS sale #{sale.id}", "pos_sale",
+                             user_id, lines, source_id=sale.id, post=True)
+        if a["cogs"] > 0:
+            inv_acc = account_by_code(db, bu, "1140")
+            cogs_acc = account_by_code(db, bu, "5100")
+            if inv_acc and cogs_acc:
+                create_entry(db, bu, when, f"POS sale #{sale.id} — COGS", "pos_sale",
+                             user_id,
+                             [{"account_id": cogs_acc.id, "debit": a["cogs"], "credit": 0},
+                              {"account_id": inv_acc.id, "debit": 0, "credit": a["cogs"]}],
+                             source_id=sale.id, post=True)
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
+@router.post("/pos-sales")
+def create_pos_sale(payload: PosSaleIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    bu_id = bu_scope(user, payload.business_unit_id)
+    if payload.payment_method not in ("cash", "bank"):
+        raise HTTPException(400, "payment_method must be cash or bank")
+    if payload.customer_id is not None:
+        cust = db.query(Customer).filter(Customer.id == payload.customer_id).first()
+        if not cust or cust.business_unit_id != bu_id:
+            raise HTTPException(404, "Customer not found in this BU")
+    import json as _json
+    sale = PosSale(
+        business_unit_id=bu_id, customer_id=payload.customer_id,
+        customer_name=payload.customer_name, payment_method=payload.payment_method,
+        tax_rate=Decimal(str(payload.tax_rate)), status="completed",
+        sale_date=payload.sale_date or date.today(), sold_by_id=user.id,
+    )
+    db.add(sale)
+    db.flush()
+    # Validate stock for every line before moving anything.
+    items = {}
+    for ln in payload.lines:
+        item = db.query(InventoryItem).filter(
+            InventoryItem.id == ln.inventory_item_id,
+            InventoryItem.business_unit_id == bu_id,
+            InventoryItem.is_active == True).first()  # noqa: E712
+        if not item:
+            raise HTTPException(404, f"Inventory item {ln.inventory_item_id} not found in this BU")
+        qty = Decimal(str(ln.quantity))
+        if Decimal(str(item.current_stock or 0)) < qty:
+            raise HTTPException(400, f"Not enough stock for {item.name}: {float(item.current_stock or 0):g} available")
+        items[ln.inventory_item_id] = item
+    for ln in payload.lines:
+        item = items[ln.inventory_item_id]
+        qty = Decimal(str(ln.quantity))
+        db.add(PosSaleLine(
+            sale_id=sale.id, inventory_item_id=item.id, description=item.name,
+            quantity=qty, unit_price=Decimal(str(ln.unit_price)),
+            unit_cost=Decimal(str(item.unit_cost or 0)),
+            serial_nos=_json.dumps(ln.serial_nos) if ln.serial_nos else None,
+        ))
+        item.current_stock = Decimal(str(item.current_stock or 0)) - qty
+        item.updated_at = datetime.utcnow()
+        db.add(StockMovement(item_id=item.id, movement_type="out", quantity=qty,
+                             reason=f"POS sale #{sale.id}", recorded_by_id=user.id))
+        if getattr(item, "requires_expiry", False):
+            from src.routers.modules import consume_batches_fefo
+            consume_batches_fefo(db, item, qty)
+    db.flush()
+    _mark_line_serials_sold(db, bu_id, sale.lines, pos_sale_id=sale.id)
+    db.commit()
+    _post_pos_journals(db, sale, user.id)
+    db.refresh(sale)
+    return serialize_pos_sale(db, sale)
+
+
+@router.get("/pos-sales")
+def list_pos_sales(business_unit_id: Optional[int] = None, sale_date: Optional[date] = None,
+                   status: Optional[str] = None,
+                   user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    bu_id = bu_scope(user, business_unit_id)
+    q = db.query(PosSale)
+    if bu_id is not None:
+        q = q.filter(PosSale.business_unit_id == bu_id)
+    if sale_date:
+        q = q.filter(PosSale.sale_date == sale_date)
+    if status:
+        q = q.filter(PosSale.status == status)
+    rows = q.order_by(PosSale.id.desc()).limit(200).all()
+    return {"items": [serialize_pos_sale(db, s) for s in rows]}
+
+
+@router.get("/pos-sales/daily-summary")
+def pos_daily_summary(business_unit_id: Optional[int] = None,
+                      on: Optional[date] = Query(None, alias="date"),
+                      user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Today's (or `on` date's) POS totals: by payment method, COGS and
+    gross profit. Voided sales are excluded."""
+    bu_id = bu_scope(user, business_unit_id)
+    day = on or date.today()
+    q = db.query(PosSale).filter(PosSale.sale_date == day, PosSale.status == "completed")
+    if bu_id is not None:
+        q = q.filter(PosSale.business_unit_id == bu_id)
+    by_method: dict = {}
+    subtotal = tax = total = cogs = Decimal("0")
+    count = 0
+    for s in q.all():
+        a = _pos_amounts(s)
+        count += 1
+        subtotal += a["subtotal"]
+        tax += a["tax"]
+        total += a["total"]
+        cogs += a["cogs"]
+        m = by_method.setdefault(s.payment_method, {"count": 0, "total": Decimal("0")})
+        m["count"] += 1
+        m["total"] += a["total"]
+    return {
+        "date": day.isoformat(), "business_unit_id": bu_id, "sale_count": count,
+        "subtotal": float(subtotal), "tax": float(tax), "total": float(total),
+        "cogs": float(cogs), "gross_profit": float(subtotal - cogs),
+        "by_payment_method": {k: {"count": v["count"], "total": float(v["total"])}
+                              for k, v in by_method.items()},
+    }
+
+
+@router.post("/pos-sales/{sale_id}/void")
+def void_pos_sale(sale_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sale = db.query(PosSale).filter(PosSale.id == sale_id).first()
+    if not sale:
+        raise HTTPException(404, "POS sale not found")
+    bu_scope(user, sale.business_unit_id)
+    if sale.status != "completed":
+        raise HTTPException(400, f"Cannot void a sale in status {sale.status}")
+    for ln in sale.lines:
+        item = db.query(InventoryItem).filter(InventoryItem.id == ln.inventory_item_id).first()
+        if item:
+            qty = Decimal(str(ln.quantity))
+            item.current_stock = Decimal(str(item.current_stock or 0)) + qty
+            item.updated_at = datetime.utcnow()
+            db.add(StockMovement(item_id=item.id, movement_type="in", quantity=qty,
+                                 reason=f"POS sale #{sale.id} voided", recorded_by_id=user.id))
+            if getattr(item, "requires_expiry", False):
+                restock_batches(db, item, qty, batch_no="POS-VOID")
+    for s in db.query(ItemSerial).filter(ItemSerial.pos_sale_id == sale.id,
+                                         ItemSerial.status == "sold").all():
+        s.status = "in_stock"
+        s.pos_sale_id = None
+        s.sold_at = None
+    # Reverse both POS journals (sale + COGS) with proper reversal entries.
+    from src.routers.accounting import _reverse_entry
+    entries = db.query(JournalEntry).filter(
+        JournalEntry.source == "pos_sale", JournalEntry.source_id == sale.id,
+        JournalEntry.status == "posted", JournalEntry.reversed_by_id == None).all()  # noqa: E711
+    for e in entries:
+        _reverse_entry(db, e, user.id)
+    sale.status = "void"
+    sale.voided_at = datetime.utcnow()
+    db.commit()
+    db.refresh(sale)
+    return serialize_pos_sale(db, sale)
+
+
+# ================================================================== quotations (ERP completion)
+
+def quotation_amounts(q: Quotation) -> dict:
+    subtotal = sum((Decimal(str(l.quantity)) * Decimal(str(l.unit_price)) for l in q.lines), Decimal("0"))
+    tax = (subtotal * Decimal(str(q.tax_rate or 0)) / Decimal("100")).quantize(Decimal("0.01"))
+    return {"subtotal": subtotal, "tax": tax, "total": subtotal + tax}
+
+
+def serialize_quotation(db: Session, q: Quotation) -> dict:
+    a = quotation_amounts(q)
+    return {
+        "id": q.id, "quote_no": q.quote_no, "business_unit_id": q.business_unit_id,
+        "bu_name": q.business_unit.name if q.business_unit else None,
+        "customer_id": q.customer_id,
+        "customer_name": q.customer.name if q.customer else None,
+        "status": q.status,
+        "quote_date": q.quote_date.isoformat() if q.quote_date else None,
+        "valid_until": q.valid_until.isoformat() if q.valid_until else None,
+        "tax_rate": float(q.tax_rate or 0), "notes": q.notes,
+        "currency": q.currency or "MMK", "exchange_rate": float(q.exchange_rate or 1),
+        "project_id": q.project_id,
+        "converted_invoice_id": q.converted_invoice_id,
+        "subtotal": float(a["subtotal"]), "tax_amount": float(a["tax"]), "total": float(a["total"]),
+        "lines": [{"id": l.id, "description": l.description, "quantity": float(l.quantity),
+                   "unit_price": float(l.unit_price),
+                   "inventory_item_id": l.inventory_item_id,
+                   "line_total": float(Decimal(str(l.quantity)) * Decimal(str(l.unit_price)))} for l in q.lines],
+    }
+
+
+class QuotationIn(BaseModel):
+    business_unit_id: int
+    customer_id: int
+    quote_date: date
+    valid_until: Optional[date] = None
+    tax_rate: float = 5
+    notes: Optional[str] = None
+    currency: str = "MMK"
+    exchange_rate: Optional[float] = None
+    project_id: Optional[int] = None
+    lines: list[InvoiceLineIn] = Field(min_length=1)
+
+
+def _fill_quotation_lines(db: Session, q: Quotation, lines) -> None:
+    for ln in lines:
+        db.add(QuotationLine(quotation_id=q.id, description=ln.description,
+                             quantity=Decimal(str(ln.quantity)),
+                             unit_price=Decimal(str(ln.unit_price)),
+                             inventory_item_id=ln.inventory_item_id))
+
+
+@router.get("/quotations")
+def list_quotations(business_unit_id: Optional[int] = None, status: Optional[str] = None,
+                    user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.role == "CEO":
+        business_unit_id = user.business_unit_id
+    q = db.query(Quotation)
+    if business_unit_id:
+        q = q.filter(Quotation.business_unit_id == business_unit_id)
+    if status:
+        q = q.filter(Quotation.status == status)
+    rows = q.order_by(Quotation.quote_date.desc(), Quotation.id.desc()).limit(200).all()
+    return {"items": [serialize_quotation(db, r) for r in rows]}
+
+
+@router.post("/quotations")
+def create_quotation(payload: QuotationIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    bu_scope(user, payload.business_unit_id)
+    cust = db.query(Customer).filter(Customer.id == payload.customer_id, Customer.is_active == True).first()  # noqa: E712
+    if not cust or cust.business_unit_id != payload.business_unit_id:
+        raise HTTPException(404, "Customer not found in this BU")
+    count = db.query(Quotation).filter(Quotation.business_unit_id == payload.business_unit_id).count()
+    from src.routers.accounting import latest_rate
+    q = Quotation(
+        business_unit_id=payload.business_unit_id, customer_id=payload.customer_id,
+        quote_no=f"QT-{payload.business_unit_id}-{count + 1:04d}", status="draft",
+        quote_date=payload.quote_date, valid_until=payload.valid_until,
+        tax_rate=Decimal(str(payload.tax_rate)), notes=payload.notes, created_by_id=user.id,
+        currency=(payload.currency or "MMK").upper(),
+        exchange_rate=(Decimal(str(payload.exchange_rate)) if payload.exchange_rate
+                       else latest_rate(db, payload.currency)),
+        project_id=payload.project_id,
+    )
+    db.add(q)
+    db.flush()
+    _fill_quotation_lines(db, q, payload.lines)
+    db.commit()
+    db.refresh(q)
+    return serialize_quotation(db, q)
+
+
+class QuotationUpdate(BaseModel):
+    quote_date: Optional[date] = None
+    valid_until: Optional[date] = None
+    tax_rate: Optional[float] = None
+    notes: Optional[str] = None
+    project_id: Optional[int] = None
+    lines: Optional[list[InvoiceLineIn]] = None
+
+
+@router.patch("/quotations/{quotation_id}")
+def update_quotation(quotation_id: int, payload: QuotationUpdate,
+                     user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    q = db.query(Quotation).filter(Quotation.id == quotation_id).first()
+    if not q:
+        raise HTTPException(404, "Quotation not found")
+    bu_scope(user, q.business_unit_id)
+    if q.status != "draft":
+        raise HTTPException(400, "Only draft quotations can be edited")
+    if payload.quote_date is not None:
+        q.quote_date = payload.quote_date
+    if payload.valid_until is not None:
+        q.valid_until = payload.valid_until
+    if payload.tax_rate is not None:
+        q.tax_rate = Decimal(str(payload.tax_rate))
+    if payload.notes is not None:
+        q.notes = payload.notes
+    if payload.project_id is not None:
+        q.project_id = payload.project_id
+    if payload.lines is not None:
+        if not payload.lines:
+            raise HTTPException(400, "A quotation needs at least one line")
+        for old in list(q.lines):
+            db.delete(old)
+        db.flush()
+        _fill_quotation_lines(db, q, payload.lines)
+    db.commit()
+    db.refresh(q)
+    return serialize_quotation(db, q)
+
+
+class QuotationStatusIn(BaseModel):
+    status: str = Field(pattern="^(sent|accepted|rejected)$")
+
+
+@router.post("/quotations/{quotation_id}/status")
+def set_quotation_status(quotation_id: int, payload: QuotationStatusIn,
+                         user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    q = db.query(Quotation).filter(Quotation.id == quotation_id).first()
+    if not q:
+        raise HTTPException(404, "Quotation not found")
+    bu_scope(user, q.business_unit_id)
+    allowed = {"draft": {"sent"}, "sent": {"accepted", "rejected"},
+               "accepted": set(), "rejected": set(), "converted": set()}
+    if payload.status not in allowed.get(q.status, set()):
+        raise HTTPException(400, f"Cannot move a {q.status} quotation to {payload.status}")
+    q.status = payload.status
+    db.commit()
+    db.refresh(q)
+    return serialize_quotation(db, q)
+
+
+@router.post("/quotations/{quotation_id}/convert")
+def convert_quotation(quotation_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Create a draft SalesInvoice from this quotation. No journal is
+    posted — that happens when the invoice is sent, as usual."""
+    q = db.query(Quotation).filter(Quotation.id == quotation_id).first()
+    if not q:
+        raise HTTPException(404, "Quotation not found")
+    bu_scope(user, q.business_unit_id)
+    if q.status in ("rejected", "converted"):
+        raise HTTPException(400, f"Cannot convert a {q.status} quotation")
+    count = db.query(SalesInvoice).filter(SalesInvoice.business_unit_id == q.business_unit_id).count()
+    inv = SalesInvoice(
+        business_unit_id=q.business_unit_id, customer_id=q.customer_id,
+        invoice_no=f"INV-{q.business_unit_id}-{count + 1:04d}", status="draft",
+        invoice_date=date.today(), due_date=q.valid_until,
+        tax_rate=q.tax_rate, notes=q.notes, created_by_id=user.id,
+        currency=q.currency, exchange_rate=q.exchange_rate, project_id=q.project_id,
+    )
+    db.add(inv)
+    db.flush()
+    for ln in q.lines:
+        db.add(SalesInvoiceLine(invoice_id=inv.id, description=ln.description,
+                                quantity=ln.quantity, unit_price=ln.unit_price,
+                                inventory_item_id=ln.inventory_item_id))
+    q.status = "converted"
+    q.converted_invoice_id = inv.id
+    db.commit()
+    db.refresh(inv)
+    return serialize_invoice(db, inv)
+
+
+# ================================================================== returns / credit & debit notes (ERP completion)
+
+def _returned_qty_for_invoice_line(db: Session, invoice_line_id: int) -> Decimal:
+    total = (db.query(func.coalesce(func.sum(SalesReturnLine.quantity), 0))
+             .join(SalesReturn, SalesReturnLine.return_id == SalesReturn.id)
+             .filter(SalesReturnLine.invoice_line_id == invoice_line_id,
+                     SalesReturn.status == "posted").scalar())
+    return Decimal(str(total or 0))
+
+
+def serialize_sales_return(db: Session, r: SalesReturn) -> dict:
+    net = sum((Decimal(str(l.quantity)) * Decimal(str(l.unit_price)) for l in r.lines), Decimal("0"))
+    rate = Decimal(str(r.invoice.tax_rate or 0)) if r.invoice else Decimal("0")
+    tax = (net * rate / Decimal("100")).quantize(Decimal("0.01"))
+    return {
+        "id": r.id, "return_no": r.return_no, "business_unit_id": r.business_unit_id,
+        "invoice_id": r.invoice_id,
+        "invoice_no": r.invoice.invoice_no if r.invoice else None,
+        "status": r.status,
+        "return_date": r.return_date.isoformat() if r.return_date else None,
+        "reason": r.reason, "subtotal": float(net), "tax_amount": float(tax),
+        "total": float(net + tax),
+        "lines": [{"id": l.id, "invoice_line_id": l.invoice_line_id,
+                   "quantity": float(l.quantity), "unit_price": float(l.unit_price)} for l in r.lines],
+    }
+
+
+class SalesReturnLineIn(BaseModel):
+    invoice_line_id: int
+    quantity: float = Field(gt=0)
+    serial_nos: Optional[list[str]] = None
+
+
+class SalesReturnIn(BaseModel):
+    invoice_id: int
+    reason: Optional[str] = None
+    return_date: Optional[date] = None
+    lines: list[SalesReturnLineIn] = Field(min_length=1)
+
+
+def _post_sales_return_journal(db: Session, r: SalesReturn, user_id: int) -> None:
+    """Dr 4100 net / Dr 2130 tax / Cr 1130 gross (MMK at the invoice rate)."""
+    try:
+        from src.routers.accounting import account_by_code, create_entry
+        inv = r.invoice
+        fx = Decimal(str(getattr(inv, "exchange_rate", 1) or 1))
+        net = sum((Decimal(str(l.quantity)) * Decimal(str(l.unit_price)) for l in r.lines), Decimal("0"))
+        tax = (net * Decimal(str(inv.tax_rate or 0)) / Decimal("100")).quantize(Decimal("0.01"))
+        sales_acc = account_by_code(db, r.business_unit_id, "4100")
+        tax_acc = account_by_code(db, r.business_unit_id, "2130")
+        ar = account_by_code(db, r.business_unit_id, "1130")
+        if not (sales_acc and ar):
+            return
+        lines = [{"account_id": sales_acc.id, "debit": net * fx, "credit": 0}]
+        if tax > 0 and tax_acc:
+            lines.append({"account_id": tax_acc.id, "debit": tax * fx, "credit": 0})
+        lines.append({"account_id": ar.id, "debit": 0, "credit": (net + tax) * fx})
+        create_entry(db, r.business_unit_id, r.return_date or date.today(),
+                     f"Sales return {r.return_no} — {inv.invoice_no}", "sales_return",
+                     user_id, lines, source_id=r.id, post=True)
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
+@router.post("/sales-returns")
+def create_sales_return(payload: SalesReturnIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    inv = _invoice_or_404(db, payload.invoice_id)
+    bu_scope(user, inv.business_unit_id)
+    if inv.status not in ("sent", "partial", "paid"):
+        raise HTTPException(400, f"Cannot return items against a {inv.status} invoice")
+    line_by_id = {l.id: l for l in inv.lines}
+    for ln in payload.lines:
+        il = line_by_id.get(ln.invoice_line_id)
+        if not il:
+            raise HTTPException(400, f"Invoice line {ln.invoice_line_id} does not belong to this invoice")
+        already = _returned_qty_for_invoice_line(db, il.id)
+        if Decimal(str(ln.quantity)) > Decimal(str(il.quantity)) - already:
+            raise HTTPException(400, f"Return quantity for '{il.description}' exceeds the invoiced "
+                                     f"quantity minus previous returns")
+    count = db.query(SalesReturn).filter(SalesReturn.business_unit_id == inv.business_unit_id).count()
+    r = SalesReturn(business_unit_id=inv.business_unit_id, invoice_id=inv.id,
+                    return_no=f"SR-{inv.business_unit_id}-{count + 1:04d}", status="posted",
+                    return_date=payload.return_date or date.today(),
+                    reason=payload.reason, created_by_id=user.id)
+    db.add(r)
+    db.flush()
+    for ln in payload.lines:
+        il = line_by_id[ln.invoice_line_id]
+        qty = Decimal(str(ln.quantity))
+        db.add(SalesReturnLine(return_id=r.id, invoice_line_id=il.id,
+                               quantity=qty, unit_price=il.unit_price))
+        if il.inventory_item_id:
+            item = db.query(InventoryItem).filter(InventoryItem.id == il.inventory_item_id).first()
+            if item:
+                item.current_stock = Decimal(str(item.current_stock or 0)) + qty
+                item.updated_at = datetime.utcnow()
+                db.add(StockMovement(item_id=item.id, movement_type="in", quantity=qty,
+                                     reason=f"Sales return {r.return_no} ({inv.invoice_no})",
+                                     recorded_by_id=user.id))
+        for sn in (ln.serial_nos or []):
+            s = db.query(ItemSerial).filter(
+                ItemSerial.business_unit_id == inv.business_unit_id,
+                ItemSerial.serial_no == sn).first()
+            if s and s.sales_invoice_id == inv.id:
+                s.status = "returned"
+    db.commit()
+    _post_sales_return_journal(db, r, user.id)
+    # Recompute the invoice status from the reduced balance.
+    a = invoice_amounts(db, inv)
+    if inv.status in ("sent", "partial", "paid"):
+        if a["balance"] <= 0:
+            inv.status = "paid"
+        elif a["paid"] > 0:
+            inv.status = "partial"
+        db.commit()
+    db.refresh(r)
+    return serialize_sales_return(db, r)
+
+
+@router.get("/sales-returns")
+def list_sales_returns(business_unit_id: Optional[int] = None, invoice_id: Optional[int] = None,
+                       user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    bu_id = bu_scope(user, business_unit_id)
+    q = db.query(SalesReturn)
+    if bu_id is not None:
+        q = q.filter(SalesReturn.business_unit_id == bu_id)
+    if invoice_id:
+        q = q.filter(SalesReturn.invoice_id == invoice_id)
+    rows = q.order_by(SalesReturn.id.desc()).limit(200).all()
+    return {"items": [serialize_sales_return(db, r) for r in rows]}
+
+
+def _returned_qty_for_po_line(db: Session, po_line_id: int) -> Decimal:
+    total = (db.query(func.coalesce(func.sum(PurchaseReturnLine.quantity), 0))
+             .join(PurchaseReturn, PurchaseReturnLine.return_id == PurchaseReturn.id)
+             .filter(PurchaseReturnLine.po_line_id == po_line_id,
+                     PurchaseReturn.status == "posted").scalar())
+    return Decimal(str(total or 0))
+
+
+def serialize_purchase_return(db: Session, r: PurchaseReturn) -> dict:
+    total = sum((Decimal(str(l.quantity)) * Decimal(str(l.unit_cost)) for l in r.lines), Decimal("0"))
+    return {
+        "id": r.id, "return_no": r.return_no, "business_unit_id": r.business_unit_id,
+        "po_id": r.po_id, "po_no": r.po.po_no if r.po else None,
+        "status": r.status,
+        "return_date": r.return_date.isoformat() if r.return_date else None,
+        "reason": r.reason, "total": float(total),
+        "lines": [{"id": l.id, "po_line_id": l.po_line_id,
+                   "quantity": float(l.quantity), "unit_cost": float(l.unit_cost)} for l in r.lines],
+    }
+
+
+class PurchaseReturnLineIn(BaseModel):
+    po_line_id: int
+    quantity: float = Field(gt=0)
+
+
+class PurchaseReturnIn(BaseModel):
+    po_id: int
+    reason: Optional[str] = None
+    return_date: Optional[date] = None
+    lines: list[PurchaseReturnLineIn] = Field(min_length=1)
+
+
+@router.post("/purchase-returns")
+def create_purchase_return(payload: PurchaseReturnIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    po = _po_or_404(db, payload.po_id)
+    bu_scope(user, po.business_unit_id)
+    if po.status not in ("received", "paid"):
+        raise HTTPException(400, f"Cannot return items against a PO in status {po.status}")
+    line_by_id = {l.id: l for l in po.lines}
+    items = {}
+    for ln in payload.lines:
+        pl = line_by_id.get(ln.po_line_id)
+        if not pl:
+            raise HTTPException(400, f"PO line {ln.po_line_id} does not belong to this PO")
+        already = _returned_qty_for_po_line(db, pl.id)
+        qty = Decimal(str(ln.quantity))
+        if qty > Decimal(str(pl.quantity)) - already:
+            raise HTTPException(400, f"Return quantity for '{pl.item_name}' exceeds the received "
+                                     f"quantity minus previous returns")
+        if pl.inventory_item_id:
+            item = db.query(InventoryItem).filter(InventoryItem.id == pl.inventory_item_id).first()
+            if item is not None:
+                if Decimal(str(item.current_stock or 0)) < qty:
+                    raise HTTPException(400, f"Not enough stock of {item.name} to return")
+                items[pl.id] = item
+    count = db.query(PurchaseReturn).filter(PurchaseReturn.business_unit_id == po.business_unit_id).count()
+    r = PurchaseReturn(business_unit_id=po.business_unit_id, po_id=po.id,
+                       return_no=f"PR-{po.business_unit_id}-{count + 1:04d}", status="posted",
+                       return_date=payload.return_date or date.today(),
+                       reason=payload.reason, created_by_id=user.id)
+    db.add(r)
+    db.flush()
+    total_cost = Decimal("0")
+    fx = Decimal(str(getattr(po, "exchange_rate", 1) or 1))
+    for ln in payload.lines:
+        pl = line_by_id[ln.po_line_id]
+        qty = Decimal(str(ln.quantity))
+        db.add(PurchaseReturnLine(return_id=r.id, po_line_id=pl.id,
+                                  quantity=qty, unit_cost=pl.unit_cost))
+        total_cost += qty * Decimal(str(pl.unit_cost)) * fx
+        item = items.get(pl.id)
+        if item is not None:
+            item.current_stock = Decimal(str(item.current_stock or 0)) - qty
+            item.updated_at = datetime.utcnow()
+            db.add(StockMovement(item_id=item.id, movement_type="out", quantity=qty,
+                                 reason=f"Purchase return {r.return_no} ({po.po_no})",
+                                 recorded_by_id=user.id))
+    db.commit()
+    try:
+        from src.routers.accounting import account_by_code, create_entry
+        ap = account_by_code(db, po.business_unit_id, "2110")
+        inv_acc = account_by_code(db, po.business_unit_id, "1140")
+        if ap and inv_acc and total_cost > 0:
+            create_entry(db, po.business_unit_id, r.return_date or date.today(),
+                         f"Purchase return {r.return_no} — {po.po_no}", "purchase_return",
+                         user.id,
+                         [{"account_id": ap.id, "debit": total_cost, "credit": 0},
+                          {"account_id": inv_acc.id, "debit": 0, "credit": total_cost}],
+                         source_id=r.id, post=True)
+            db.commit()
+    except Exception:
+        db.rollback()
+    db.refresh(r)
+    return serialize_purchase_return(db, r)
+
+
+@router.get("/purchase-returns")
+def list_purchase_returns(business_unit_id: Optional[int] = None, po_id: Optional[int] = None,
+                          user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    bu_id = bu_scope(user, business_unit_id)
+    q = db.query(PurchaseReturn)
+    if bu_id is not None:
+        q = q.filter(PurchaseReturn.business_unit_id == bu_id)
+    if po_id:
+        q = q.filter(PurchaseReturn.po_id == po_id)
+    rows = q.order_by(PurchaseReturn.id.desc()).limit(200).all()
+    return {"items": [serialize_purchase_return(db, r) for r in rows]}
+
+
+# ================================================================== invoice PDF + delivery note (ERP completion)
+
+@router.get("/sales-invoices/{invoice_id}/pdf")
+def invoice_pdf(invoice_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from io import BytesIO
+
+    from fastapi.responses import StreamingResponse
+    from fpdf import FPDF
+
+    inv = _invoice_or_404(db, invoice_id)
+    bu_scope(user, inv.business_unit_id)
+    bu = inv.business_unit
+    cust = inv.customer
+    a = invoice_amounts(db, inv)
+    cur = getattr(inv, "currency", "MMK") or "MMK"
+    fx = Decimal(str(getattr(inv, "exchange_rate", 1) or 1))
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.add_page()
+    W = pdf.w - 20
+    pdf.set_font("helvetica", "B", 16)
+    pdf.cell(W, 9, _pdf_safe(bu.name if bu else ""), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("helvetica", "B", 13)
+    pdf.cell(W, 8, "TAX INVOICE", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("helvetica", "", 10)
+    pdf.cell(W, 6, _pdf_safe(f"Invoice No: {inv.invoice_no}    Date: {inv.invoice_date.isoformat() if inv.invoice_date else ''}"
+                             + (f"    Due: {inv.due_date.isoformat()}" if inv.due_date else "")),
+             new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(W, 6, _pdf_safe(f"Bill To: {cust.name if cust else ''}"), new_x="LMARGIN", new_y="NEXT")
+    if cust and cust.address:
+        pdf.cell(W, 6, _pdf_safe(cust.address), new_x="LMARGIN", new_y="NEXT")
+    if cust and (cust.phone or cust.contact_person):
+        pdf.cell(W, 6, _pdf_safe("  ".join(x for x in [cust.contact_person or "", cust.phone or ""] if x)),
+                 new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+    widths = [92, 20, 36, 42]
+    pdf.set_font("helvetica", "B", 9)
+    for i, h in enumerate(["Description", "Qty", "Unit Price", "Amount"]):
+        pdf.cell(widths[i], 7, h, border=1)
+    pdf.ln()
+    pdf.set_font("helvetica", "", 9)
+    for l in inv.lines:
+        amt = Decimal(str(l.quantity)) * Decimal(str(l.unit_price))
+        vals = [_pdf_safe(l.description[:48]), f"{float(l.quantity):g}",
+                f"{float(l.unit_price):,.2f}", f"{float(amt):,.2f}"]
+        for i, v in enumerate(vals):
+            pdf.cell(widths[i], 6.5, v, border=1)
+        pdf.ln()
+    pdf.ln(2)
+    pdf.set_font("helvetica", "", 10)
+    rows = [("Subtotal", a["subtotal"]), (f"Commercial tax ({float(inv.tax_rate or 0):g}%)", a["tax"]),
+            ("TOTAL", a["total"]), ("Paid", a["paid"])]
+    if a.get("returns"):
+        rows.append(("Less: returns (credit notes)", -a["returns"]))
+    rows.append(("BALANCE DUE", a["balance"]))
+    for label, v in rows:
+        pdf.set_font("helvetica", "B" if label in ("TOTAL", "BALANCE DUE") else "", 10)
+        pdf.cell(130, 6.5, _pdf_safe(label))
+        pdf.cell(0, 6.5, f"{cur} {float(v):,.2f}", new_x="LMARGIN", new_y="NEXT")
+    if cur != "MMK":
+        pdf.set_font("helvetica", "", 9)
+        pdf.cell(W, 6, _pdf_safe(f"Foreign currency invoice: amounts in {cur} at Ks {float(fx):,.2f} per 1 {cur} "
+                                 f"(total = Ks {float(a['total'] * fx):,.0f})."),
+                 new_x="LMARGIN", new_y="NEXT")
+    if inv.notes:
+        pdf.ln(2)
+        pdf.multi_cell(W, 6, _pdf_safe(f"Notes: {inv.notes}"))
+    buf = BytesIO(pdf.output())
+    return StreamingResponse(buf, media_type="application/pdf", headers={
+        "Content-Disposition": f'attachment; filename="{inv.invoice_no}.pdf"'})
+
+
+@router.get("/sales-invoices/{invoice_id}/delivery-note")
+def delivery_note_pdf(invoice_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Delivery note for an invoice: items + quantities only, no prices."""
+    from io import BytesIO
+
+    from fastapi.responses import StreamingResponse
+    from fpdf import FPDF
+
+    inv = _invoice_or_404(db, invoice_id)
+    bu_scope(user, inv.business_unit_id)
+    bu = inv.business_unit
+    cust = inv.customer
+    dn_no = inv.invoice_no.replace("INV", "DN", 1) if inv.invoice_no else f"DN-{inv.id}"
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.add_page()
+    W = pdf.w - 20
+    pdf.set_font("helvetica", "B", 16)
+    pdf.cell(W, 9, _pdf_safe(bu.name if bu else ""), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("helvetica", "B", 13)
+    pdf.cell(W, 8, "DELIVERY NOTE", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("helvetica", "", 10)
+    pdf.cell(W, 6, _pdf_safe(f"DN No: {dn_no}    Invoice: {inv.invoice_no}    Date: {date.today().isoformat()}"),
+             new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(W, 6, _pdf_safe(f"Deliver To: {cust.name if cust else ''}"), new_x="LMARGIN", new_y="NEXT")
+    if cust and cust.address:
+        pdf.cell(W, 6, _pdf_safe(cust.address), new_x="LMARGIN", new_y="NEXT")
+    if cust and cust.phone:
+        pdf.cell(W, 6, _pdf_safe(f"Phone: {cust.phone}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+    widths = [120, 30, 40]
+    pdf.set_font("helvetica", "B", 9)
+    for i, h in enumerate(["Description", "Qty", "Unit"]):
+        pdf.cell(widths[i], 7, h, border=1)
+    pdf.ln()
+    pdf.set_font("helvetica", "", 9)
+    for l in inv.lines:
+        unit = l.inventory_item.unit if l.inventory_item else "pcs"
+        vals = [_pdf_safe(l.description[:60]), f"{float(l.quantity):g}", _pdf_safe(unit or "pcs")]
+        for i, v in enumerate(vals):
+            pdf.cell(widths[i], 6.5, v, border=1)
+        pdf.ln()
+    pdf.ln(14)
+    pdf.set_font("helvetica", "", 10)
+    pdf.cell(95, 7, "Delivered by: ______________________")
+    pdf.cell(0, 7, "Received by: ______________________", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(95, 7, "Date: ______________________")
+    pdf.cell(0, 7, "Signature: ______________________", new_x="LMARGIN", new_y="NEXT")
+    buf = BytesIO(pdf.output())
+    return StreamingResponse(buf, media_type="application/pdf", headers={
+        "Content-Disposition": f'attachment; filename="{dn_no}.pdf"'})
+
+
+# ================================================================== serial / IMEI tracking (ERP completion)
+
+def serialize_serial(db: Session, s: ItemSerial) -> dict:
+    bu = db.query(BusinessUnit).filter(BusinessUnit.id == s.business_unit_id).first()
+    return {
+        "id": s.id, "business_unit_id": s.business_unit_id,
+        "bu_name": bu.name if bu else None,
+        "inventory_item_id": s.inventory_item_id,
+        "item_name": s.inventory_item.name if s.inventory_item else None,
+        "serial_no": s.serial_no, "status": s.status,
+        "purchase_order_id": s.purchase_order_id,
+        "sales_invoice_id": s.sales_invoice_id, "pos_sale_id": s.pos_sale_id,
+        "warranty_until": s.warranty_until.isoformat() if s.warranty_until else None,
+        "sold_at": s.sold_at.isoformat() if s.sold_at else None,
+    }
+
+
+class SerialAddIn(BaseModel):
+    serial_nos: list[str] = Field(min_length=1)
+    warranty_until: Optional[date] = None
+    purchase_order_id: Optional[int] = None
+
+
+@router.post("/inventory/{item_id}/serials")
+def add_serials(item_id: int, payload: SerialAddIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    item = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
+    if not item:
+        raise HTTPException(404, "Inventory item not found")
+    bu_scope(user, item.business_unit_id)
+    cleaned = [str(s).strip() for s in payload.serial_nos if str(s).strip()]
+    if not cleaned:
+        raise HTTPException(400, "No serial numbers given")
+    if len(set(cleaned)) != len(cleaned):
+        raise HTTPException(400, "Duplicate serial numbers in the request")
+    existing = {s.serial_no for s in db.query(ItemSerial).filter(
+        ItemSerial.business_unit_id == item.business_unit_id,
+        ItemSerial.inventory_item_id == item.id,
+        ItemSerial.serial_no.in_(cleaned)).all()}
+    if existing:
+        raise HTTPException(400, f"Serial numbers already registered for this item: {', '.join(sorted(existing))}")
+    rows = []
+    for sn in cleaned:
+        row = ItemSerial(business_unit_id=item.business_unit_id, inventory_item_id=item.id,
+                         serial_no=sn, status="in_stock",
+                         warranty_until=payload.warranty_until,
+                         purchase_order_id=payload.purchase_order_id)
+        db.add(row)
+        rows.append(row)
+    db.commit()
+    for row in rows:
+        db.refresh(row)
+    return {"items": [serialize_serial(db, r) for r in rows], "count": len(rows)}
+
+
+@router.get("/inventory/{item_id}/serials")
+def list_serials(item_id: int, status: Optional[str] = None,
+                 user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    item = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
+    if not item:
+        raise HTTPException(404, "Inventory item not found")
+    bu_scope(user, item.business_unit_id)
+    q = db.query(ItemSerial).filter(ItemSerial.inventory_item_id == item_id)
+    if status:
+        q = q.filter(ItemSerial.status == status)
+    rows = q.order_by(ItemSerial.serial_no).all()
+    return {"items": [serialize_serial(db, s) for s in rows]}
+
+
+@router.get("/serials/lookup")
+def lookup_serial(serial_no: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Find a serial / IMEI across all items and BUs."""
+    q = db.query(ItemSerial).filter(ItemSerial.serial_no == serial_no.strip())
+    if user.role == "CEO":
+        q = q.filter(ItemSerial.business_unit_id == user.business_unit_id)
+    rows = q.all()
+    return {"items": [serialize_serial(db, s) for s in rows], "count": len(rows)}
+
+
+class SerialStatusIn(BaseModel):
+    status: str = Field(pattern="^(in_stock|sold|returned|defective)$")
+
+
+@router.post("/serials/{serial_id}/status")
+def set_serial_status(serial_id: int, payload: SerialStatusIn,
+                      user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    s = db.query(ItemSerial).filter(ItemSerial.id == serial_id).first()
+    if not s:
+        raise HTTPException(404, "Serial not found")
+    bu_scope(user, s.business_unit_id)
+    s.status = payload.status
+    if payload.status == "in_stock":
+        s.sales_invoice_id = None
+        s.pos_sale_id = None
+        s.sold_at = None
+    db.commit()
+    db.refresh(s)
+    return serialize_serial(db, s)
+
+
+# ================================================================== staff advances & loans (ERP completion)
+
+def serialize_advance(db: Session, adv: StaffAdvance) -> dict:
+    return {
+        "id": adv.id, "employee_id": adv.employee_id,
+        "employee_name": adv.employee.name if adv.employee else None,
+        "business_unit_id": adv.business_unit_id,
+        "bu_name": adv.business_unit.name if adv.business_unit else None,
+        "amount": float(adv.amount or 0),
+        "remaining_amount": float(adv.remaining_amount or 0),
+        "monthly_deduction": float(adv.monthly_deduction or 0),
+        "advance_date": adv.advance_date.isoformat() if adv.advance_date else None,
+        "reason": adv.reason, "status": adv.status,
+        "journal_entry_id": adv.journal_entry_id,
+        "created_at": adv.created_at.isoformat() if adv.created_at else None,
+    }
+
+
+class AdvanceIn(BaseModel):
+    employee_id: int
+    amount: float = Field(gt=0)
+    monthly_deduction: float = Field(gt=0)
+    advance_date: Optional[date] = None
+    reason: Optional[str] = None
+
+
+@router.get("/staff-advances")
+def list_advances(business_unit_id: Optional[int] = None, status: Optional[str] = None,
+                  employee_id: Optional[int] = None,
+                  user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    bu_id = bu_scope(user, business_unit_id)
+    q = db.query(StaffAdvance)
+    if bu_id is not None:
+        q = q.filter(StaffAdvance.business_unit_id == bu_id)
+    if status:
+        q = q.filter(StaffAdvance.status == status)
+    if employee_id:
+        q = q.filter(StaffAdvance.employee_id == employee_id)
+    rows = q.order_by(StaffAdvance.id.desc()).limit(200).all()
+    return {"items": [serialize_advance(db, a) for a in rows]}
+
+
+@router.post("/staff-advances")
+def create_advance(payload: AdvanceIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    emp = db.query(Employee).filter(Employee.id == payload.employee_id, Employee.is_active == True).first()  # noqa: E712
+    if not emp:
+        raise HTTPException(404, "Employee not found")
+    bu_scope(user, emp.business_unit_id)
+    adv = StaffAdvance(
+        employee_id=emp.id, business_unit_id=emp.business_unit_id,
+        amount=Decimal(str(payload.amount)), remaining_amount=Decimal(str(payload.amount)),
+        monthly_deduction=Decimal(str(payload.monthly_deduction)),
+        advance_date=payload.advance_date or date.today(), reason=payload.reason,
+        status="pending", requested_by_id=user.id,
+    )
+    db.add(adv)
+    db.commit()
+    db.refresh(adv)
+    return serialize_advance(db, adv)
+
+
+@router.post("/staff-advances/{advance_id}/approve")
+def approve_advance(advance_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Approve + disburse: Dr 1240 Staff Advances / Cr 1110 Cash in the
+    employee's BU (account 1240 is created on demand for older BUs)."""
+    adv = db.query(StaffAdvance).filter(StaffAdvance.id == advance_id).first()
+    if not adv:
+        raise HTTPException(404, "Staff advance not found")
+    if adv.status != "pending":
+        raise HTTPException(400, f"Advance is {adv.status}")
+    adv.status = "approved"
+    adv.approved_by_id = user.id
+    adv.approved_at = datetime.utcnow()
+    try:
+        from src.routers.accounting import (
+            _ensure_advance_account, account_by_code, create_entry,
+        )
+        _ensure_advance_account(db, adv.business_unit_id)
+        adv_acc = account_by_code(db, adv.business_unit_id, "1240")
+        cash = account_by_code(db, adv.business_unit_id, "1110")
+        if adv_acc and cash:
+            e = create_entry(db, adv.business_unit_id, date.today(),
+                             f"Staff advance — {adv.employee.name if adv.employee else ''}",
+                             "staff_advance", user.id,
+                             [{"account_id": adv_acc.id, "debit": adv.amount, "credit": 0},
+                              {"account_id": cash.id, "debit": 0, "credit": adv.amount}],
+                             source_id=adv.id, post=True)
+            db.flush()
+            adv.journal_entry_id = e.id
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()  # no CoA yet — approval stands, journal skipped (payroll pattern)
+        adv = db.query(StaffAdvance).filter(StaffAdvance.id == advance_id).first()
+        adv.status = "approved"
+        adv.approved_by_id = user.id
+        adv.approved_at = datetime.utcnow()
+    db.commit()
+    db.refresh(adv)
+    return serialize_advance(db, adv)
+
+
+@router.post("/staff-advances/{advance_id}/reject")
+def reject_advance(advance_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    adv = db.query(StaffAdvance).filter(StaffAdvance.id == advance_id).first()
+    if not adv:
+        raise HTTPException(404, "Staff advance not found")
+    if adv.status != "pending":
+        raise HTTPException(400, f"Advance is {adv.status}")
+    adv.status = "rejected"
+    adv.approved_by_id = user.id
+    adv.approved_at = datetime.utcnow()
+    db.commit()
+    db.refresh(adv)
+    return serialize_advance(db, adv)
+
+
+# ================================================================== attendance + leave balances (ERP completion)
+
+ATTENDANCE_STATUSES = ("present", "absent", "late", "leave", "half_day")
+# Yearly leave entitlements by type (days). "annual" is the earned-leave
+# type and "sick" the medical type in the existing LeaveRequest values.
+LEAVE_ENTITLEMENTS = {"annual": 10, "earned": 10, "casual": 10, "sick": 30, "medical": 30, "unpaid": 0}
+
+
+def serialize_attendance(db: Session, r: AttendanceRecord) -> dict:
+    return {
+        "id": r.id, "business_unit_id": r.business_unit_id,
+        "employee_id": r.employee_id,
+        "employee_name": r.employee.name if r.employee else None,
+        "date": r.record_date.isoformat() if r.record_date else None,
+        "status": r.status, "note": r.note,
+    }
+
+
+class AttendanceRecordIn(BaseModel):
+    employee_id: int
+    record_date: Optional[date] = None
+    date_: Optional[date] = Field(None, alias="date")
+    status: str
+    note: Optional[str] = None
+
+    model_config = {"populate_by_name": True}
+
+
+class AttendanceBulkIn(BaseModel):
+    records: list[AttendanceRecordIn] = Field(min_length=1)
+
+
+@router.post("/attendance/bulk")
+def upsert_attendance(payload: AttendanceBulkIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Upsert one attendance record per (employee, date)."""
+    saved = []
+    for rec in payload.records:
+        day = rec.record_date or rec.date_
+        if day is None:
+            raise HTTPException(400, "Each record needs a date")
+        if rec.status not in ATTENDANCE_STATUSES:
+            raise HTTPException(400, f"status must be one of {ATTENDANCE_STATUSES}")
+        emp = db.query(Employee).filter(Employee.id == rec.employee_id).first()
+        if not emp:
+            raise HTTPException(404, f"Employee {rec.employee_id} not found")
+        bu_scope(user, emp.business_unit_id)
+        row = db.query(AttendanceRecord).filter(
+            AttendanceRecord.employee_id == emp.id,
+            AttendanceRecord.record_date == day).first()
+        if row is None:
+            row = AttendanceRecord(employee_id=emp.id, business_unit_id=emp.business_unit_id,
+                                   record_date=day)
+            db.add(row)
+        row.status = rec.status
+        row.note = rec.note
+        row.business_unit_id = emp.business_unit_id
+        row.recorded_by_id = user.id
+        saved.append(row)
+    db.commit()
+    for row in saved:
+        db.refresh(row)
+    return {"saved": len(saved), "items": [serialize_attendance(db, r) for r in saved]}
+
+
+@router.get("/attendance")
+def list_attendance(business_unit_id: Optional[int] = None, month: Optional[str] = None,
+                    user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """One month of attendance records + per-employee status counts."""
+    bu_id = bu_scope(user, business_unit_id)
+    if month:
+        try:
+            y, m = (int(x) for x in month.split("-"))
+        except Exception:
+            raise HTTPException(400, "month must be YYYY-MM")
+    else:
+        today = date.today()
+        y, m = today.year, today.month
+    import calendar as _cal
+    start = date(y, m, 1)
+    end = date(y, m, _cal.monthrange(y, m)[1])
+    q = db.query(AttendanceRecord).filter(AttendanceRecord.record_date >= start,
+                                          AttendanceRecord.record_date <= end)
+    if bu_id is not None:
+        q = q.filter(AttendanceRecord.business_unit_id == bu_id)
+    rows = q.order_by(AttendanceRecord.record_date, AttendanceRecord.employee_id).all()
+    summary: dict = {}
+    for r in rows:
+        s = summary.setdefault(r.employee_id, {
+            "employee_id": r.employee_id,
+            "employee_name": r.employee.name if r.employee else None,
+            **{st: 0 for st in ATTENDANCE_STATUSES},
+        })
+        s[r.status] = s.get(r.status, 0) + 1
+    return {"month": f"{y:04d}-{m:02d}",
+            "items": [serialize_attendance(db, r) for r in rows],
+            "summary": list(summary.values())}
+
+
+@router.get("/leave-balances")
+def leave_balances(business_unit_id: Optional[int] = None, year: Optional[int] = None,
+                   user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Computed leave balances: entitlement − approved days used in the
+    year (requests overlapping the year count their overlapping days)."""
+    bu_id = bu_scope(user, business_unit_id)
+    yr = year or date.today().year
+    jan1, dec31 = date(yr, 1, 1), date(yr, 12, 31)
+    q = db.query(Employee).filter(Employee.is_active == True)  # noqa: E712
+    if bu_id is not None:
+        q = q.filter(Employee.business_unit_id == bu_id)
+    out = []
+    for emp in q.order_by(Employee.name).all():
+        approved = db.query(LeaveRequest).filter(
+            LeaveRequest.employee_id == emp.id, LeaveRequest.status == "approved",
+            LeaveRequest.start_date <= dec31, LeaveRequest.end_date >= jan1).all()
+        used: dict = {}
+        for lv in approved:
+            s = max(lv.start_date, jan1)
+            e = min(lv.end_date, dec31)
+            days = (e - s).days + 1
+            if days > 0:
+                used[lv.leave_type] = used.get(lv.leave_type, 0) + days
+        types = {}
+        for t, ent in LEAVE_ENTITLEMENTS.items():
+            if t in ("earned", "medical"):
+                continue  # aliases of annual/sick — reported under the stored type names
+            u = used.get(t, 0)
+            types[t] = {"entitlement": ent, "used": u,
+                        "remaining": (ent - u) if t != "unpaid" else None}
+        out.append({"employee_id": emp.id, "employee_name": emp.name,
+                    "business_unit_id": emp.business_unit_id, "year": yr,
+                    "balances": types})
+    return {"year": yr, "items": out}

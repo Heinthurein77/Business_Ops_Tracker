@@ -23,6 +23,11 @@ BASE_ACCOUNTS = [
     ("1210", "Equipment & Machinery", "asset", "1200", False),
     ("1220", "Furniture & Fixtures", "asset", "1200", False),
     ("1230", "Vehicles", "asset", "1200", False),
+    # 1240: staff advances/loans — a current asset (receivable from staff),
+    # grouped under Current Assets despite the 12xx code (1210-1230 and
+    # 1290 were already taken by fixed-asset accounts). Added to the group
+    # standard so every BU's books and consolidated reports include it.
+    ("1240", "Staff Advances & Loans", "asset", "1100", False),
     ("1290", "Accumulated Depreciation", "asset", "1200", False),
     # --- Liabilities ---
     ("2000", "Liabilities", "liability", None, True),
@@ -198,3 +203,9 @@ EXPENSE_CATEGORY_ACCOUNTS = {
     "supplies": "6600", "office": "6600", "admin": "6600",
     "communication": "6800", "internet": "6800", "phone": "6800",
 }
+
+# Staff advances/loans account (ERP completion): disbursements debit it,
+# payroll deductions credit it. In BASE_ACCOUNTS so new provisions get it;
+# BUs provisioned earlier get it on demand via
+# accounting._ensure_advance_account.
+STAFF_ADVANCE_ACCOUNT_CODE = "1240"
