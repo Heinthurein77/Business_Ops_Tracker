@@ -140,6 +140,94 @@ class LoginThrottleTests(DatabaseTestCase):
         self.assertIsNone(self.check("innocent_name", PUBLIC_A))
 
 
+class LoginLockoutCycleTests(DatabaseTestCase):
+    """The fixed-expiry lockout cycle (audit finding M1): a lockout triggers
+    once, attempts during it neither extend it nor count toward the next
+    one, and an admin unlock resets the cycle."""
+
+    def check(self, username, ip=PUBLIC_A, when=None):
+        return throttle.check_login_throttle(self.db, username, ip, when or self.now)
+
+    def add_user(self, username, role, is_active=True):
+        from src.models import User
+
+        self.db.add(User(username=username, hashed_password="x", role=role, is_active=is_active))
+        self.db.commit()
+
+    def lockout_rows(self, username="victim"):
+        return self.db.query(AuditLog).filter(AuditLog.action == "LOGIN_LOCKOUT", AuditLog.username == username).all()
+
+    def test_lockout_triggers_once_and_notifies_chairman_and_ho(self):
+        from src.models import Notification
+
+        self.add_user("boss", "Chairman")
+        self.add_user("ho_one", "HO")
+        self.add_user("ho_off", "HO", is_active=False)
+        self.add_user("victim", "CEO")
+        self.add_rows("LOGIN_FAILED", 5, username="victim", ip=PUBLIC_B)
+
+        self.assertIsNotNone(self.check("victim"))
+        self.assertEqual(len(self.lockout_rows()), 1)
+        notes = self.db.query(Notification).filter(Notification.type == "login_lockout").all()
+        self.assertEqual({n.user_id for n in notes}, {1, 2})  # chairman + active HO only
+        self.assertTrue(all("victim" in (n.message or "") for n in notes))
+
+        # A second check during the lock must not re-trigger or re-notify.
+        self.assertIsNotNone(self.check("victim"))
+        self.assertEqual(len(self.lockout_rows()), 1)
+        self.assertEqual(self.db.query(Notification).filter(Notification.type == "login_lockout").count(), 2)
+
+    def test_attempts_during_lockout_do_not_extend_it(self):
+        self.add_rows("LOGIN_FAILED", 5, username="victim", ip=PUBLIC_B, age_seconds=10)
+        first = self.check("victim")
+        self.assertIsNotNone(first)
+        # More failures land during the lock (e.g. recorded via a trusted-IP
+        # attempt): the remaining time must keep counting down from the
+        # ORIGINAL trigger, not restart.
+        self.add_rows("LOGIN_FAILED", 5, username="victim", ip=PUBLIC_B, age_seconds=-60)
+        later = self.check("victim", when=self.now + timedelta(seconds=120))
+        self.assertIsNotNone(later)
+        self.assertLessEqual(later.retry_after, first.retry_after - 100)
+
+    def test_failures_during_lockout_do_not_count_toward_the_next_one(self):
+        self.add_rows("LOGIN_FAILED", 5, username="victim", ip=PUBLIC_B, age_seconds=10)
+        first = self.check("victim")
+        self.add_rows("LOGIN_FAILED", 4, username="victim", ip=PUBLIC_B, age_seconds=-60)
+        after_expiry = self.now + timedelta(seconds=first.retry_after + 5)
+        self.assertIsNone(self.check("victim", when=after_expiry))
+        # Four fresh failures after expiry are not enough on their own...
+        self.add_rows("LOGIN_FAILED", 4, username="victim", ip=PUBLIC_B, age_seconds=-first.retry_after - 4)
+        self.assertIsNone(self.check("victim", when=after_expiry))
+        # ...but the fifth re-locks.
+        self.add_rows("LOGIN_FAILED", 1, username="victim", ip=PUBLIC_B, age_seconds=-first.retry_after - 3)
+        self.assertIsNotNone(self.check("victim", when=after_expiry))
+        self.assertEqual(len(self.lockout_rows()), 2)
+
+    def test_unlock_marker_clears_the_lock_and_resets_counting(self):
+        self.add_rows("LOGIN_FAILED", 5, username="victim", ip=PUBLIC_B, age_seconds=10)
+        self.assertIsNotNone(self.check("victim"))
+        self.assertIsNotNone(throttle.login_lockout_remaining(self.db, "victim", self.now))
+
+        self.db.add(AuditLog(action="LOGIN_UNLOCK", username="victim", timestamp=self.now + timedelta(seconds=30)))
+        self.db.commit()
+        self.assertIsNone(throttle.login_lockout_remaining(self.db, "victim", self.now + timedelta(seconds=40)))
+        self.assertIsNone(self.check("victim", when=self.now + timedelta(seconds=40)))
+        # The pre-unlock failures no longer count: four fresh ones don't lock.
+        self.add_rows("LOGIN_FAILED", 4, username="victim", ip=PUBLIC_B, age_seconds=-50)
+        self.assertIsNone(self.check("victim", when=self.now + timedelta(seconds=60)))
+
+    def test_lockout_remaining_counts_down_and_expires(self):
+        self.assertIsNone(throttle.login_lockout_remaining(self.db, "victim", self.now))
+        self.add_rows("LOGIN_FAILED", 5, username="victim", ip=PUBLIC_B, age_seconds=10)
+        blocked = self.check("victim")
+        remaining = throttle.login_lockout_remaining(self.db, "victim", self.now + timedelta(seconds=60))
+        self.assertIsNotNone(remaining)
+        self.assertLessEqual(remaining, blocked.retry_after - 50)
+        self.assertIsNone(
+            throttle.login_lockout_remaining(self.db, "victim", self.now + timedelta(seconds=blocked.retry_after + 5))
+        )
+
+
 class ForgotPasswordThrottleTests(DatabaseTestCase):
     def check(self, username, ip):
         return throttle.check_forgot_password_throttle(self.db, username, ip, self.now)

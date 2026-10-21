@@ -189,6 +189,20 @@ export default function ManageUsersPage() {
     }
   }
 
+  async function handleUnlockLogin(u) {
+    setBusyUserId(u.id);
+    setBanner(null);
+    try {
+      await api.unlockUserLogin(u.id);
+      await loadUsers();
+      showBanner({ text: `${u.username}'s login lock was cleared — they can sign in again now.`, tone: 'success' });
+    } catch (err) {
+      showBanner({ text: err instanceof ApiError ? err.message : 'Failed to clear the login lock', tone: 'error' });
+    } finally {
+      setBusyUserId(null);
+    }
+  }
+
   if (!users) {
     return (
       <div className={`min-h-screen flex items-center justify-center ${PAGE_BG}`}>
@@ -505,11 +519,24 @@ export default function ManageUsersPage() {
                         {u.require_password_change && (
                           <span className="text-[10px] text-amber-600 dark:text-amber-400">Must set password</span>
                         )}
+                        {u.login_locked && (
+                          <span className="text-[11px] font-semibold text-red-700 dark:text-red-400 bg-red-500/10 border border-red-500/20 dark:border-red-500/30 px-2.5 py-0.5 rounded-full">Login locked</span>
+                        )}
                       </div>
                     </td>
                     <td className="px-6 py-3.5 text-slate-500 dark:text-slate-400">{u.last_login_display || 'Never'}</td>
                     <td className="px-6 py-3.5">
                       <div className="flex items-center justify-end gap-2">
+                        {u.login_locked && (
+                          <button
+                            type="button"
+                            disabled={busyUserId === u.id}
+                            onClick={() => handleUnlockLogin(u)}
+                            className="text-xs font-semibold text-white bg-red-600 hover:bg-red-700 px-3 py-1.5 rounded-lg shadow-sm shadow-red-600/30 transition-colors disabled:opacity-50 whitespace-nowrap"
+                          >
+                            Unlock Login
+                          </button>
+                        )}
                         <button
                           type="button"
                           disabled={busyUserId === u.id}

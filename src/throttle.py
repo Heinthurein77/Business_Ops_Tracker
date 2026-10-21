@@ -14,6 +14,15 @@ plain data, so it is easy to unit-test against a throwaway database.
 Lock-out safety: a login block on a *username* never applies to an IP that has
 already signed in as that user within the last 30 days, so someone hammering an
 account from elsewhere cannot lock its real owner out of their usual network.
+
+Lock-out lifetime (M1): when the per-username failure limit is reached, the
+lockout *triggers* once — a LOGIN_LOCKOUT audit row records the moment and
+the duration, and Chairman/HO users get an in-app notification. The expiry is
+fixed at trigger time: attempts made while the lock is active never extend
+it and never count toward the next one (only failures recorded after the
+expiry — or after an admin's LOGIN_UNLOCK row — count toward a new lockout).
+That bounds the spray-to-keep-locked denial of service to one fixed window
+per trigger, and the lock is always visible and clearable in User Management.
 """
 import ipaddress
 import logging
@@ -25,13 +34,15 @@ from typing import Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Query, Session
 
-from src.models import AuditLog
+from src.models import AuditLog, Notification, User
 
 MAX_USERNAME_LEN = 80
 
 # --- Login ---
 LOGIN_FAILED = "LOGIN_FAILED"
 LOGIN_SUCCESS = "LOGIN_SUCCESS"
+LOGIN_LOCKOUT = "LOGIN_LOCKOUT"
+LOGIN_UNLOCK = "LOGIN_UNLOCK"
 LOGIN_WINDOW_SECONDS = 15 * 60
 LOGIN_IP_LIMIT = 20
 LOGIN_USER_LIMIT = 5
@@ -170,6 +181,82 @@ def _has_recent_success(db: Session, username: str, ip: Optional[str], now: date
     return _rows(db, LOGIN_SUCCESS, since, username, ip).with_entities(AuditLog.id).first() is not None
 
 
+_LOCKOUT_DURATION_RE = re.compile(r"duration_seconds=(\d+)")
+
+
+def _lock_state(db: Session, username: str, now: datetime) -> tuple[Optional[int], Optional[datetime]]:
+    """(seconds remaining, epoch) for the username's current lock cycle.
+
+    The cycle is defined by the newest LOGIN_LOCKOUT / LOGIN_UNLOCK marker
+    row for the username. A lockout's expiry is FIXED at trigger time
+    (trigger timestamp + the duration recorded on the row) — nothing that
+    happens during the lock moves it. `epoch` is the instant from which
+    failures count toward a NEW lockout: the lockout's expiry, or the
+    unlock time, so failures from before/during a lock never re-trigger one.
+    """
+    event = (
+        db.query(AuditLog)
+        .filter(AuditLog.action.in_((LOGIN_LOCKOUT, LOGIN_UNLOCK)), AuditLog.username == username)
+        .order_by(AuditLog.timestamp.desc(), AuditLog.id.desc())
+        .first()
+    )
+    if event is None:
+        return None, None
+    if event.action == LOGIN_UNLOCK:
+        return None, event.timestamp
+    match = _LOCKOUT_DURATION_RE.search(event.details or "")
+    duration = int(match.group(1)) if match else LOGIN_MAX_RETRY_SECONDS
+    expiry = event.timestamp + timedelta(seconds=duration)
+    if now < expiry:
+        return max(1, int((expiry - now).total_seconds()) + 1), expiry
+    return None, expiry
+
+
+def login_lockout_remaining(db: Session, username: str, now: Optional[datetime] = None) -> Optional[int]:
+    """Seconds left on the username's active login lockout, or None when the
+    account is not locked. Used by the admin user list (the `login_locked`
+    flag) and the unlock endpoint."""
+    remaining, _epoch = _lock_state(db, username, now or _utcnow())
+    return remaining
+
+
+def _trigger_lockout(db: Session, username: str, now: datetime, n_user: int, duration: int) -> None:
+    """Persists a lockout trigger: the LOGIN_LOCKOUT marker row (which fixes
+    the expiry) plus one in-app notification per active Chairman/HO user, so
+    the attack is visible the moment it happens. Runs exactly once per
+    lockout — attempts during the lock return early in check_login_throttle
+    and never reach this. Commits: the caller answers 429 immediately after,
+    with no later commit of its own."""
+    target = db.query(User).filter(User.username == username).first()
+    db.add(
+        AuditLog(
+            user_id=target.id if target else None,
+            username=username,
+            action=LOGIN_LOCKOUT,
+            details=f"duration_seconds={duration} failures={n_user}",
+            timestamp=now,
+        )
+    )
+    minutes = max(1, round(duration / 60))
+    for admin in db.query(User).filter(User.role.in_(("Chairman", "HO")), User.is_active == True).all():  # noqa: E712
+        db.add(
+            Notification(
+                user_id=admin.id,
+                type="login_lockout",
+                title=f"Login locked: {username}",
+                message=(
+                    f"{n_user} failed sign-in attempts in {LOGIN_WINDOW_SECONDS // 60} minutes locked "
+                    f"the account '{username}' for about {minutes} minute{'s' if minutes != 1 else ''}. "
+                    "Attempts during the lock cannot extend it. If this was not the account holder, "
+                    "investigate — you can clear the lock early from User Management."
+                ),
+                link="/admin/users",
+            )
+        )
+    db.commit()
+    logger.warning("Login lockout triggered for username=%s failures=%d duration=%ds", username, n_user, duration)
+
+
 def user_backoff_seconds(n_user: int) -> int:
     """Exponential backoff floor for a username block: 1 min at the 5th
     failure, doubling per further failure, capped at 15 min."""
@@ -181,7 +268,9 @@ def check_login_throttle(db: Session, username: str, ip: Optional[str], now: Opt
     """Call BEFORE any password hashing. Returns None to proceed or a
     Throttled(retry_after) to answer 429. Callers must not record a
     LOGIN_FAILED row for a throttled attempt (the breaker in particular exists
-    to stop write amplification)."""
+    to stop write amplification). Side effect: the check that first observes
+    the per-username limit being reached persists the lockout trigger (see
+    _trigger_lockout) — one write per lockout, never per attempt."""
     now = now or _utcnow()
 
     # Global circuit breaker: a flood far beyond anything legitimate (a
@@ -201,13 +290,28 @@ def check_login_throttle(db: Session, username: str, ip: Optional[str], now: Opt
             wait = _seconds_until_below_limit(db, LOGIN_FAILED, LOGIN_WINDOW_SECONDS, LOGIN_IP_LIMIT, n_ip, now, ip=ip)
             return Throttled(min(wait, LOGIN_MAX_RETRY_SECONDS))
 
-    n_user = _count(db, LOGIN_FAILED, since, username=username)
-    if n_user >= LOGIN_USER_LIMIT and not _has_recent_success(db, username, ip, now):
+    # Username rule, on the fixed-expiry lockout cycle (see _lock_state):
+    # during an active lock the caller is refused with the time left on the
+    # ORIGINAL trigger — attempts now cannot extend it — and the failure
+    # count for a new lock starts from the cycle epoch, so nothing recorded
+    # before or during this lock can re-trigger the next one.
+    trusted = _has_recent_success(db, username, ip, now)
+    remaining, epoch = _lock_state(db, username, now)
+    if remaining is not None:
+        return None if trusted else Throttled(remaining)
+    if trusted:
+        return None
+
+    count_since = since if epoch is None or epoch < since else epoch
+    n_user = _count(db, LOGIN_FAILED, count_since, username=username)
+    if n_user >= LOGIN_USER_LIMIT:
         wait = _seconds_until_below_limit(db, LOGIN_FAILED, LOGIN_WINDOW_SECONDS, LOGIN_USER_LIMIT, n_user, now, username=username)
-        # The exponential figure is a floor; the real block lasts until enough
-        # failures age out of the window, so advertise whichever is longer
-        # (never more than the window itself).
-        return Throttled(min(max(user_backoff_seconds(n_user), wait), LOGIN_MAX_RETRY_SECONDS))
+        # The exponential figure is a floor and the age-out wait is what the
+        # block used to last; whichever is longer becomes the FIXED duration
+        # recorded on the trigger row (never more than the cap).
+        duration = min(max(user_backoff_seconds(n_user), wait), LOGIN_MAX_RETRY_SECONDS)
+        _trigger_lockout(db, username, now, n_user, duration)
+        return Throttled(duration)
 
     return None
 

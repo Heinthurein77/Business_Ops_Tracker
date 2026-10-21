@@ -16,10 +16,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.auth import RESET_REQUEST_TTL_HOURS, bump_token_version, hash_password, require_roles
+from src.client_ip import get_client_ip
 from src.config import settings
 from src.database import get_db
-from src.models import BusinessUnit, PasswordResetRequest, User
+from src.models import AuditLog, BusinessUnit, PasswordResetRequest, User
 from src.schemas import CreateUserRequest, SetUserActiveRequest
+from src.throttle import LOGIN_UNLOCK, login_lockout_remaining
 from src.utils import format_local_datetime, log_audit
 
 # One router for /api/admin/users/* and /api/admin/password-resets/* — main.py
@@ -84,6 +86,9 @@ def list_users(user: User = Depends(require_chairman), db: Session = Depends(get
                 "business_unit_name": bu.name if bu else None,
                 "is_active": u.is_active,
                 "require_password_change": u.require_password_change,
+                # True while a login lockout (src/throttle.py) is active for
+                # this account — drives the "Unlock login" action below.
+                "login_locked": login_lockout_remaining(db, u.username) is not None,
                 "last_login_display": format_local_datetime(u.last_login_at) if u.last_login_at else None,
                 "created_display": format_local_datetime(u.created_at),
             }
@@ -261,6 +266,45 @@ def set_user_active(
     )
 
     return {"ok": True}
+
+
+@router.post("/users/{user_id}/unlock-login")
+def unlock_user_login(
+    user_id: int,
+    request: Request,
+    user: User = Depends(require_roles("Chairman", "HO")),
+    db: Session = Depends(get_db),
+):
+    """Clears an active login lockout for one account (see src/throttle.py).
+
+    A lockout normally expires on its own at the fixed time recorded when it
+    triggered; this is the manual override for when the lock is keeping the
+    real account holder out (e.g. they are on a new network, where the
+    trusted-IP bypass can't recognise them). The LOGIN_UNLOCK marker row is
+    also the throttle's cycle boundary: failures recorded before it stop
+    counting toward a new lockout, so the account starts with a clean slate
+    rather than re-locking on the next single mistake. Chairman/HO only —
+    every other user-admin action on this router is Chairman-only, but
+    unlocking is a routine support task HO staff handle day to day; it grants
+    no access by itself (the account still needs its password)."""
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    was_locked = login_lockout_remaining(db, target.username) is not None
+    if was_locked:
+        db.add(
+            AuditLog(
+                user_id=target.id,
+                username=target.username,
+                action=LOGIN_UNLOCK,
+                details=f"unlocked_by={user.username}",
+                ip_address=get_client_ip(request),
+            )
+        )
+        db.commit()
+        log_audit(db, user, "USER_LOGIN_UNLOCKED", f"target_username={target.username}", request)
+    return {"ok": True, "was_locked": was_locked}
 
 
 # --- Password-reset requests (filed anonymously from the sign-in page; see

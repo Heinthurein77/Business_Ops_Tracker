@@ -97,6 +97,7 @@ export const api = {
   createUser: (payload) => postJson('/api/admin/users', payload),
   resetUserPassword: (userId) => postJson(`/api/admin/users/${userId}/reset-password`),
   setUserActive: (userId, isActive) => postJson(`/api/admin/users/${userId}/active`, { is_active: isActive }),
+  unlockUserLogin: (userId) => postJson(`/api/admin/users/${userId}/unlock-login`),
   listPasswordResets: () => getJson('/api/admin/password-resets'),
   approvePasswordReset: (id) => postJson(`/api/admin/password-resets/${id}/approve`),
   rejectPasswordReset: (id) => postJson(`/api/admin/password-resets/${id}/reject`),
