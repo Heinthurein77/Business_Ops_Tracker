@@ -169,6 +169,21 @@ def seed_users(db) -> None:
                     )
         return
 
+    # Defence in depth for the known-password seeding below (audit finding
+    # L4): config.py already refuses to boot on an unrecognised ENVIRONMENT,
+    # but this branch must be unreachable outside development/test on its
+    # own merits — if a future environment name ever slips past the config
+    # check, fail loudly here rather than seed publicly-known passwords.
+    if settings.ENVIRONMENT not in ("development", "test"):
+        raise RuntimeError(
+            f"Refusing to seed known default passwords with ENVIRONMENT={settings.ENVIRONMENT!r}: "
+            "the dev seed branch is for development/test only."
+        )
+    logger.warning(
+        "DEV SEED PASSWORDS IN USE - seeded accounts have publicly-known passwords and must "
+        "rotate them at first login. NEVER run this mode in production."
+    )
+
     _ensure_user(db, "chairman", "Chairman123!", "Chairman", True, full_name="Chairman")
     _ensure_user(db, "ho_staff", "HOStaff123!", "HO", True, full_name="Head Office Staff")
 

@@ -430,3 +430,45 @@ class TestPeriodValidation:
             with pytest.raises(ValidationError):
                 build()
         assert PeriodAction(business_unit_id=1, period="2026-10").period == "2026-10"
+
+
+# --------------------------------------------------------------------- L4
+
+class TestSeedPasswordGuard:
+    def test_unrecognised_environment_refuses_dev_seed(self, db):
+        from unittest import mock
+
+        from src.config import settings
+        from src.main import seed_users
+
+        with mock.patch.object(settings, "ENVIRONMENT", "staging"):
+            with pytest.raises(RuntimeError):
+                seed_users(db)
+        assert db.query(User).count() == 0
+
+    def test_production_branch_never_seeds_known_passwords(self, db):
+        from unittest import mock
+
+        from src.auth import verify_password
+        from src.config import settings
+        from src.main import seed_users
+
+        with mock.patch.object(settings, "ENVIRONMENT", "production"):
+            seed_users(db)
+        assert {u.username for u in db.query(User).all()} == {"chairman"}
+        chairman = db.query(User).filter(User.username == "chairman").one()
+        assert not verify_password("Chairman123!", chairman.hashed_password)
+        assert chairman.require_password_change is True
+
+    def test_dev_branch_still_seeds_in_test_environment(self, db):
+        from unittest import mock
+
+        from src.auth import verify_password
+        from src.config import settings
+        from src.main import seed_users
+
+        with mock.patch.multiple(settings, ENVIRONMENT="test", TOTAL_BUSINESS_UNITS=1):
+            seed_users(db)
+        chairman = db.query(User).filter(User.username == "chairman").one()
+        assert verify_password("Chairman123!", chairman.hashed_password)
+        assert db.query(User).filter(User.username == "ceo_bu1").count() == 1
