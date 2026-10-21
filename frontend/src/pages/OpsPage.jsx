@@ -10,6 +10,8 @@ const TABS = [
   { key: 'purchasing', label: 'Purchasing' },
   { key: 'suppliers', label: 'Suppliers' },
   { key: 'invoices', label: 'Invoices' },
+  { key: 'pos', label: 'POS' },
+  { key: 'transfers', label: 'Transfers' },
   { key: 'projects', label: 'Projects' },
   { key: 'shipments', label: 'Shipments' },
   { key: 'production', label: 'Production' },
@@ -37,6 +39,17 @@ const STATUS_BADGE = {
   paid: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400',
   cancelled: 'bg-red-500/10 border-red-500/20 text-red-600 dark:text-red-400',
   open: 'bg-slate-500/10 border-slate-500/20 text-slate-600 dark:text-slate-300',
+  completed: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400',
+  void: 'bg-red-500/10 border-red-500/20 text-red-600 dark:text-red-400',
+  accepted: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400',
+  converted: 'bg-violet-500/10 border-violet-500/20 text-violet-600 dark:text-violet-400',
+  in_transit: 'bg-sky-500/10 border-sky-500/20 text-sky-600 dark:text-sky-400',
+  in_stock: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400',
+  sold: 'bg-slate-500/10 border-slate-500/20 text-slate-600 dark:text-slate-300',
+  returned: 'bg-amber-500/10 border-amber-500/20 text-amber-600 dark:text-amber-400',
+  defective: 'bg-red-500/10 border-red-500/20 text-red-600 dark:text-red-400',
+  settled: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400',
+  posted: 'bg-sky-500/10 border-sky-500/20 text-sky-600 dark:text-sky-400',
 };
 
 function money(v) {
@@ -101,6 +114,34 @@ export default function OpsPage() {
   const [payrollRuns, setPayrollRuns] = useState([]);
   const [payrollPeriod, setPayrollPeriod] = useState(new Date().toISOString().slice(0, 7));
   const [lineEdits, setLineEdits] = useState({});
+  // ERP completion state
+  const [posSales, setPosSales] = useState([]);
+  const [posSummary, setPosSummary] = useState(null);
+  const [posItems, setPosItems] = useState([]);
+  const [posCart, setPosCart] = useState([]);
+  const [posPay, setPosPay] = useState({ payment_method: 'cash', tax_rate: 0, customer_name: '' });
+  const [quotations, setQuotations] = useState([]);
+  const [quoteForm, setQuoteForm] = useState({ customer_id: '', quote_date: new Date().toISOString().slice(0, 10), valid_until: '', tax_rate: 5, lines: [{ description: '', quantity: 1, unit_price: '', inventory_item_id: '' }] });
+  const [salesReturns, setSalesReturns] = useState([]);
+  const [returnFor, setReturnFor] = useState(null); // invoice id with the return form open
+  const [returnQty, setReturnQty] = useState({});
+  const [purchaseReturns, setPurchaseReturns] = useState([]);
+  const [poReturnFor, setPoReturnFor] = useState(null);
+  const [poReturnQty, setPoReturnQty] = useState({});
+  const [transfers, setTransfers] = useState([]);
+  const [transferForm, setTransferForm] = useState({ to_business_unit_id: '', lines: [{ inventory_item_id: '', quantity: '' }] });
+  const [serialItem, setSerialItem] = useState(null);
+  const [serials, setSerials] = useState([]);
+  const [serialForm, setSerialForm] = useState({ text: '', warranty_until: '' });
+  const [serialQuery, setSerialQuery] = useState('');
+  const [serialResults, setSerialResults] = useState(null);
+  const [advances, setAdvances] = useState([]);
+  const [advForm, setAdvForm] = useState({ employee_id: '', amount: '', monthly_deduction: '', reason: '' });
+  const [attMonth, setAttMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [attSummary, setAttSummary] = useState([]);
+  const [attRecords, setAttRecords] = useState([]);
+  const [attEdits, setAttEdits] = useState({});
+  const [leaveBals, setLeaveBals] = useState([]);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
@@ -129,6 +170,7 @@ export default function OpsPage() {
       if (tab === 'purchasing') {
         setPos((await api.listPOs(bu)).items);
         setSuppliers((await api.listSuppliers(bu)).items);
+        setPurchaseReturns((await api.listPurchaseReturns(bu).catch(() => ({ items: [] }))).items);
       }
       if (tab === 'invoices') {
         setInvoices((await api.listInvoices(bu)).items);
@@ -137,6 +179,17 @@ export default function OpsPage() {
         setProjects((await api.modProjects(bu).catch(() => ({ items: [] }))).items);
         setInventory((await api.listInventory({ business_unit_id: bu }).catch(() => ({ items: [] }))).items);
         setPrincipalReport(await api.modPrincipalReport(bu).catch(() => null));
+        setQuotations((await api.listQuotations(bu).catch(() => ({ items: [] }))).items);
+        setSalesReturns((await api.listSalesReturns(bu).catch(() => ({ items: [] }))).items);
+      }
+      if (tab === 'pos') {
+        setPosItems((await api.listInventory({ business_unit_id: bu }).catch(() => ({ items: [] }))).items);
+        setPosSales((await api.listPosSales(bu).catch(() => ({ items: [] }))).items);
+        setPosSummary(await api.posDailySummary(bu).catch(() => null));
+      }
+      if (tab === 'transfers') {
+        setTransfers((await api.modStockTransfers({}).catch(() => ({ items: [] }))).items);
+        setInventory((await api.listInventory({ business_unit_id: bu }).catch(() => ({ items: [] }))).items);
       }
       if (tab === 'projects') {
         setProjects((await api.modProjects(bu)).items);
@@ -160,11 +213,16 @@ export default function OpsPage() {
         setEmployees((await api.listEmployees(bu)).items);
         setLeaveList((await api.listLeave(bu)).items);
         setPayrollRuns((await api.listPayroll(bu)).items);
+        setAdvances((await api.listAdvances(bu).catch(() => ({ items: [] }))).items);
+        setLeaveBals((await api.leaveBalances(bu).catch(() => ({ items: [] }))).items);
+        const att = await api.listAttendance(bu, attMonth).catch(() => ({ items: [], summary: [] }));
+        setAttRecords(att.items);
+        setAttSummary(att.summary);
       }
     } catch (e) {
       setError(e.message || 'Failed to load');
     }
-  }, [tab, buId]);
+  }, [tab, buId, attMonth]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -194,6 +252,112 @@ export default function OpsPage() {
     try {
       await api.createPayroll({ business_unit_id: Number(buId), period: payrollPeriod });
       setNotice(`Payroll draft for ${payrollPeriod} generated.`);
+      setTimeout(() => setNotice(''), 4000);
+      load();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function createQuotation(e) {
+    e.preventDefault();
+    if (!buId || !quoteForm.customer_id) { setError('Select a business unit and a customer first'); return; }
+    try {
+      await api.createQuotation({
+        business_unit_id: Number(buId), customer_id: Number(quoteForm.customer_id),
+        quote_date: quoteForm.quote_date, valid_until: quoteForm.valid_until || undefined,
+        tax_rate: Number(quoteForm.tax_rate) || 0,
+        lines: quoteForm.lines.filter((l) => l.description && l.unit_price !== '').map((l) => ({
+          description: l.description, quantity: Number(l.quantity) || 1, unit_price: Number(l.unit_price),
+          inventory_item_id: l.inventory_item_id ? Number(l.inventory_item_id) : undefined,
+        })),
+      });
+      setQuoteForm({ customer_id: '', quote_date: new Date().toISOString().slice(0, 10), valid_until: '', tax_rate: 5, lines: [{ description: '', quantity: 1, unit_price: '', inventory_item_id: '' }] });
+      load();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function completePosSale() {
+    if (!buId) { setError('Select a specific business unit first (not All Business Units)'); return; }
+    if (posCart.length === 0) return;
+    try {
+      const sale = await api.createPosSale({
+        business_unit_id: Number(buId), payment_method: posPay.payment_method,
+        tax_rate: Number(posPay.tax_rate) || 0, customer_name: posPay.customer_name || undefined,
+        lines: posCart.map((l) => ({ inventory_item_id: l.item_id, quantity: l.quantity, unit_price: l.unit_price, serial_nos: l.serial_nos && l.serial_nos.length ? l.serial_nos : undefined })),
+      });
+      setPosCart([]);
+      setNotice(`POS sale #${sale.id} completed — ${money(sale.total)}. Do not re-enter it in the CEO daily report.`);
+      setTimeout(() => setNotice(''), 5000);
+      load();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function submitSalesReturn(inv) {
+    const lines = inv.lines
+      .map((l) => ({ invoice_line_id: l.id, quantity: Number(returnQty[l.id]) || 0 }))
+      .filter((l) => l.quantity > 0);
+    if (lines.length === 0) { setError('Enter a return quantity on at least one line'); return; }
+    try {
+      const r = await api.createSalesReturn({ invoice_id: inv.id, lines });
+      setNotice(`Credit note ${r.return_no} posted — ${money(r.total)} credited to ${inv.invoice_no}.`);
+      setTimeout(() => setNotice(''), 4000);
+      setReturnFor(null);
+      setReturnQty({});
+      load();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function submitPurchaseReturn(po) {
+    const lines = po.lines
+      .map((l) => ({ po_line_id: l.id, quantity: Number(poReturnQty[l.id]) || 0 }))
+      .filter((l) => l.quantity > 0);
+    if (lines.length === 0) { setError('Enter a return quantity on at least one line'); return; }
+    try {
+      const r = await api.createPurchaseReturn({ po_id: po.id, lines });
+      setNotice(`Debit note ${r.return_no} posted — ${money(r.total)} returned to supplier.`);
+      setTimeout(() => setNotice(''), 4000);
+      setPoReturnFor(null);
+      setPoReturnQty({});
+      load();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function createTransfer(e) {
+    e.preventDefault();
+    if (!buId || !transferForm.to_business_unit_id) { setError('Select source BU (page filter) and a destination BU'); return; }
+    const lines = transferForm.lines.filter((l) => l.inventory_item_id && Number(l.quantity) > 0)
+      .map((l) => ({ inventory_item_id: Number(l.inventory_item_id), quantity: Number(l.quantity) }));
+    if (lines.length === 0) { setError('Add at least one transfer line'); return; }
+    try {
+      await api.modCreateTransfer({ from_business_unit_id: Number(buId), to_business_unit_id: Number(transferForm.to_business_unit_id), lines });
+      setTransferForm({ to_business_unit_id: '', lines: [{ inventory_item_id: '', quantity: '' }] });
+      load();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function submitAdvance(e) {
+    e.preventDefault();
+    if (!advForm.employee_id || !advForm.amount) return;
+    try {
+      await api.createAdvance({
+        employee_id: Number(advForm.employee_id), amount: Number(advForm.amount),
+        monthly_deduction: Number(advForm.monthly_deduction) || Number(advForm.amount),
+        reason: advForm.reason || undefined,
+      });
+      setAdvForm({ employee_id: '', amount: '', monthly_deduction: '', reason: '' });
+      load();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function saveAttendance() {
+    const today = new Date().toISOString().slice(0, 10);
+    const records = Object.entries(attEdits)
+      .filter(([, st]) => st)
+      .map(([empId, st]) => ({ employee_id: Number(empId), record_date: today, status: st }));
+    if (records.length === 0) { setError('Set a status for at least one employee'); return; }
+    try {
+      await api.bulkAttendance({ records });
+      setAttEdits({});
+      setNotice(`Attendance saved for ${records.length} employee(s) — ${today}.`);
       setTimeout(() => setNotice(''), 4000);
       load();
     } catch (err) { setError(err.message); }
@@ -427,6 +591,15 @@ export default function OpsPage() {
               <label className="flex items-center gap-2 text-sm text-slate-500 self-center"><input type="checkbox" checked={invForm.requires_expiry} onChange={(e) => setInvForm({ ...invForm, requires_expiry: e.target.checked })} className="w-4 h-4 accent-brand-600" /> Expiry tracked</label>
               <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Add item</button>
             </form>
+            <div className="flex flex-wrap gap-2 mb-5 items-center">
+              <input value={serialQuery} onChange={(e) => setSerialQuery(e.target.value)} placeholder="Serial / IMEI lookup — e.g. 356938035643809" className="flex-1 min-w-[240px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3.5 py-2.5 text-sm" />
+              <button onClick={async () => { if (!serialQuery.trim()) return; try { setSerialResults((await api.lookupSerial(serialQuery.trim())).items); } catch (err) { setError(err.message); } }} className="bg-slate-700 hover:bg-slate-800 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Look up</button>
+              {serialResults !== null && (serialResults.length === 0
+                ? <span className="text-sm text-slate-400">Not registered anywhere</span>
+                : serialResults.map((s) => (
+                  <span key={s.id} className="text-sm text-slate-600 dark:text-slate-300">{s.item_name} · {s.bu_name} · <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[s.status] || STATUS_BADGE.open}`}>{s.status.replace('_', ' ')}</span>{s.warranty_until ? ` · warranty until ${s.warranty_until}` : ''}</span>
+                )))}
+            </div>
             {expiring.length > 0 && (
               <div className="mb-5 rounded-xl border border-amber-300/60 bg-amber-50 dark:bg-amber-500/10 px-4 py-3">
                 <p className="text-sm font-bold text-amber-700 dark:text-amber-300">⏰ {expiring.length} batch(es) expiring within 30 days</p>
@@ -459,6 +632,7 @@ export default function OpsPage() {
                           </select>
                           <button onClick={() => transferItem(i)} className="text-xs font-semibold text-sky-600 dark:text-sky-400 hover:underline">Transfer</button>
                           <button onClick={async () => { if (batchItem === i.id) { setBatchItem(null); } else { setBatchItem(i.id); setBatches((await api.modBatches(i.id)).items); } }} className="text-xs font-semibold text-amber-600 dark:text-amber-400 hover:underline">Batches</button>
+                          <button onClick={async () => { if (serialItem === i.id) { setSerialItem(null); } else { setSerialItem(i.id); setSerials((await api.listSerials(i.id)).items); } }} className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">Serials</button>
                           <button onClick={async () => { await api.deleteInventoryItem(i.id); load(); }} className="text-xs font-semibold text-slate-400 hover:underline">Remove</button>
                         </div>
                       </td>
@@ -486,6 +660,29 @@ export default function OpsPage() {
                     </li>
                   ))}
                   {batches.length === 0 && <li className="py-4 text-center text-slate-400 text-sm">No batches with stock — receive the first batch above</li>}
+                </ul>
+              </div>
+            )}
+            {serialItem && (
+              <div className="mt-5 border-t border-slate-100 dark:border-slate-800 pt-4">
+                <h3 className="text-sm font-bold text-slate-800 dark:text-slate-200 mb-3">Serials / IMEI — {inventory.find((x) => x.id === serialItem)?.name}</h3>
+                <form onSubmit={async (e) => { e.preventDefault(); const nos = serialForm.text.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean); if (!nos.length) return; try { await api.addSerials(serialItem, { serial_nos: nos, warranty_until: serialForm.warranty_until || undefined }); setSerialForm({ text: '', warranty_until: '' }); setSerials((await api.listSerials(serialItem)).items); } catch (err) { setError(err.message); } }} className="flex flex-wrap gap-2 mb-3">
+                  <textarea value={serialForm.text} onChange={(e) => setSerialForm({ ...serialForm, text: e.target.value })} placeholder="One serial per line (or comma separated)" rows={2} className="flex-1 min-w-[260px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm" />
+                  <input type="date" value={serialForm.warranty_until} onChange={(e) => setSerialForm({ ...serialForm, warranty_until: e.target.value })} title="Warranty until" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm self-start" />
+                  <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors self-start">Register serials</button>
+                </form>
+                <ul className="divide-y divide-slate-100 dark:divide-slate-800 text-sm">
+                  {serials.map((s) => (
+                    <li key={s.id} className="py-2 flex items-center justify-between flex-wrap gap-2">
+                      <span className="font-medium tabular-nums">{s.serial_no} {s.warranty_until && <span className="text-slate-400 font-normal text-xs">· warranty until {s.warranty_until}</span>}</span>
+                      <span className="flex items-center gap-2">
+                        <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[s.status] || STATUS_BADGE.open}`}>{s.status.replace('_', ' ')}</span>
+                        {s.status !== 'defective' && <button onClick={async () => { await api.setSerialStatus(s.id, 'defective'); setSerials((await api.listSerials(serialItem)).items); }} className="text-xs font-semibold text-red-500 hover:underline">Mark defective</button>}
+                        {s.status !== 'in_stock' && <button onClick={async () => { await api.setSerialStatus(s.id, 'in_stock'); setSerials((await api.listSerials(serialItem)).items); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Back in stock</button>}
+                      </span>
+                    </li>
+                  ))}
+                  {serials.length === 0 && <li className="py-4 text-center text-slate-400 text-sm">No serials registered for this item yet</li>}
                 </ul>
               </div>
             )}
@@ -530,16 +727,47 @@ export default function OpsPage() {
                     </div>
                     <div className="flex items-center gap-2">
                       <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[po.status] || STATUS_BADGE.open}`}>{po.status}</span>
+                      {po.stage_label && <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300">{po.stage_label}</span>}
+                      {(po.approval_stage === 'first' || po.approval_stage === 'final') && po.status === 'draft' && <>
+                        <button onClick={async () => { try { await api.approvePO(po.id); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Approve</button>
+                        <button onClick={async () => { try { await api.rejectPOApproval(po.id); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-red-500 hover:underline">Reject</button>
+                      </>}
                       {po.status === 'draft' && <button onClick={async () => { await api.orderPO(po.id); load(); }} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">Order</button>}
                       {(po.status === 'draft' || po.status === 'ordered') && <button onClick={async () => { await api.receivePO(po.id); setNotice(`Received ${po.po_no} — stock updated, AP posted.`); setTimeout(() => setNotice(''), 4000); load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Receive</button>}
                       {po.status === 'received' && <button onClick={async () => { await api.payPO(po.id); load(); }} className="text-xs font-semibold text-violet-600 dark:text-violet-400 hover:underline">Pay</button>}
+                      {(po.status === 'received' || po.status === 'paid') && <button onClick={() => { setPoReturnFor(poReturnFor === po.id ? null : po.id); setPoReturnQty({}); }} className="text-xs font-semibold text-amber-600 dark:text-amber-400 hover:underline">Return items</button>}
                       {(po.status === 'draft' || po.status === 'ordered') && <button onClick={async () => { await api.cancelPO(po.id); load(); }} className="text-xs font-semibold text-red-500 hover:underline">Cancel</button>}
                     </div>
                   </div>
+                  {poReturnFor === po.id && (
+                    <div className="mt-2 rounded-lg border border-amber-200 dark:border-amber-500/30 bg-amber-50/60 dark:bg-amber-500/5 p-3">
+                      <p className="text-xs font-bold text-amber-700 dark:text-amber-300 mb-2">Return items from {po.po_no} — stocks out and posts a debit note</p>
+                      {po.lines.map((l) => (
+                        <div key={l.id} className="flex items-center gap-2 mb-1.5">
+                          <span className="flex-1 text-xs text-slate-600 dark:text-slate-300">{l.item_name} <span className="text-slate-400">(received {l.quantity})</span></span>
+                          <input type="number" min="0" value={poReturnQty[l.id] || ''} onChange={(e) => setPoReturnQty((q) => ({ ...q, [l.id]: e.target.value }))} placeholder="Return qty" className="w-28 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1.5 text-xs" />
+                        </div>
+                      ))}
+                      <button onClick={() => submitPurchaseReturn(po)} className="mt-1 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold px-3 py-1.5 rounded-lg">Post debit note</button>
+                    </div>
+                  )}
                 </li>
               ))}
               {pos.length === 0 && <li className="py-8 text-center text-sm text-slate-400">No purchase orders yet</li>}
             </ul>
+            {purchaseReturns.length > 0 && (
+              <div className="mt-4 border-t border-slate-100 dark:border-slate-800 pt-4">
+                <h3 className="text-sm font-bold text-slate-800 dark:text-slate-200 mb-2">Purchase Returns (Debit Notes)</h3>
+                <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {purchaseReturns.map((r) => (
+                    <li key={r.id} className="py-2 flex items-center justify-between text-sm">
+                      <span><span className="font-semibold">{r.return_no}</span> <span className="text-slate-400">· against {r.po_no} · {r.return_date}</span></span>
+                      <span className="font-semibold text-amber-600 dark:text-amber-400">−{money(r.total)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </section>
         )}
 
@@ -634,12 +862,28 @@ export default function OpsPage() {
                         <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[inv.status] || STATUS_BADGE.draft}`}>{inv.status}</span>
                         {inv.stored_status === 'draft' && <button onClick={async () => { await api.sendInvoice(inv.id); load(); }} className="text-xs font-semibold text-sky-600 dark:text-sky-400 hover:underline">Send</button>}
                         {inv.stored_status === 'draft' && <button onClick={async () => { await api.cancelInvoice(inv.id); load(); }} className="text-xs font-semibold text-red-500 hover:underline">Cancel</button>}
+                        <a href={api.invoicePdfUrl(inv.id)} className="text-xs font-semibold text-red-500 hover:underline">PDF</a>
+                        <a href={api.deliveryNoteUrl(inv.id)} className="text-xs font-semibold text-slate-500 dark:text-slate-400 hover:underline">Delivery Note</a>
+                        {(inv.stored_status === 'sent' || inv.stored_status === 'partial' || inv.stored_status === 'paid') && <button onClick={() => { setReturnFor(returnFor === inv.id ? null : inv.id); setReturnQty({}); }} className="text-xs font-semibold text-amber-600 dark:text-amber-400 hover:underline">Return items</button>}
                         {(inv.stored_status === 'sent' || inv.stored_status === 'partial') && <>
                           <input type="number" value={payAmt[inv.id] || ''} onChange={(e) => setPayAmt((p) => ({ ...p, [inv.id]: e.target.value }))} placeholder="Amount" className="w-28 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1.5 text-xs" />
                           <button onClick={async () => { const amt = Number(payAmt[inv.id]); if (!amt) return; try { await api.recordInvoicePayment(inv.id, { amount: amt, payment_date: new Date().toISOString().slice(0, 10), method: 'cash' }); setPayAmt((p) => ({ ...p, [inv.id]: '' })); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Record payment</button>
                         </>}
                       </div>
                     </div>
+                    {inv.returns > 0 && <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">Credit notes (returns): −{money(inv.returns)}</p>}
+                    {returnFor === inv.id && (
+                      <div className="mt-2 rounded-lg border border-amber-200 dark:border-amber-500/30 bg-amber-50/60 dark:bg-amber-500/5 p-3">
+                        <p className="text-xs font-bold text-amber-700 dark:text-amber-300 mb-2">Return items from {inv.invoice_no} — restocks and posts a credit note</p>
+                        {inv.lines.map((l) => (
+                          <div key={l.id} className="flex items-center gap-2 mb-1.5">
+                            <span className="flex-1 text-xs text-slate-600 dark:text-slate-300">{l.description} <span className="text-slate-400">(invoiced {l.quantity})</span></span>
+                            <input type="number" min="0" value={returnQty[l.id] || ''} onChange={(e) => setReturnQty((q) => ({ ...q, [l.id]: e.target.value }))} placeholder="Return qty" className="w-28 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1.5 text-xs" />
+                          </div>
+                        ))}
+                        <button onClick={() => submitSalesReturn(inv)} className="mt-1 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold px-3 py-1.5 rounded-lg">Post credit note</button>
+                      </div>
+                    )}
                   </li>
                 ))}
                 {invoices.length === 0 && <li className="py-8 text-center text-sm text-slate-400">No invoices yet</li>}
@@ -665,6 +909,62 @@ export default function OpsPage() {
                 {salesCustomers.length === 0 && <li className="py-6 text-center text-sm text-slate-400">No customers yet</li>}
               </ul>
             </section>
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-4">Quotations</h2>
+              <form onSubmit={createQuotation} className="space-y-3 mb-6">
+                <div className="flex flex-wrap gap-3">
+                  <select value={quoteForm.customer_id} onChange={(e) => setQuoteForm({ ...quoteForm, customer_id: e.target.value })} className="flex-1 min-w-[200px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                    <option value="">Select customer…</option>
+                    {salesCustomers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                  <input type="date" value={quoteForm.quote_date} onChange={(e) => setQuoteForm({ ...quoteForm, quote_date: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                  <input type="date" value={quoteForm.valid_until} onChange={(e) => setQuoteForm({ ...quoteForm, valid_until: e.target.value })} title="Valid until" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                  <input type="number" value={quoteForm.tax_rate} onChange={(e) => setQuoteForm({ ...quoteForm, tax_rate: e.target.value })} title="Commercial tax %" className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                </div>
+                {quoteForm.lines.map((l, idx) => (
+                  <div key={idx} className="flex flex-wrap gap-2">
+                    <input value={l.description} onChange={(e) => { const lines = [...quoteForm.lines]; lines[idx].description = e.target.value; setQuoteForm({ ...quoteForm, lines }); }} placeholder="Description" className="flex-1 min-w-[180px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3.5 py-2.5 text-sm" />
+                    <input type="number" value={l.quantity} onChange={(e) => { const lines = [...quoteForm.lines]; lines[idx].quantity = e.target.value; setQuoteForm({ ...quoteForm, lines }); }} placeholder="Qty" className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                    <input type="number" value={l.unit_price} onChange={(e) => { const lines = [...quoteForm.lines]; lines[idx].unit_price = e.target.value; setQuoteForm({ ...quoteForm, lines }); }} placeholder="Unit price" className="w-36 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                  </div>
+                ))}
+                <div className="flex items-center justify-between flex-wrap gap-3">
+                  <button type="button" onClick={() => setQuoteForm({ ...quoteForm, lines: [...quoteForm.lines, { description: '', quantity: 1, unit_price: '', inventory_item_id: '' }] })} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">+ Add line</button>
+                  <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Create quotation</button>
+                </div>
+              </form>
+              <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                {quotations.map((q) => (
+                  <li key={q.id} className="py-3 flex items-center justify-between gap-3 flex-wrap">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">{q.quote_no} <span className="font-normal text-slate-400">· {q.customer_name} · {money(q.total)}</span></p>
+                      <p className="text-xs text-slate-400">{q.quote_date}{q.valid_until ? ` · valid until ${q.valid_until}` : ''}{q.converted_invoice_id ? ` · invoice #${q.converted_invoice_id}` : ''}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[q.status] || STATUS_BADGE.draft}`}>{q.status}</span>
+                      {q.status === 'draft' && <button onClick={async () => { await api.setQuotationStatus(q.id, 'sent'); load(); }} className="text-xs font-semibold text-sky-600 dark:text-sky-400 hover:underline">Send</button>}
+                      {q.status === 'sent' && <button onClick={async () => { await api.setQuotationStatus(q.id, 'accepted'); load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Accept</button>}
+                      {q.status === 'sent' && <button onClick={async () => { await api.setQuotationStatus(q.id, 'rejected'); load(); }} className="text-xs font-semibold text-red-500 hover:underline">Reject</button>}
+                      {(q.status === 'draft' || q.status === 'sent' || q.status === 'accepted') && <button onClick={async () => { try { const inv = await api.convertQuotation(q.id); setNotice(`${q.quote_no} converted to draft invoice ${inv.invoice_no}.`); setTimeout(() => setNotice(''), 4000); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-violet-600 dark:text-violet-400 hover:underline">Convert to invoice</button>}
+                    </div>
+                  </li>
+                ))}
+                {quotations.length === 0 && <li className="py-6 text-center text-sm text-slate-400">No quotations yet</li>}
+              </ul>
+            </section>
+            {salesReturns.length > 0 && (
+              <section className={`${GLASS} p-6`}>
+                <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-3">Sales Returns (Credit Notes)</h2>
+                <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {salesReturns.map((r) => (
+                    <li key={r.id} className="py-2.5 flex items-center justify-between gap-3 flex-wrap">
+                      <p className="text-sm"><span className="font-semibold">{r.return_no}</span> <span className="text-slate-400">· against {r.invoice_no} · {r.return_date}</span></p>
+                      <span className="text-sm font-semibold text-amber-600 dark:text-amber-400">−{money(r.total)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
             {principalReport && principalReport.items.length > 0 && (
               <section className={`${GLASS} p-6`}>
                 <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-1.5">Sales by Principal / Brand</h2>
@@ -679,6 +979,142 @@ export default function OpsPage() {
                 </table>
               </section>
             )}
+          </div>
+        )}
+
+        {tab === 'pos' && (
+          <div className="space-y-6">
+            <div className="rounded-xl border border-sky-300/60 bg-sky-50 dark:bg-sky-500/10 px-4 py-3">
+              <p className="text-sm text-sky-700 dark:text-sky-300">POS sales post their own revenue + COGS journals and move stock immediately. <strong>Do not re-enter POS sales in the CEO daily report</strong> — that would double-count the revenue.</p>
+            </div>
+            {posSummary && (
+              <section className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                {[
+                  { label: "Today's sales", value: posSummary.sale_count },
+                  { label: 'Total collected', value: money(posSummary.total) },
+                  { label: 'COGS', value: money(posSummary.cogs) },
+                  { label: 'Gross profit', value: money(posSummary.gross_profit) },
+                ].map((c) => (
+                  <div key={c.label} className={`${GLASS} p-4`}>
+                    <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">{c.label}</p>
+                    <p className="text-lg font-bold text-slate-900 dark:text-slate-100 mt-1">{c.value}</p>
+                  </div>
+                ))}
+                <div className={`${GLASS} p-4 col-span-2 md:col-span-4`}>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">By payment method: {Object.entries(posSummary.by_payment_method || {}).map(([m, v]) => `${m}: ${v.count} sale(s), ${money(v.total)}`).join('  ·  ') || 'no sales yet today'}</p>
+                </div>
+              </section>
+            )}
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-4">New Sale {!buId && <span className="text-xs font-normal text-amber-500">— select a specific BU first</span>}</h2>
+              <div className="flex flex-wrap gap-2 mb-3">
+                <select id="pos-item-picker" className="flex-1 min-w-[220px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                  <option value="">Select item…</option>
+                  {posItems.map((i) => <option key={i.id} value={i.id}>{i.name} — {i.current_stock} in stock{i.unit_cost ? ` · cost ${money(i.unit_cost)}` : ''}</option>)}
+                </select>
+                <input id="pos-qty" type="number" defaultValue={1} min="1" className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" placeholder="Qty" />
+                <input id="pos-price" type="number" className="w-36 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" placeholder="Unit price" />
+                <input id="pos-serials" className="w-52 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" placeholder="Serials (comma separated, optional)" />
+                <button onClick={() => {
+                  const sel = document.getElementById('pos-item-picker');
+                  const item = posItems.find((i) => i.id === Number(sel.value));
+                  const qty = Number(document.getElementById('pos-qty').value) || 0;
+                  const price = Number(document.getElementById('pos-price').value) || 0;
+                  const serials = document.getElementById('pos-serials').value.split(',').map((s) => s.trim()).filter(Boolean);
+                  if (!item || qty <= 0 || price < 0) { setError('Pick an item, quantity and price'); return; }
+                  setPosCart((c) => [...c, { item_id: item.id, name: item.name, quantity: qty, unit_price: price, serial_nos: serials }]);
+                  document.getElementById('pos-serials').value = '';
+                }} className="bg-slate-700 hover:bg-slate-800 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Add to sale</button>
+              </div>
+              {posCart.length > 0 && (
+                <div className="border-t border-slate-100 dark:border-slate-800 pt-3">
+                  <ul className="divide-y divide-slate-100 dark:divide-slate-800 mb-3">
+                    {posCart.map((l, idx) => (
+                      <li key={idx} className="py-2 flex items-center justify-between text-sm">
+                        <span className="font-medium">{l.name} <span className="text-slate-400 font-normal">× {l.quantity} @ {money(l.unit_price)}{l.serial_nos.length ? ` · serials: ${l.serial_nos.join(', ')}` : ''}</span></span>
+                        <span className="flex items-center gap-3"><span className="font-semibold tabular-nums">{money(l.quantity * l.unit_price)}</span><button onClick={() => setPosCart((c) => c.filter((_, i) => i !== idx))} className="text-xs font-semibold text-red-500 hover:underline">Remove</button></span>
+                      </li>
+                    ))}
+                  </ul>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <select value={posPay.payment_method} onChange={(e) => setPosPay({ ...posPay, payment_method: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                      <option value="cash">Cash</option>
+                      <option value="bank">Bank</option>
+                    </select>
+                    <input type="number" value={posPay.tax_rate} onChange={(e) => setPosPay({ ...posPay, tax_rate: e.target.value })} title="Commercial tax %" placeholder="Tax %" className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                    <input value={posPay.customer_name} onChange={(e) => setPosPay({ ...posPay, customer_name: e.target.value })} placeholder="Walk-in customer name (optional)" className="flex-1 min-w-[180px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                    <span className="text-sm font-bold">Total: {money(posCart.reduce((s, l) => s + l.quantity * l.unit_price, 0) * (1 + (Number(posPay.tax_rate) || 0) / 100))}</span>
+                    <button onClick={completePosSale} className="bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold px-5 py-2.5 rounded-lg transition-colors">Complete Sale</button>
+                  </div>
+                </div>
+              )}
+            </section>
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-3">Recent Sales</h2>
+              <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                {posSales.map((s) => (
+                  <li key={s.id} className="py-2.5 flex items-center justify-between gap-3 flex-wrap">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">#{s.id} · {money(s.total)} <span className="font-normal text-slate-400">· {s.payment_method}{s.customer_name ? ` · ${s.customer_name}` : ''}</span></p>
+                      <p className="text-xs text-slate-400">{s.sale_date} · {s.lines.map((l) => `${l.description} ×${l.quantity}`).join(', ')}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[s.status] || STATUS_BADGE.open}`}>{s.status}</span>
+                      {s.status === 'completed' && <button onClick={async () => { try { await api.voidPosSale(s.id); setNotice(`POS sale #${s.id} voided — stock restored, journals reversed.`); setTimeout(() => setNotice(''), 4000); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-red-500 hover:underline">Void</button>}
+                    </div>
+                  </li>
+                ))}
+                {posSales.length === 0 && <li className="py-6 text-center text-sm text-slate-400">No POS sales yet</li>}
+              </ul>
+            </section>
+          </div>
+        )}
+
+        {tab === 'transfers' && (
+          <div className="space-y-6">
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-1.5">New Stock Transfer</h2>
+              <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">Source is the BU selected in the page filter. Sending posts Dr Intercompany Receivable / Cr Inventory in the source books; receiving posts the mirror in the destination books.</p>
+              <form onSubmit={createTransfer} className="space-y-3">
+                <select value={transferForm.to_business_unit_id} onChange={(e) => setTransferForm({ ...transferForm, to_business_unit_id: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                  <option value="">Destination BU…</option>
+                  {bus.filter((b) => String(b.bu_id) !== String(buId)).map((b) => <option key={b.bu_id} value={b.bu_id}>{b.bu_name}</option>)}
+                </select>
+                {transferForm.lines.map((l, idx) => (
+                  <div key={idx} className="flex flex-wrap gap-2">
+                    <select value={l.inventory_item_id} onChange={(e) => { const lines = [...transferForm.lines]; lines[idx].inventory_item_id = e.target.value; setTransferForm({ ...transferForm, lines }); }} className="flex-1 min-w-[220px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                      <option value="">Select item (source BU)…</option>
+                      {inventory.map((i) => <option key={i.id} value={i.id}>{i.name} — {i.current_stock} in stock</option>)}
+                    </select>
+                    <input type="number" value={l.quantity} onChange={(e) => { const lines = [...transferForm.lines]; lines[idx].quantity = e.target.value; setTransferForm({ ...transferForm, lines }); }} placeholder="Qty" className="w-28 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                  </div>
+                ))}
+                <div className="flex items-center justify-between flex-wrap gap-3">
+                  <button type="button" onClick={() => setTransferForm({ ...transferForm, lines: [...transferForm.lines, { inventory_item_id: '', quantity: '' }] })} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">+ Add line</button>
+                  <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Create transfer (draft)</button>
+                </div>
+              </form>
+            </section>
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-3">Transfers</h2>
+              <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                {transfers.map((t) => (
+                  <li key={t.id} className="py-3 flex items-center justify-between gap-3 flex-wrap">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">{t.transfer_no} <span className="font-normal text-slate-400">· {t.from_bu_name} → {t.to_bu_name} · {money(t.total_cost)}</span></p>
+                      <p className="text-xs text-slate-400">{t.lines.map((l) => `${l.item_name} ×${l.quantity}`).join(', ')}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[t.status] || STATUS_BADGE.open}`}>{t.status.replace('_', ' ')}</span>
+                      {t.status === 'draft' && <button onClick={async () => { try { await api.modSendTransfer(t.id); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-sky-600 dark:text-sky-400 hover:underline">Send</button>}
+                      {t.status === 'in_transit' && <button onClick={async () => { try { await api.modReceiveTransfer(t.id); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Receive</button>}
+                      {(t.status === 'draft' || t.status === 'in_transit') && <button onClick={async () => { try { await api.modCancelTransfer(t.id); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-red-500 hover:underline">Cancel</button>}
+                    </div>
+                  </li>
+                ))}
+                {transfers.length === 0 && <li className="py-6 text-center text-sm text-slate-400">No stock transfers yet</li>}
+              </ul>
+            </section>
           </div>
         )}
 
@@ -778,8 +1214,8 @@ export default function OpsPage() {
                             </td>
                             <td className="py-1.5 pr-3 text-right">
                               {run.status === 'draft' ? (
-                                <input type="number" defaultValue={l.deductions || ''} placeholder="0" onBlur={async (e) => { const v = Number(e.target.value) || 0; if (v !== l.deductions) { await api.updatePayrollLine(run.id, l.id, { deductions: v }); load(); } }} className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-xs text-right" />
-                              ) : <span className="tabular-nums">{money(l.deductions)}</span>}
+                                <input type="number" defaultValue={(l.manual_deductions ?? l.deductions) || ''} placeholder="0" onBlur={async (e) => { const v = Number(e.target.value) || 0; if (v !== (l.manual_deductions ?? l.deductions)) { await api.updatePayrollLine(run.id, l.id, { deductions: v }); load(); } }} className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-xs text-right" />
+                              ) : <span className="tabular-nums">{money(l.deductions)}{l.advance_deduction > 0 && <span className="block text-[10px] font-normal text-slate-400">incl. advance repayment {money(l.advance_deduction)}</span>}</span>}
                             </td>
                             <td className="py-1.5 text-right tabular-nums font-semibold">{money(l.net)}</td>
                             <td className="py-1.5 pl-3 text-right whitespace-nowrap"><a href={api.opsPayslipUrl(run.id, l.id)} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">Payslip</a></td>
@@ -791,6 +1227,97 @@ export default function OpsPage() {
                 </div>
               ))}
               {payrollRuns.length === 0 && <p className="text-sm text-slate-400 text-center py-4">No payroll runs yet — generate one for this month</p>}
+            </section>
+
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-1.5">Staff Advances & Loans</h2>
+              <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">Approval disburses cash (Dr Staff Advances 1240 / Cr Cash). Payroll automatically deducts the monthly amount and credits the advance back until it settles.</p>
+              <form onSubmit={submitAdvance} className="flex flex-wrap gap-3 mb-4">
+                <select value={advForm.employee_id} onChange={(e) => setAdvForm({ ...advForm, employee_id: e.target.value })} className="flex-1 min-w-[180px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                  <option value="">Select employee…</option>
+                  {employees.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                </select>
+                <input type="number" value={advForm.amount} onChange={(e) => setAdvForm({ ...advForm, amount: e.target.value })} placeholder="Amount (Ks)" className="w-40 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <input type="number" value={advForm.monthly_deduction} onChange={(e) => setAdvForm({ ...advForm, monthly_deduction: e.target.value })} placeholder="Monthly deduction" className="w-44 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <input value={advForm.reason} onChange={(e) => setAdvForm({ ...advForm, reason: e.target.value })} placeholder="Reason (optional)" className="flex-1 min-w-[160px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Request advance</button>
+              </form>
+              <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                {advances.map((a) => (
+                  <li key={a.id} className="py-2.5 flex items-center justify-between gap-3 flex-wrap">
+                    <p className="text-sm"><span className="font-semibold">{a.employee_name}</span> <span className="text-slate-400">· {money(a.amount)} · remaining {money(a.remaining_amount)} · {money(a.monthly_deduction)}/mo{a.reason ? ` · ${a.reason}` : ''}</span></p>
+                    <div className="flex items-center gap-2">
+                      <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[a.status] || STATUS_BADGE.pending}`}>{a.status}</span>
+                      {a.status === 'pending' && <>
+                        <button onClick={async () => { try { await api.approveAdvance(a.id); setNotice(`Advance approved for ${a.employee_name} — cash disbursed.`); setTimeout(() => setNotice(''), 4000); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Approve & disburse</button>
+                        <button onClick={async () => { await api.rejectAdvance(a.id); load(); }} className="text-xs font-semibold text-red-500 hover:underline">Reject</button>
+                      </>}
+                    </div>
+                  </li>
+                ))}
+                {advances.length === 0 && <li className="py-6 text-center text-sm text-slate-400">No staff advances</li>}
+              </ul>
+            </section>
+
+            <section className={`${GLASS} p-6`}>
+              <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
+                <h2 className="font-bold text-slate-900 dark:text-slate-100">Attendance</h2>
+                <input type="month" value={attMonth} onChange={(e) => setAttMonth(e.target.value)} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm font-semibold" />
+              </div>
+              <p className="text-sm text-slate-500 dark:text-slate-400 mb-3">Set today's status per employee, then save. The table below summarises {attMonth}.</p>
+              <div className="overflow-x-auto mb-4">
+                <table className="w-full text-sm min-w-[560px]">
+                  <thead className="text-left text-xs uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                    <tr><th className="py-2 pr-3">Employee</th><th className="py-2 pr-3">Today</th><th className="py-2 pr-3 text-right">Present</th><th className="py-2 pr-3 text-right">Absent</th><th className="py-2 pr-3 text-right">Late</th><th className="py-2 pr-3 text-right">Leave</th><th className="py-2 text-right">Half day</th></tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {employees.map((e) => {
+                      const sum = attSummary.find((s) => s.employee_id === e.id) || {};
+                      const todayRec = attRecords.find((r) => r.employee_id === e.id && r.date === new Date().toISOString().slice(0, 10));
+                      return (
+                        <tr key={e.id}>
+                          <td className="py-2 pr-3 font-medium">{e.name}</td>
+                          <td className="py-2 pr-3">
+                            <select value={attEdits[e.id] ?? todayRec?.status ?? ''} onChange={(ev) => setAttEdits((m) => ({ ...m, [e.id]: ev.target.value }))} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1.5 text-xs">
+                              <option value="">—</option>
+                              {['present', 'absent', 'late', 'leave', 'half_day'].map((st) => <option key={st} value={st}>{st.replace('_', ' ')}</option>)}
+                            </select>
+                          </td>
+                          <td className="py-2 pr-3 text-right tabular-nums">{sum.present || 0}</td>
+                          <td className="py-2 pr-3 text-right tabular-nums">{sum.absent || 0}</td>
+                          <td className="py-2 pr-3 text-right tabular-nums">{sum.late || 0}</td>
+                          <td className="py-2 pr-3 text-right tabular-nums">{sum.leave || 0}</td>
+                          <td className="py-2 text-right tabular-nums">{sum.half_day || 0}</td>
+                        </tr>
+                      );
+                    })}
+                    {employees.length === 0 && <tr><td colSpan={7} className="py-6 text-center text-slate-400">No employees yet for this BU</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+              <button onClick={saveAttendance} className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Save today's attendance</button>
+            </section>
+
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-4">Leave Balances ({new Date().getFullYear()})</h2>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm min-w-[560px]">
+                  <thead className="text-left text-xs uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                    <tr><th className="py-2 pr-3">Employee</th><th className="py-2 pr-3 text-right">Annual (earned) — used / left</th><th className="py-2 pr-3 text-right">Casual — used / left</th><th className="py-2 text-right">Sick (medical) — used / left</th></tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {leaveBals.map((row) => (
+                      <tr key={row.employee_id}>
+                        <td className="py-2 pr-3 font-medium">{row.employee_name}</td>
+                        <td className="py-2 pr-3 text-right tabular-nums">{row.balances.annual.used} / {row.balances.annual.remaining}</td>
+                        <td className="py-2 pr-3 text-right tabular-nums">{row.balances.casual.used} / {row.balances.casual.remaining}</td>
+                        <td className="py-2 text-right tabular-nums">{row.balances.sick.used} / {row.balances.sick.remaining}</td>
+                      </tr>
+                    ))}
+                    {leaveBals.length === 0 && <tr><td colSpan={4} className="py-6 text-center text-slate-400">No employees yet for this BU</td></tr>}
+                  </tbody>
+                </table>
+              </div>
             </section>
           </div>
         )}

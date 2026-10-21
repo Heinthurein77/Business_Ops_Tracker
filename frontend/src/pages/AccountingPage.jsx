@@ -663,6 +663,13 @@ export default function AccountingPage() {
                     <div className="flex items-center gap-2">
                       <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${SRC_BADGE[e.source] || SRC_BADGE.manual}`}>{e.source.replace('_', ' ')}</span>
                       <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${e.status === 'posted' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400' : 'bg-amber-500/10 border-amber-500/20 text-amber-600 dark:text-amber-400'}`}>{e.status}</span>
+                      {e.approval_status === 'pending' && <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300">Awaiting approval</span>}
+                      {e.approval_status === 'approved' && <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">Approved</span>}
+                      {e.approval_status === 'rejected' && <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300">Approval rejected</span>}
+                      {e.approval_status === 'pending' && <>
+                        <button onClick={async () => { try { await api.accApproveJournal(e.id); flash(`${e.entry_no} approved — it can now be posted.`); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Approve</button>
+                        <button onClick={async () => { try { await api.accRejectJournalApproval(e.id); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-red-500 hover:underline">Reject</button>
+                      </>}
                       {e.status === 'draft' && <button onClick={() => postEntry(e.id)} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Post</button>}
                       {e.status === 'draft' && <button onClick={() => deleteEntry(e.id)} className="text-xs font-semibold text-red-500 hover:underline">Delete</button>}
                       {e.status === 'posted' && !e.reversed_by_id && e.source !== 'reversal' && <button onClick={() => reverseEntry(e.id)} className="text-xs font-semibold text-red-500 hover:underline">Reverse</button>}
