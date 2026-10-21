@@ -65,8 +65,8 @@ def _get_client():
 def _save_local_fallback(file_obj: BinaryIO, key: str) -> Optional[str]:
     """Dev-only fallback for when R2 isn't configured (see LOCAL_UPLOAD_DIR in
     config.py for why upload_fileobj() never calls this in production).
-    Writes under LOCAL_UPLOAD_DIR, served back out by the /uploads
-    StaticFiles mount registered in main.py."""
+    Writes under LOCAL_UPLOAD_DIR, served back out by the session-gated
+    /uploads route registered in main.py."""
     try:
         dest = Path(settings.LOCAL_UPLOAD_DIR) / key
         dest.parent.mkdir(parents=True, exist_ok=True)

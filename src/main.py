@@ -9,10 +9,11 @@ import logging
 import os
 import secrets
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -23,6 +24,7 @@ from src.auth import (
     NotAuthenticatedException,
     PasswordChangeRequiredException,
     ProfileSetupRequiredException,
+    get_current_user,
     hash_password,
 )
 from src.config import settings
@@ -274,11 +276,34 @@ def healthz():
 # nothing is ever written locally in production (R2, or a loud failure, is the
 # only path — see upload_fileobj()'s production gate), so the directory is
 # neither created nor served there and /uploads/* is just a 404.
+#
+# Session-gated (audit finding L1): this used to be an unauthenticated
+# StaticFiles mount, which made every uploaded file a bearer URL — anyone
+# with the link had the file forever. The route below runs the exact same
+# session validation as every API route (cookie + token_version, via
+# get_current_user); the frontend session is that cookie, so a signed-in
+# browser's plain <img>/link fetches keep working unchanged, and everyone
+# else gets the usual 401.
 # ---------------------------------------------------------------------------
 
 if not settings.IS_PRODUCTION:
     os.makedirs(settings.LOCAL_UPLOAD_DIR, exist_ok=True)
-    app.mount("/uploads", StaticFiles(directory=settings.LOCAL_UPLOAD_DIR), name="local-uploads")
+
+    def _resolve_local_upload(file_path: str) -> Path:
+        """Maps a /uploads/* tail onto a real file inside LOCAL_UPLOAD_DIR,
+        else raises 404. resolve() collapses `..` segments BEFORE the
+        containment check, so no tail can escape the upload directory."""
+        base = Path(settings.LOCAL_UPLOAD_DIR).resolve()
+        target = (base / file_path).resolve()
+        if target != base and base not in target.parents:
+            raise HTTPException(status_code=404, detail="Not found")
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="Not found")
+        return target
+
+    @app.get("/uploads/{file_path:path}")
+    async def serve_local_upload(file_path: str, user: User = Depends(get_current_user)):
+        return FileResponse(_resolve_local_upload(file_path))
 
 
 # ---------------------------------------------------------------------------

@@ -286,3 +286,46 @@ class TestExportBudget:
             assert is_export_path(path), path
         for path in ("/api/ops/inventory", "/api/auth/me", "/api/ops/expenses/1/receipt", "/api/admin/users"):
             assert not is_export_path(path), path
+
+
+# --------------------------------------------------------------------- L1
+
+class TestLocalUploadsGating:
+    def test_uploads_route_uses_session_auth_not_a_public_mount(self):
+        from starlette.routing import Mount
+
+        from src.auth import get_current_user
+        from src.main import app
+
+        assert not any(isinstance(r, Mount) and r.path == "/uploads" for r in app.routes)
+        route = next(r for r in app.routes if getattr(r, "path", "") == "/uploads/{file_path:path}")
+        assert get_current_user in [d.call for d in route.dependant.dependencies]
+
+    def test_resolve_local_upload(self, tmp_path, monkeypatch):
+        from src.config import settings
+        from src.main import _resolve_local_upload
+
+        upload_dir = tmp_path / "uploads"
+        (upload_dir / "expense-receipts").mkdir(parents=True)
+        target = upload_dir / "expense-receipts" / "abc.png"
+        target.write_bytes(b"png")
+        (tmp_path / "secret.txt").write_text("nope")
+        monkeypatch.setattr(settings, "LOCAL_UPLOAD_DIR", str(upload_dir))
+
+        assert _resolve_local_upload("expense-receipts/abc.png") == target.resolve()
+        for bad in ("../secret.txt", "expense-receipts/../../secret.txt", "missing.png", ""):
+            with pytest.raises(HTTPException) as exc:
+                _resolve_local_upload(bad)
+            assert exc.value.status_code == 404
+
+    def test_serve_local_upload_returns_the_file(self, tmp_path, monkeypatch):
+        from src.config import settings
+        from src.main import serve_local_upload
+
+        upload_dir = tmp_path / "uploads"
+        upload_dir.mkdir()
+        (upload_dir / "a.txt").write_text("hello")
+        monkeypatch.setattr(settings, "LOCAL_UPLOAD_DIR", str(upload_dir))
+
+        response = asyncio.run(serve_local_upload("a.txt", user=SimpleNamespace(username="boss")))
+        assert str(response.path) == str((upload_dir / "a.txt").resolve())
