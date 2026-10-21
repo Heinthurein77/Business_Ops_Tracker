@@ -293,6 +293,11 @@ export const api = {
   // ---- ERP B/C/D additions ----
   accFinanceSummary: () => getJson('/api/accounting/finance-summary'),
   accTaxReport: (buId, period) => getJson(`/api/accounting/reports/tax?business_unit_id=${buId}&period=${period}`),
+  accCashFlow: (buId, period) => getJson(`/api/accounting/reports/cash-flow?business_unit_id=${buId}&period=${period}`),
+  accYearClose: (buId, year) => fetch('/api/accounting/year-close', {
+    method: 'POST', credentials: 'include', headers: JSON_HEADERS,
+    body: JSON.stringify({ business_unit_id: buId, year }),
+  }).then(handle),
   accBudgets: (buId, period) => getJson(`/api/accounting/budgets?business_unit_id=${buId}&period=${period}`),
   accSaveBudget: (payload) => fetch('/api/accounting/budgets', {
     method: 'PUT', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
@@ -315,6 +320,46 @@ export const api = {
   },
   opsPayslipUrl: (runId, lineId) => `/api/ops/payroll-runs/${runId}/lines/${lineId}/payslip`,
   opsStatementUrl: (customerId, format) => `/api/ops/sales-customers/${customerId}/statement?format=${format}`,
+  // ---- Nature modules (batches, projects, shipments, production, real estate, principal) ----
+  modBatches: (itemId) => getJson(`/api/modules/inventory/${itemId}/batches`),
+  modReceiveBatch: (itemId, payload) => fetch(`/api/modules/inventory/${itemId}/batches`, {
+    method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
+  }).then(handle),
+  modExpiring: (buId, days = 30) => getJson(`/api/modules/expiring?days=${days}${buId ? `&business_unit_id=${buId}` : ''}`),
+  modProjects: (buId) => getJson(`/api/modules/projects${buId ? `?business_unit_id=${buId}` : ''}`),
+  modCreateProject: (payload) => fetch('/api/modules/projects', {
+    method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
+  }).then(handle),
+  modProjectStatus: (id, status) => fetch(`/api/modules/projects/${id}/status?status=${status}`, { method: 'POST', credentials: 'include' }).then(handle),
+  modProjectPL: (id) => getJson(`/api/modules/projects/${id}/pl`),
+  modShipments: (buId) => getJson(`/api/modules/shipments${buId ? `?business_unit_id=${buId}` : ''}`),
+  modCreateShipment: (payload) => fetch('/api/modules/shipments', {
+    method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
+  }).then(handle),
+  modShipmentStatus: (id, status) => fetch(`/api/modules/shipments/${id}/status?status=${status}`, { method: 'POST', credentials: 'include' }).then(handle),
+  modBoms: (buId) => getJson(`/api/modules/boms${buId ? `?business_unit_id=${buId}` : ''}`),
+  modCreateBom: (payload) => fetch('/api/modules/boms', {
+    method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
+  }).then(handle),
+  modProduction: (buId) => getJson(`/api/modules/production-orders${buId ? `?business_unit_id=${buId}` : ''}`),
+  modCreateProduction: (payload) => fetch('/api/modules/production-orders', {
+    method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
+  }).then(handle),
+  modCompleteProduction: (id) => fetch(`/api/modules/production-orders/${id}/complete`, { method: 'POST', credentials: 'include' }).then(handle),
+  modUnits: (buId) => getJson(`/api/modules/property-units${buId ? `?business_unit_id=${buId}` : ''}`),
+  modCreateUnit: (payload) => fetch('/api/modules/property-units', {
+    method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
+  }).then(handle),
+  modSellUnit: (id, payload) => fetch(`/api/modules/property-units/${id}/sell`, {
+    method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
+  }).then(handle),
+  modInstallments: (invoiceId) => getJson(`/api/modules/invoices/${invoiceId}/installments`),
+  modLeases: (buId) => getJson(`/api/modules/leases${buId ? `?business_unit_id=${buId}` : ''}`),
+  modCreateLease: (payload) => fetch('/api/modules/leases', {
+    method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
+  }).then(handle),
+  modBillLease: (id, period) => fetch(`/api/modules/leases/${id}/bill${period ? `?period=${period}` : ''}`, { method: 'POST', credentials: 'include' }).then(handle),
+  modPrincipalReport: (buId, period) => getJson(`/api/modules/principal-report?${new URLSearchParams({ ...(buId ? { business_unit_id: buId } : {}), ...(period ? { period } : {}) })}`),
 };
 
 export { ApiError };

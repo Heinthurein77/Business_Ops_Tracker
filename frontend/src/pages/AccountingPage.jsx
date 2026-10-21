@@ -19,9 +19,17 @@ const TABS = [
 const TEMPLATES = [
   { key: 'retail', label: 'Retail / Shop' },
   { key: 'distribution', label: 'Distribution' },
-  { key: 'logistics', label: 'Logistics' },
+  { key: 'logistics', label: 'Logistics & Transport' },
   { key: 'services', label: 'Services' },
   { key: 'head_office', label: 'Head Office' },
+  { key: 'convenience', label: 'Convenience Store' },
+  { key: 'telecom', label: 'Telecom' },
+  { key: 'furniture', label: 'Furniture' },
+  { key: 'cosmetics', label: 'Cosmetics & Beauty' },
+  { key: 'production', label: 'Production / Manufacturing' },
+  { key: 'principal', label: 'Principal Distribution' },
+  { key: 'content', label: 'Content Solution / Agency' },
+  { key: 'real_estate', label: 'Real Estate (အိမ်ခြံမြေ)' },
 ];
 
 const RULE_LABELS = {
@@ -86,6 +94,8 @@ export default function AccountingPage() {
   const [budgets, setBudgets] = useState(null);
   const [budgetForm, setBudgetForm] = useState({ account_code: '', amount: '' });
   const [tax, setTax] = useState(null);
+  const [cashFlow, setCashFlow] = useState(null);
+  const [closeYear, setCloseYear] = useState(new Date().getFullYear());
   const [rates, setRates] = useState(null);
   const [rateForm, setRateForm] = useState({ rate_date: today(), rate: '' });
   const [icTxns, setIcTxns] = useState([]);
@@ -117,6 +127,7 @@ export default function AccountingPage() {
         setPl(await api.accPL(bu, period));
         setBs(await api.accBS(bu, period));
         setTax(await api.accTaxReport(bu, period).catch(() => null));
+        setCashFlow(await api.accCashFlow(bu, period).catch(() => null));
         setBudgets(await api.accBudgets(bu, period).catch(() => null));
       }
       if (tab === 'group') {
@@ -455,6 +466,41 @@ export default function AccountingPage() {
                 {tax.items.length > 0 && (
                   <p className="mt-3 text-xs text-slate-400">{tax.items.length} tax entr{tax.items.length === 1 ? 'y' : 'ies'} this period — see the Journal tab for detail.</p>
                 )}
+              </section>
+            )}
+
+            {cashFlow && (
+              <section className={`${GLASS} p-6`}>
+                <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-4">Cash Flow — {period}</h2>
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+                  {[['Opening cash', cashFlow.opening_cash], ['Operating', cashFlow.operating], ['Investing', cashFlow.investing], ['Financing', cashFlow.financing], ['Net change', cashFlow.net_change], ['Closing cash', cashFlow.closing_cash]].map(([label, v]) => (
+                    <div key={label} className="rounded-xl border border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40 px-3.5 py-3">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{label}</p>
+                      <p className={`mt-1 text-base font-bold ${Number(v) < 0 ? 'text-red-500' : 'text-slate-900 dark:text-slate-100'}`}>{money(v)}</p>
+                    </div>
+                  ))}
+                </div>
+                {cashFlow.items.length > 0 && (
+                  <ul className="divide-y divide-slate-100 dark:divide-slate-800 mt-4 text-sm">
+                    {cashFlow.items.slice(0, 12).map((i, ix) => (
+                      <li key={ix} className="py-2 flex items-center justify-between gap-3 flex-wrap">
+                        <span className="text-slate-600 dark:text-slate-300">{i.date} · {i.entry_no} — {i.description} <span className="text-slate-400">({i.category})</span></span>
+                        <span className={`tabular-nums font-semibold ${i.amount < 0 ? 'text-red-500' : 'text-emerald-600 dark:text-emerald-400'}`}>{money(i.amount)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+            )}
+
+            {(
+              <section className={`${GLASS} p-6`}>
+                <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-1.5">Year-End Close</h2>
+                <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">Posts one closing journal on Dec 31 moving the year's profit into Retained Earnings (3200), then closes all 12 periods. Run it while December is still open — it cannot be undone except by reversing the journal.</p>
+                <div className="flex flex-wrap items-center gap-3">
+                  <input type="number" value={closeYear} onChange={(e) => setCloseYear(e.target.value)} className="w-28 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                  <button onClick={async () => { if (!window.confirm(`Close fiscal year ${closeYear} for this BU?`)) return; try { const r = await api.accYearClose(bu, Number(closeYear)); setNotice(`Year ${r.year} closed — income ${money(r.total_income)}, expenses ${money(r.total_expenses)}, net profit ${money(r.net_profit)} moved to retained earnings (${r.entry_no}).`); setTimeout(() => setNotice(''), 6000); } catch (e) { setError(e.message); } }} className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Close year</button>
+                </div>
               </section>
             )}
           </div>

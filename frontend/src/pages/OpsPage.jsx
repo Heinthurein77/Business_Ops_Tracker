@@ -10,6 +10,10 @@ const TABS = [
   { key: 'purchasing', label: 'Purchasing' },
   { key: 'suppliers', label: 'Suppliers' },
   { key: 'invoices', label: 'Invoices' },
+  { key: 'projects', label: 'Projects' },
+  { key: 'shipments', label: 'Shipments' },
+  { key: 'production', label: 'Production' },
+  { key: 'properties', label: 'Properties' },
   { key: 'hr', label: 'HR & Payroll' },
   { key: 'expenses', label: 'Expenses' },
   { key: 'documents', label: 'Documents' },
@@ -50,7 +54,26 @@ export default function OpsPage() {
 
   const [inventory, setInventory] = useState([]);
   const [lowCount, setLowCount] = useState(0);
-  const [invForm, setInvForm] = useState({ name: '', reorder_level: '', initial_stock: '', unit: 'pcs' });
+  const [invForm, setInvForm] = useState({ name: '', reorder_level: '', initial_stock: '', unit: 'pcs', brand: '', principal_id: '', requires_expiry: false });
+  const [projects, setProjects] = useState([]);
+  const [projForm, setProjForm] = useState({ name: '', project_type: 'general', customer_id: '' });
+  const [projPL, setProjPL] = useState({});
+  const [shipments, setShipments] = useState([]);
+  const [shipForm, setShipForm] = useState({ origin: '', destination: '', vehicle_no: '', driver_name: '', shipment_date: new Date().toISOString().slice(0, 10), freight_charge: '', fuel_cost: '', toll_fees: '', driver_fees: '', customer_id: '' });
+  const [boms, setBoms] = useState([]);
+  const [bomForm, setBomForm] = useState({ finished_item_id: '', name: '', components: [{ component_item_id: '', quantity_per_unit: '' }] });
+  const [prodOrders, setProdOrders] = useState([]);
+  const [prodForm, setProdForm] = useState({ bom_id: '', quantity: '', labour_cost: '', overhead_cost: '' });
+  const [units, setUnits] = useState([]);
+  const [unitForm, setUnitForm] = useState({ development: '', unit_no: '', unit_type: 'apartment', size_sqft: '', asking_price: '' });
+  const [leases, setLeases] = useState([]);
+  const [leaseForm, setLeaseForm] = useState({ unit_id: '', tenant_id: '', monthly_rent: '', deposit_amount: '', start_date: new Date().toISOString().slice(0, 10) });
+  const [sellForms, setSellForms] = useState({});
+  const [expiring, setExpiring] = useState([]);
+  const [batchItem, setBatchItem] = useState(null);
+  const [batches, setBatches] = useState([]);
+  const [batchForm, setBatchForm] = useState({ batch_no: '', expiry_date: '', quantity: '', unit_cost: '' });
+  const [principalReport, setPrincipalReport] = useState(null);
   const [moveQty, setMoveQty] = useState({});
   const [transferTo, setTransferTo] = useState({});
 
@@ -68,7 +91,7 @@ export default function OpsPage() {
   const [salesCustomers, setSalesCustomers] = useState([]);
   const [custForm, setCustForm] = useState({ name: '', phone: '' });
   const [invoices, setInvoices] = useState([]);
-  const [invCreate, setInvCreate] = useState({ customer_id: '', invoice_date: new Date().toISOString().slice(0, 10), due_date: '', tax_rate: 5, currency: 'MMK', exchange_rate: '', lines: [{ description: '', quantity: 1, unit_price: '' }] });
+  const [invCreate, setInvCreate] = useState({ customer_id: '', invoice_date: new Date().toISOString().slice(0, 10), due_date: '', tax_rate: 5, currency: 'MMK', exchange_rate: '', project_id: '', lines: [{ description: '', quantity: 1, unit_price: '', inventory_item_id: '' }] });
   const [payAmt, setPayAmt] = useState({});
   const [agingData, setAgingData] = useState(null);
   const [employees, setEmployees] = useState([]);
@@ -94,6 +117,8 @@ export default function OpsPage() {
         const d = await api.listInventory({ business_unit_id: bu });
         setInventory(d.items);
         setLowCount(d.low_count);
+        setExpiring((await api.modExpiring(bu).catch(() => ({ items: [] }))).items);
+        setSuppliers((await api.listSuppliers(bu)).items);
       }
       if (tab === 'expenses') setExpenses((await api.listExpenses({ business_unit_id: bu })).items);
       if (tab === 'documents') setDocuments((await api.listDocuments({ business_unit_id: bu })).items);
@@ -109,6 +134,27 @@ export default function OpsPage() {
         setInvoices((await api.listInvoices(bu)).items);
         setSalesCustomers((await api.listSalesCustomers(bu)).items);
         setAgingData(await api.aging(bu));
+        setProjects((await api.modProjects(bu).catch(() => ({ items: [] }))).items);
+        setInventory((await api.listInventory({ business_unit_id: bu }).catch(() => ({ items: [] }))).items);
+        setPrincipalReport(await api.modPrincipalReport(bu).catch(() => null));
+      }
+      if (tab === 'projects') {
+        setProjects((await api.modProjects(bu)).items);
+        setSalesCustomers((await api.listSalesCustomers(bu)).items);
+      }
+      if (tab === 'shipments') {
+        setShipments((await api.modShipments(bu)).items);
+        setSalesCustomers((await api.listSalesCustomers(bu)).items);
+      }
+      if (tab === 'production') {
+        setBoms((await api.modBoms(bu)).items);
+        setProdOrders((await api.modProduction(bu)).items);
+        setInventory((await api.listInventory({ business_unit_id: bu })).items);
+      }
+      if (tab === 'properties') {
+        setUnits((await api.modUnits(bu)).items);
+        setLeases((await api.modLeases(bu)).items);
+        setSalesCustomers((await api.listSalesCustomers(bu)).items);
       }
       if (tab === 'hr') {
         setEmployees((await api.listEmployees(bu)).items);
@@ -165,11 +211,11 @@ export default function OpsPage() {
 
   async function createInvoice(e) {
     e.preventDefault();
-    const lines = invCreate.lines.filter((l) => l.description.trim()).map((l) => ({ description: l.description.trim(), quantity: Number(l.quantity) || 1, unit_price: Number(l.unit_price) || 0 }));
+    const lines = invCreate.lines.filter((l) => l.description.trim()).map((l) => ({ description: l.description.trim(), quantity: Number(l.quantity) || 1, unit_price: Number(l.unit_price) || 0, inventory_item_id: l.inventory_item_id ? Number(l.inventory_item_id) : undefined }));
     if (!invCreate.customer_id || lines.length === 0 || !buId) { setError('Pick a customer and add at least one line'); return; }
     try {
-      await api.createInvoice({ business_unit_id: Number(buId), customer_id: Number(invCreate.customer_id), invoice_date: invCreate.invoice_date, due_date: invCreate.due_date || undefined, tax_rate: Number(invCreate.tax_rate) || 0, currency: invCreate.currency, exchange_rate: invCreate.exchange_rate === '' ? undefined : Number(invCreate.exchange_rate), lines });
-      setInvCreate({ customer_id: '', invoice_date: new Date().toISOString().slice(0, 10), due_date: '', tax_rate: 5, currency: 'MMK', exchange_rate: '', lines: [{ description: '', quantity: 1, unit_price: '' }] });
+      await api.createInvoice({ business_unit_id: Number(buId), customer_id: Number(invCreate.customer_id), invoice_date: invCreate.invoice_date, due_date: invCreate.due_date || undefined, tax_rate: Number(invCreate.tax_rate) || 0, currency: invCreate.currency, exchange_rate: invCreate.exchange_rate === '' ? undefined : Number(invCreate.exchange_rate), project_id: invCreate.project_id ? Number(invCreate.project_id) : undefined, lines });
+      setInvCreate({ customer_id: '', invoice_date: new Date().toISOString().slice(0, 10), due_date: '', tax_rate: 5, currency: 'MMK', exchange_rate: '', project_id: '', lines: [{ description: '', quantity: 1, unit_price: '', inventory_item_id: '' }] });
       setNotice('Invoice created (draft). Send it to post to the ledger.');
       setTimeout(() => setNotice(''), 4000);
       load();
@@ -225,6 +271,9 @@ export default function OpsPage() {
         reorder_level: Number(invForm.reorder_level) || 0,
         initial_stock: Number(invForm.initial_stock) || 0,
         unit: invForm.unit || 'pcs',
+        brand: invForm.brand || undefined,
+        principal_id: invForm.principal_id ? Number(invForm.principal_id) : undefined,
+        requires_expiry: invForm.requires_expiry,
       });
       setInvForm({ name: '', reorder_level: '', initial_stock: '', unit: 'pcs' });
       load();
@@ -370,8 +419,20 @@ export default function OpsPage() {
               <input type="number" value={invForm.initial_stock} onChange={(e) => setInvForm({ ...invForm, initial_stock: e.target.value })} placeholder="Stock" className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
               <input type="number" value={invForm.reorder_level} onChange={(e) => setInvForm({ ...invForm, reorder_level: e.target.value })} placeholder="Reorder at" className="w-28 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
               <input value={invForm.unit} onChange={(e) => setInvForm({ ...invForm, unit: e.target.value })} placeholder="Unit" className="w-20 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+              <input value={invForm.brand} onChange={(e) => setInvForm({ ...invForm, brand: e.target.value })} placeholder="Brand (optional)" className="w-36 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+              <select value={invForm.principal_id} onChange={(e) => setInvForm({ ...invForm, principal_id: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                <option value="">Principal…</option>
+                {suppliers.map((sp) => <option key={sp.id} value={sp.id}>{sp.name}</option>)}
+              </select>
+              <label className="flex items-center gap-2 text-sm text-slate-500 self-center"><input type="checkbox" checked={invForm.requires_expiry} onChange={(e) => setInvForm({ ...invForm, requires_expiry: e.target.checked })} className="w-4 h-4 accent-brand-600" /> Expiry tracked</label>
               <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Add item</button>
             </form>
+            {expiring.length > 0 && (
+              <div className="mb-5 rounded-xl border border-amber-300/60 bg-amber-50 dark:bg-amber-500/10 px-4 py-3">
+                <p className="text-sm font-bold text-amber-700 dark:text-amber-300">⏰ {expiring.length} batch(es) expiring within 30 days</p>
+                <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">{expiring.slice(0, 6).map((b) => `${b.item_name} · ${b.batch_no} · ${b.expiry_date} (${b.days_to_expiry}d)`).join('  ·  ')}</p>
+              </div>
+            )}
             <div className="overflow-x-auto">
               <table className="w-full text-sm min-w-[640px]">
                 <thead className="text-left text-xs uppercase tracking-wider text-slate-400 dark:text-slate-500">
@@ -380,7 +441,7 @@ export default function OpsPage() {
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                   {inventory.map((i) => (
                     <tr key={i.id}>
-                      <td className="py-2.5 pr-3 font-semibold text-slate-800 dark:text-slate-200">{i.name} {i.is_low && <span className="ml-1 text-[10px] font-bold bg-red-500/10 border border-red-500/20 text-red-600 dark:text-red-400 rounded-full px-2 py-0.5">LOW</span>}</td>
+                      <td className="py-2.5 pr-3 font-semibold text-slate-800 dark:text-slate-200">{i.name} {i.brand && <span className="block text-[11px] font-normal text-slate-400">{i.brand}</span>} {i.is_low && <span className="ml-1 text-[10px] font-bold bg-red-500/10 border border-red-500/20 text-red-600 dark:text-red-400 rounded-full px-2 py-0.5">LOW</span>}</td>
                       <td className="py-2.5 pr-3 text-slate-500 dark:text-slate-400">{buName(i.business_unit_id)}</td>
                       <td className="py-2.5 pr-3 text-right tabular-nums font-semibold">{i.current_stock} {i.unit}</td>
                       <td className="py-2.5 pr-3 text-right tabular-nums text-slate-500">{i.unit_cost ? money(i.unit_cost) : '—'}</td>
@@ -397,6 +458,7 @@ export default function OpsPage() {
                             {bus.filter((b) => b.bu_id !== i.business_unit_id).map((b) => <option key={b.bu_id} value={b.bu_id}>{b.bu_name}</option>)}
                           </select>
                           <button onClick={() => transferItem(i)} className="text-xs font-semibold text-sky-600 dark:text-sky-400 hover:underline">Transfer</button>
+                          <button onClick={async () => { if (batchItem === i.id) { setBatchItem(null); } else { setBatchItem(i.id); setBatches((await api.modBatches(i.id)).items); } }} className="text-xs font-semibold text-amber-600 dark:text-amber-400 hover:underline">Batches</button>
                           <button onClick={async () => { await api.deleteInventoryItem(i.id); load(); }} className="text-xs font-semibold text-slate-400 hover:underline">Remove</button>
                         </div>
                       </td>
@@ -406,6 +468,27 @@ export default function OpsPage() {
                 </tbody>
               </table>
             </div>
+            {batchItem && (
+              <div className="mt-5 border-t border-slate-100 dark:border-slate-800 pt-4">
+                <h3 className="text-sm font-bold text-slate-800 dark:text-slate-200 mb-3">Batches — {inventory.find((x) => x.id === batchItem)?.name}</h3>
+                <form onSubmit={async (e) => { e.preventDefault(); try { await api.modReceiveBatch(batchItem, { batch_no: batchForm.batch_no, expiry_date: batchForm.expiry_date || undefined, quantity: Number(batchForm.quantity), unit_cost: Number(batchForm.unit_cost) || 0 }); setBatchForm({ batch_no: '', expiry_date: '', quantity: '', unit_cost: '' }); setBatches((await api.modBatches(batchItem)).items); load(); } catch (err) { setError(err.message); } }} className="flex flex-wrap gap-2 mb-3">
+                  <input value={batchForm.batch_no} onChange={(e) => setBatchForm({ ...batchForm, batch_no: e.target.value })} placeholder="Batch / lot no" className="w-40 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm" />
+                  <input type="date" value={batchForm.expiry_date} onChange={(e) => setBatchForm({ ...batchForm, expiry_date: e.target.value })} title="Expiry date" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm" />
+                  <input type="number" value={batchForm.quantity} onChange={(e) => setBatchForm({ ...batchForm, quantity: e.target.value })} placeholder="Qty" className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm" />
+                  <input type="number" value={batchForm.unit_cost} onChange={(e) => setBatchForm({ ...batchForm, unit_cost: e.target.value })} placeholder="Unit cost" className="w-28 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm" />
+                  <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors">Receive batch</button>
+                </form>
+                <ul className="divide-y divide-slate-100 dark:divide-slate-800 text-sm">
+                  {batches.map((b) => (
+                    <li key={b.id} className="py-2 flex justify-between flex-wrap gap-2">
+                      <span className="font-medium">{b.batch_no} <span className="text-slate-400 font-normal">· {b.quantity} left · cost {money(b.unit_cost)}</span></span>
+                      <span className={b.days_to_expiry !== null && b.days_to_expiry <= 30 ? 'text-amber-600 dark:text-amber-400 font-semibold text-xs' : 'text-slate-400 text-xs'}>{b.expiry_date ? `expires ${b.expiry_date} (${b.days_to_expiry}d)` : 'no expiry'}</span>
+                    </li>
+                  ))}
+                  {batches.length === 0 && <li className="py-4 text-center text-slate-400 text-sm">No batches with stock — receive the first batch above</li>}
+                </ul>
+              </div>
+            )}
           </section>
         )}
 
@@ -518,16 +601,24 @@ export default function OpsPage() {
                     <option value="USD">USD</option>
                   </select>
                   {invCreate.currency !== 'MMK' && <input type="number" value={invCreate.exchange_rate} onChange={(e) => setInvCreate({ ...invCreate, exchange_rate: e.target.value })} placeholder="Ks per 1 USD (blank = latest)" title="Exchange rate" className="w-52 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />}
+                  <select value={invCreate.project_id} onChange={(e) => setInvCreate({ ...invCreate, project_id: e.target.value })} title="Link to project (optional)" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                    <option value="">Project…</option>
+                    {projects.map((pr) => <option key={pr.id} value={pr.id}>{pr.name}</option>)}
+                  </select>
                 </div>
                 {invCreate.lines.map((l, idx) => (
                   <div key={idx} className="flex flex-wrap gap-2">
                     <input value={l.description} onChange={(e) => { const lines = [...invCreate.lines]; lines[idx].description = e.target.value; setInvCreate({ ...invCreate, lines }); }} placeholder="Description" className="flex-1 min-w-[180px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3.5 py-2.5 text-sm" />
+                    <select value={l.inventory_item_id} onChange={(e) => { const lines = [...invCreate.lines]; lines[idx].inventory_item_id = e.target.value; setInvCreate({ ...invCreate, lines }); }} title="Stock item (optional — for brand/principal reports)" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-2.5 text-sm max-w-[180px]">
+                      <option value="">Item…</option>
+                      {inventory.map((it) => <option key={it.id} value={it.id}>{it.name}</option>)}
+                    </select>
                     <input type="number" value={l.quantity} onChange={(e) => { const lines = [...invCreate.lines]; lines[idx].quantity = e.target.value; setInvCreate({ ...invCreate, lines }); }} placeholder="Qty" className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
                     <input type="number" value={l.unit_price} onChange={(e) => { const lines = [...invCreate.lines]; lines[idx].unit_price = e.target.value; setInvCreate({ ...invCreate, lines }); }} placeholder="Unit price" className="w-36 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
                   </div>
                 ))}
                 <div className="flex items-center justify-between flex-wrap gap-3">
-                  <button type="button" onClick={() => setInvCreate({ ...invCreate, lines: [...invCreate.lines, { description: '', quantity: 1, unit_price: '' }] })} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">+ Add line</button>
+                  <button type="button" onClick={() => setInvCreate({ ...invCreate, lines: [...invCreate.lines, { description: '', quantity: 1, unit_price: '', inventory_item_id: '' }] })} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">+ Add line</button>
                   <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Create invoice</button>
                 </div>
               </form>
@@ -574,6 +665,20 @@ export default function OpsPage() {
                 {salesCustomers.length === 0 && <li className="py-6 text-center text-sm text-slate-400">No customers yet</li>}
               </ul>
             </section>
+            {principalReport && principalReport.items.length > 0 && (
+              <section className={`${GLASS} p-6`}>
+                <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-1.5">Sales by Principal / Brand</h2>
+                <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">From invoice lines linked to stock items. Total: {money(principalReport.total_revenue)}</p>
+                <table className="w-full text-sm min-w-[480px]">
+                  <thead className="text-left text-xs uppercase tracking-wider text-slate-400"><tr><th className="py-2 pr-3">Principal</th><th className="py-2 pr-3">Brand</th><th className="py-2 pr-3 text-right">Qty</th><th className="py-2 text-right">Revenue (MMK)</th></tr></thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {principalReport.items.map((g, ix) => (
+                      <tr key={ix}><td className="py-2 pr-3 font-medium">{g.principal}</td><td className="py-2 pr-3">{g.brand}</td><td className="py-2 pr-3 text-right tabular-nums">{g.quantity}</td><td className="py-2 text-right tabular-nums font-semibold">{money(g.revenue)}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+              </section>
+            )}
           </div>
         )}
 
@@ -828,6 +933,219 @@ export default function OpsPage() {
             ))}
           </section>
         )}
+
+        {tab === 'projects' && (
+          <div className="space-y-6">
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-4">New Project / Job</h2>
+              <form onSubmit={async (e) => { e.preventDefault(); if (!buId) { setError('Select a specific business unit first'); return; } try { await api.modCreateProject({ business_unit_id: Number(buId), name: projForm.name, project_type: projForm.project_type, customer_id: projForm.customer_id ? Number(projForm.customer_id) : undefined }); setProjForm({ name: '', project_type: 'general', customer_id: '' }); load(); } catch (err) { setError(err.message); } }} className="flex flex-wrap gap-3">
+                <input value={projForm.name} onChange={(e) => setProjForm({ ...projForm, name: e.target.value })} placeholder="Project name" className="flex-1 min-w-[220px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <select value={projForm.project_type} onChange={(e) => setProjForm({ ...projForm, project_type: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                  <option value="general">General</option><option value="contract">Contract</option><option value="content">Content / Media</option><option value="shipment">Logistics job</option><option value="order">Furniture order</option><option value="development">Property development</option>
+                </select>
+                <select value={projForm.customer_id} onChange={(e) => setProjForm({ ...projForm, customer_id: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                  <option value="">Customer…</option>
+                  {salesCustomers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+                <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Create project</button>
+              </form>
+            </section>
+            <section className={`${GLASS} p-6`}>
+              <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                {projects.map((pr) => (
+                  <li key={pr.id} className="py-3">
+                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                      <div>
+                        <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">{pr.name} <span className="font-normal text-slate-400">· {pr.project_type}{pr.customer_name ? ` · ${pr.customer_name}` : ''} · {pr.bu_name}</span></p>
+                        {projPL[pr.id] && <p className="text-xs text-slate-500 mt-0.5">Revenue {money(projPL[pr.id].revenue)} · Costs {money(projPL[pr.id].total_costs)} (PO {money(projPL[pr.id].po_costs)} + expenses {money(projPL[pr.id].expense_costs)}) · <strong className={projPL[pr.id].profit >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}>Profit {money(projPL[pr.id].profit)}{projPL[pr.id].margin_pct !== null ? ` (${Number(projPL[pr.id].margin_pct).toFixed(0)}%)` : ''}</strong></p>}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[pr.status] || 'text-slate-500 border-slate-200'}`}>{pr.status}</span>
+                        <button onClick={async () => { try { const pl = await api.modProjectPL(pr.id); setProjPL((m) => ({ ...m, [pr.id]: pl })); } catch (err) { setError(err.message); } }} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">P&L</button>
+                        {pr.status === 'active' && <button onClick={async () => { await api.modProjectStatus(pr.id, 'completed'); load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Complete</button>}
+                      </div>
+                    </div>
+                  </li>
+                ))}
+                {projects.length === 0 && <li className="py-8 text-center text-sm text-slate-400">No projects yet — link invoices, POs and expenses to a project to see its profit</li>}
+              </ul>
+            </section>
+          </div>
+        )}
+
+        {tab === 'shipments' && (
+          <div className="space-y-6">
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-4">New Shipment</h2>
+              <form onSubmit={async (e) => { e.preventDefault(); if (!buId) { setError('Select a specific business unit first'); return; } try { await api.modCreateShipment({ business_unit_id: Number(buId), origin: shipForm.origin, destination: shipForm.destination, vehicle_no: shipForm.vehicle_no || undefined, driver_name: shipForm.driver_name || undefined, shipment_date: shipForm.shipment_date, freight_charge: Number(shipForm.freight_charge) || 0, fuel_cost: Number(shipForm.fuel_cost) || 0, toll_fees: Number(shipForm.toll_fees) || 0, driver_fees: Number(shipForm.driver_fees) || 0, customer_id: shipForm.customer_id ? Number(shipForm.customer_id) : undefined }); setShipForm({ origin: '', destination: '', vehicle_no: '', driver_name: '', shipment_date: new Date().toISOString().slice(0, 10), freight_charge: '', fuel_cost: '', toll_fees: '', driver_fees: '', customer_id: '' }); load(); } catch (err) { setError(err.message); } }} className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <input value={shipForm.origin} onChange={(e) => setShipForm({ ...shipForm, origin: e.target.value })} placeholder="Origin" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <input value={shipForm.destination} onChange={(e) => setShipForm({ ...shipForm, destination: e.target.value })} placeholder="Destination" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <input value={shipForm.vehicle_no} onChange={(e) => setShipForm({ ...shipForm, vehicle_no: e.target.value })} placeholder="Vehicle no" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <input value={shipForm.driver_name} onChange={(e) => setShipForm({ ...shipForm, driver_name: e.target.value })} placeholder="Driver" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <input type="date" value={shipForm.shipment_date} onChange={(e) => setShipForm({ ...shipForm, shipment_date: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <select value={shipForm.customer_id} onChange={(e) => setShipForm({ ...shipForm, customer_id: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                  <option value="">Customer…</option>
+                  {salesCustomers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+                <input type="number" value={shipForm.freight_charge} onChange={(e) => setShipForm({ ...shipForm, freight_charge: e.target.value })} placeholder="Freight charge" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <input type="number" value={shipForm.fuel_cost} onChange={(e) => setShipForm({ ...shipForm, fuel_cost: e.target.value })} placeholder="Fuel cost" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <input type="number" value={shipForm.toll_fees} onChange={(e) => setShipForm({ ...shipForm, toll_fees: e.target.value })} placeholder="Toll fees" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <input type="number" value={shipForm.driver_fees} onChange={(e) => setShipForm({ ...shipForm, driver_fees: e.target.value })} placeholder="Driver fees" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Add shipment</button>
+              </form>
+            </section>
+            <section className={`${GLASS} p-6`}>
+              <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                {shipments.map((sh) => (
+                  <li key={sh.id} className="py-3 flex items-center justify-between gap-3 flex-wrap">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">{sh.origin} → {sh.destination} <span className="font-normal text-slate-400">· {sh.shipment_date}{sh.vehicle_no ? ` · ${sh.vehicle_no}` : ''}{sh.driver_name ? ` · ${sh.driver_name}` : ''}</span></p>
+                      <p className="text-xs text-slate-400">Freight {money(sh.freight_charge)} · Costs {money(sh.total_costs)} · <strong className={sh.profit >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}>Profit {money(sh.profit)}</strong></p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[sh.status] || 'text-slate-500 border-slate-200'}`}>{sh.status}</span>
+                      {sh.status === 'planned' && <button onClick={async () => { await api.modShipmentStatus(sh.id, 'in_transit'); load(); }} className="text-xs font-semibold text-sky-600 dark:text-sky-400 hover:underline">Start trip</button>}
+                      {sh.status === 'in_transit' && <button onClick={async () => { await api.modShipmentStatus(sh.id, 'delivered'); load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Delivered</button>}
+                    </div>
+                  </li>
+                ))}
+                {shipments.length === 0 && <li className="py-8 text-center text-sm text-slate-400">No shipments yet</li>}
+              </ul>
+            </section>
+          </div>
+        )}
+
+        {tab === 'production' && (
+          <div className="space-y-6">
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-4">Bill of Materials (recipe per finished item)</h2>
+              <form onSubmit={async (e) => { e.preventDefault(); if (!buId) { setError('Select a specific business unit first'); return; } try { await api.modCreateBom({ business_unit_id: Number(buId), finished_item_id: Number(bomForm.finished_item_id), name: bomForm.name || undefined, components: bomForm.components.filter((c) => c.component_item_id).map((c) => ({ component_item_id: Number(c.component_item_id), quantity_per_unit: Number(c.quantity_per_unit) || 0 })) }); setBomForm({ finished_item_id: '', name: '', components: [{ component_item_id: '', quantity_per_unit: '' }] }); load(); } catch (err) { setError(err.message); } }} className="space-y-3">
+                <div className="flex flex-wrap gap-3">
+                  <select value={bomForm.finished_item_id} onChange={(e) => setBomForm({ ...bomForm, finished_item_id: e.target.value })} className="flex-1 min-w-[200px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                    <option value="">Finished item…</option>
+                    {inventory.map((it) => <option key={it.id} value={it.id}>{it.name}</option>)}
+                  </select>
+                  <input value={bomForm.name} onChange={(e) => setBomForm({ ...bomForm, name: e.target.value })} placeholder="BOM name (optional)" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                </div>
+                {bomForm.components.map((c, ix) => (
+                  <div key={ix} className="flex flex-wrap gap-2">
+                    <select value={c.component_item_id} onChange={(e) => { const comps = [...bomForm.components]; comps[ix].component_item_id = e.target.value; setBomForm({ ...bomForm, components: comps }); }} className="flex-1 min-w-[200px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                      <option value="">Component item…</option>
+                      {inventory.map((it) => <option key={it.id} value={it.id}>{it.name}</option>)}
+                    </select>
+                    <input type="number" value={c.quantity_per_unit} onChange={(e) => { const comps = [...bomForm.components]; comps[ix].quantity_per_unit = e.target.value; setBomForm({ ...bomForm, components: comps }); }} placeholder="Qty per unit" className="w-36 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                  </div>
+                ))}
+                <div className="flex items-center justify-between flex-wrap gap-3">
+                  <button type="button" onClick={() => setBomForm({ ...bomForm, components: [...bomForm.components, { component_item_id: '', quantity_per_unit: '' }] })} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">+ Add component</button>
+                  <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Save BOM</button>
+                </div>
+              </form>
+              <ul className="divide-y divide-slate-100 dark:divide-slate-800 mt-4">
+                {boms.map((b) => (
+                  <li key={b.id} className="py-2.5 text-sm"><span className="font-semibold text-slate-800 dark:text-slate-200">{b.finished_item_name}</span> <span className="text-slate-400">= {b.components.map((c) => `${c.component_name} ×${c.quantity_per_unit}`).join(', ')}</span></li>
+                ))}
+                {boms.length === 0 && <li className="py-4 text-center text-sm text-slate-400">No BOMs yet</li>}
+              </ul>
+            </section>
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-4">Production Orders</h2>
+              <form onSubmit={async (e) => { e.preventDefault(); try { await api.modCreateProduction({ bom_id: Number(prodForm.bom_id), quantity: Number(prodForm.quantity), labour_cost: Number(prodForm.labour_cost) || 0, overhead_cost: Number(prodForm.overhead_cost) || 0 }); setProdForm({ bom_id: '', quantity: '', labour_cost: '', overhead_cost: '' }); load(); } catch (err) { setError(err.message); } }} className="flex flex-wrap gap-3 mb-5">
+                <select value={prodForm.bom_id} onChange={(e) => setProdForm({ ...prodForm, bom_id: e.target.value })} className="flex-1 min-w-[200px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                  <option value="">Select BOM…</option>
+                  {boms.map((b) => <option key={b.id} value={b.id}>{b.finished_item_name}{b.name ? ` — ${b.name}` : ''}</option>)}
+                </select>
+                <input type="number" value={prodForm.quantity} onChange={(e) => setProdForm({ ...prodForm, quantity: e.target.value })} placeholder="Qty to produce" className="w-36 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <input type="number" value={prodForm.labour_cost} onChange={(e) => setProdForm({ ...prodForm, labour_cost: e.target.value })} placeholder="Labour cost" className="w-36 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <input type="number" value={prodForm.overhead_cost} onChange={(e) => setProdForm({ ...prodForm, overhead_cost: e.target.value })} placeholder="Overhead" className="w-36 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Plan production</button>
+              </form>
+              <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                {prodOrders.map((o) => (
+                  <li key={o.id} className="py-3 flex items-center justify-between gap-3 flex-wrap">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">{o.finished_item_name} ×{o.quantity} <span className="font-normal text-slate-400">· {o.production_date}</span></p>
+                      {o.status === 'completed' && <p className="text-xs text-slate-400">Materials {money(o.materials_cost)} · Labour {money(o.labour_cost)} · Overhead {money(o.overhead_cost)} · <strong>Unit cost {money(o.unit_cost)}</strong></p>}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[o.status] || 'text-slate-500 border-slate-200'}`}>{o.status}</span>
+                      {o.status === 'planned' && <button onClick={async () => { try { await api.modCompleteProduction(o.id); setNotice('Production completed — finished goods stocked at full cost.'); setTimeout(() => setNotice(''), 4000); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Complete</button>}
+                    </div>
+                  </li>
+                ))}
+                {prodOrders.length === 0 && <li className="py-8 text-center text-sm text-slate-400">No production orders yet</li>}
+              </ul>
+            </section>
+          </div>
+        )}
+
+        {tab === 'properties' && (
+          <div className="space-y-6">
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-4">Property Units</h2>
+              <form onSubmit={async (e) => { e.preventDefault(); if (!buId) { setError('Select a specific business unit first'); return; } try { await api.modCreateUnit({ business_unit_id: Number(buId), development: unitForm.development || undefined, unit_no: unitForm.unit_no, unit_type: unitForm.unit_type, size_sqft: unitForm.size_sqft ? Number(unitForm.size_sqft) : undefined, asking_price: unitForm.asking_price ? Number(unitForm.asking_price) : undefined }); setUnitForm({ development: '', unit_no: '', unit_type: 'apartment', size_sqft: '', asking_price: '' }); load(); } catch (err) { setError(err.message); } }} className="flex flex-wrap gap-3 mb-5">
+                <input value={unitForm.development} onChange={(e) => setUnitForm({ ...unitForm, development: e.target.value })} placeholder="Development / building" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <input value={unitForm.unit_no} onChange={(e) => setUnitForm({ ...unitForm, unit_no: e.target.value })} placeholder="Unit no" className="w-32 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <select value={unitForm.unit_type} onChange={(e) => setUnitForm({ ...unitForm, unit_type: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                  <option value="apartment">Apartment</option><option value="condo">Condo</option><option value="house">House</option><option value="land">Land</option><option value="shop">Shop</option><option value="office">Office</option>
+                </select>
+                <input type="number" value={unitForm.size_sqft} onChange={(e) => setUnitForm({ ...unitForm, size_sqft: e.target.value })} placeholder="Sq ft" className="w-28 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <input type="number" value={unitForm.asking_price} onChange={(e) => setUnitForm({ ...unitForm, asking_price: e.target.value })} placeholder="Asking price" className="w-40 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Add unit</button>
+              </form>
+              <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                {units.map((u) => (
+                  <li key={u.id} className="py-3">
+                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                      <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">{u.development ? `${u.development} · ` : ''}Unit {u.unit_no} <span className="font-normal text-slate-400">· {u.unit_type}{u.size_sqft ? ` · ${u.size_sqft} sqft` : ''} · {money(u.asking_price)}</span></p>
+                      <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[u.status] || 'text-slate-500 border-slate-200'}`}>{u.status}</span>
+                    </div>
+                    {u.status === 'available' && (
+                      <form onSubmit={async (e) => { e.preventDefault(); const f = sellForms[u.id] || {}; try { const r = await api.modSellUnit(u.id, { customer_id: Number(f.customer_id), downpayment_pct: Number(f.down) || 0, installments: Number(f.months) || 0, first_due_date: f.first_due || undefined }); setNotice(`Sold via ${r.invoice_no}${r.installments.length ? ` — ${r.installments.length} installments scheduled` : ''}. Send the invoice to book the sale.`); setTimeout(() => setNotice(''), 5000); load(); } catch (err) { setError(err.message); } }} className="flex flex-wrap gap-2 mt-2">
+                        <select value={(sellForms[u.id] || {}).customer_id || ''} onChange={(e) => setSellForms((m) => ({ ...m, [u.id]: { ...(m[u.id] || {}), customer_id: e.target.value } }))} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                          <option value="">Buyer…</option>
+                          {salesCustomers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                        </select>
+                        <input type="number" value={(sellForms[u.id] || {}).down || ''} onChange={(e) => setSellForms((m) => ({ ...m, [u.id]: { ...(m[u.id] || {}), down: e.target.value } }))} placeholder="Downpayment %" className="w-32 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                        <input type="number" value={(sellForms[u.id] || {}).months || ''} onChange={(e) => setSellForms((m) => ({ ...m, [u.id]: { ...(m[u.id] || {}), months: e.target.value } }))} placeholder="Monthly installments" className="w-40 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                        <input type="date" value={(sellForms[u.id] || {}).first_due || ''} onChange={(e) => setSellForms((m) => ({ ...m, [u.id]: { ...(m[u.id] || {}), first_due: e.target.value } }))} title="First due date" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                        <button type="submit" className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-2 rounded-lg transition-colors">Sell unit</button>
+                      </form>
+                    )}
+                  </li>
+                ))}
+                {units.length === 0 && <li className="py-8 text-center text-sm text-slate-400">No property units yet</li>}
+              </ul>
+            </section>
+            <section className={`${GLASS} p-6`}>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-4">Rental Leases</h2>
+              <form onSubmit={async (e) => { e.preventDefault(); if (!buId) { setError('Select a specific business unit first'); return; } try { await api.modCreateLease({ business_unit_id: Number(buId), unit_id: Number(leaseForm.unit_id), tenant_id: Number(leaseForm.tenant_id), monthly_rent: Number(leaseForm.monthly_rent), deposit_amount: Number(leaseForm.deposit_amount) || 0, start_date: leaseForm.start_date }); setLeaseForm({ unit_id: '', tenant_id: '', monthly_rent: '', deposit_amount: '', start_date: new Date().toISOString().slice(0, 10) }); load(); } catch (err) { setError(err.message); } }} className="flex flex-wrap gap-3 mb-5">
+                <select value={leaseForm.unit_id} onChange={(e) => setLeaseForm({ ...leaseForm, unit_id: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                  <option value="">Unit…</option>
+                  {units.filter((u) => u.status === 'available').map((u) => <option key={u.id} value={u.id}>{u.development ? `${u.development} · ` : ''}{u.unit_no}</option>)}
+                </select>
+                <select value={leaseForm.tenant_id} onChange={(e) => setLeaseForm({ ...leaseForm, tenant_id: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+                  <option value="">Tenant…</option>
+                  {salesCustomers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+                <input type="number" value={leaseForm.monthly_rent} onChange={(e) => setLeaseForm({ ...leaseForm, monthly_rent: e.target.value })} placeholder="Monthly rent" className="w-36 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <input type="number" value={leaseForm.deposit_amount} onChange={(e) => setLeaseForm({ ...leaseForm, deposit_amount: e.target.value })} placeholder="Deposit" className="w-32 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <input type="date" value={leaseForm.start_date} onChange={(e) => setLeaseForm({ ...leaseForm, start_date: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
+                <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Start lease</button>
+              </form>
+              <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                {leases.map((l) => (
+                  <li key={l.id} className="py-3 flex items-center justify-between gap-3 flex-wrap">
+                    <p className="text-sm"><span className="font-semibold text-slate-800 dark:text-slate-200">{l.development ? `${l.development} · ` : ''}Unit {l.unit_no}</span> <span className="text-slate-400">· {l.tenant_name} · {money(l.monthly_rent)}/month · since {l.start_date}{l.last_billed_period ? ` · billed to ${l.last_billed_period}` : ''}</span></p>
+                    {l.status === 'active' && <button onClick={async () => { try { const r = await api.modBillLease(l.id); setNotice(`Rent invoice ${r.invoice_no} created for ${r.period} (draft — send it from Invoices).`); setTimeout(() => setNotice(''), 5000); load(); } catch (err) { setError(err.message); } }} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">Bill this month</button>}
+                  </li>
+                ))}
+                {leases.length === 0 && <li className="py-6 text-center text-sm text-slate-400">No leases yet</li>}
+              </ul>
+            </section>
+          </div>
+        )}
+
         <Footer />
       </main>
     </div>
