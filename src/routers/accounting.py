@@ -15,12 +15,12 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from src.accounting_templates import (
-    DEFAULT_POSTING_RULES, EXPENSE_CATEGORY_ACCOUNTS, TEMPLATE_TYPES,
-    template_accounts,
+    DEFAULT_POSTING_RULES, EXPENSE_CATEGORY_ACCOUNTS, TEMPLATE_LABELS,
+    TEMPLATE_TYPES, template_accounts,
 )
 from src.auth import get_current_user, require_roles
 from src.database import get_db
@@ -54,10 +54,48 @@ def bu_or_404(db: Session, bu_id: int) -> BusinessUnit:
     return bu
 
 
+def scoped_bu_id(user: User) -> Optional[int]:
+    """The BU an accountant is pinned to, or None when the caller is
+    group-wide: Chairman/HO always are, and so are legacy accountants
+    created before per-BU assignment existed (business_unit_id NULL) —
+    they keep the group access they have always had rather than being
+    locked out of the books mid-flight."""
+    if user.role == "Accountant" and user.business_unit_id:
+        return user.business_unit_id
+    return None
+
+
 def check_bu_access(user: User, bu_id: int) -> None:
-    """CEOs only ever touch their own BU; accounting roles see all BUs."""
+    """CEOs only ever touch their own BU; a BU-assigned accountant is
+    pinned to their BU; Chairman/HO and legacy accountants see all BUs."""
     if user.role == "CEO" and user.business_unit_id != bu_id:
         raise HTTPException(403, "Not your business unit")
+    scope = scoped_bu_id(user)
+    if scope is not None and scope != bu_id:
+        raise HTTPException(403, "Accountants can only access their assigned business unit")
+
+
+def effective_bu_id(user: User, bu_id: Optional[int]) -> int:
+    """Resolve which BU an endpoint acts on. A BU-assigned accountant is
+    forced to their own BU: naming another is a 403, naming none means
+    theirs. Everyone else must name one."""
+    scope = scoped_bu_id(user)
+    if scope is not None:
+        if bu_id is not None and bu_id != scope:
+            raise HTTPException(403, "Accountants can only access their assigned business unit")
+        return scope
+    if bu_id is None:
+        raise HTTPException(400, "business_unit_id is required")
+    return bu_id
+
+
+def require_group_access(user: User) -> None:
+    """Group-level surfaces (consolidated reports, BU comparison,
+    intercompany, the group finance summary) add up every BU's numbers —
+    a BU-assigned accountant must not see other BUs' figures through
+    them, so those endpoints are head-office/legacy-accountant only."""
+    if scoped_bu_id(user) is not None:
+        raise HTTPException(403, "Group-level views are restricted to head office")
 
 
 def ensure_period_open(db: Session, bu_id: int, d: date) -> None:
@@ -267,6 +305,35 @@ def _reverse_entry(db: Session, entry: JournalEntry, user_id: Optional[int]) -> 
 
 # ---------------------------------------------------------------- templates & CoA
 
+@router.get("/business-units")
+def list_business_units(user: User = Depends(require_accounting), db: Session = Depends(get_db)):
+    """The BU picker for the Accounting page — the lightweight alternative
+    to the Chairman/HO-only admin overview the page used before (which
+    left accountants with an empty dropdown and no data at all). Both
+    id/bu_id and name/bu_name spellings are returned because the page's
+    main picker and its intercompany selects each use one of them.
+    `scope` tells the page whether the caller is group-wide ("group") or
+    pinned to one BU ("bu") so group-only tabs can be hidden.
+    Scoped to the caller: a BU-assigned accountant sees only their BU."""
+    scope = scoped_bu_id(user)
+    q = db.query(BusinessUnit)
+    if scope is not None:
+        q = q.filter(BusinessUnit.id == scope)
+    counts = dict(db.query(Account.business_unit_id, func.count(Account.id))
+                  .group_by(Account.business_unit_id).all())
+    items = []
+    for bu in q.order_by(BusinessUnit.id).all():
+        n = counts.get(bu.id, 0)
+        items.append({
+            "bu_id": bu.id, "id": bu.id,
+            "bu_name": bu.name, "name": bu.name, "code": bu.code,
+            "nature": bu.nature,
+            "nature_label": TEMPLATE_LABELS.get(bu.nature) if bu.nature else None,
+            "account_count": n, "has_books": n > 0,
+        })
+    return {"items": items, "scope": "bu" if scope is not None else "group"}
+
+
 @router.get("/templates")
 def list_templates(user: User = Depends(require_accounting)):
     return {"templates": TEMPLATE_TYPES}
@@ -276,6 +343,7 @@ def list_templates(user: User = Depends(require_accounting)):
 def provision_bu(bu_id: int, template: str = "retail",
                  user: User = Depends(require_accounting), db: Session = Depends(get_db)):
     """Clone a CoA template into a BU + seed group posting rules. Idempotent."""
+    check_bu_access(user, bu_id)
     bu_or_404(db, bu_id)
     if template not in TEMPLATE_TYPES:
         raise HTTPException(400, f"template must be one of {TEMPLATE_TYPES}")
@@ -323,6 +391,7 @@ class AccountIn(BaseModel):
 @router.post("/accounts")
 def create_account(payload: AccountIn, user: User = Depends(require_accounting),
                    db: Session = Depends(get_db)):
+    check_bu_access(user, payload.business_unit_id)
     bu_or_404(db, payload.business_unit_id)
     if payload.account_type not in ("asset", "liability", "equity", "income", "expense"):
         raise HTTPException(400, "Invalid account_type")
@@ -348,6 +417,7 @@ def update_account(account_id: int, payload: AccountUpdate,
     acc = db.query(Account).filter(Account.id == account_id).first()
     if not acc:
         raise HTTPException(404, "Account not found")
+    check_bu_access(user, acc.business_unit_id)
     if payload.name is not None:
         acc.name = payload.name
     if payload.is_active is not None:
@@ -377,6 +447,7 @@ class JournalIn(BaseModel):
 @router.post("/journal")
 def create_journal(payload: JournalIn, user: User = Depends(require_accounting),
                    db: Session = Depends(get_db)):
+    check_bu_access(user, payload.business_unit_id)
     bu_or_404(db, payload.business_unit_id)
     lines = [ln.model_dump() for ln in payload.lines]
     e = create_entry(db, payload.business_unit_id, payload.entry_date,
@@ -399,6 +470,7 @@ def list_journal(business_unit_id: int, period: Optional[str] = None,
                  status: Optional[str] = None, source: Optional[str] = None,
                  user: User = Depends(require_accounting), db: Session = Depends(get_db)):
     period = validate_period(period)
+    check_bu_access(user, business_unit_id)
     q = db.query(JournalEntry).filter(JournalEntry.business_unit_id == business_unit_id)
     if status:
         q = q.filter(JournalEntry.status == status)
@@ -416,6 +488,7 @@ def get_journal(entry_id: int, user: User = Depends(require_accounting),
     e = db.query(JournalEntry).filter(JournalEntry.id == entry_id).first()
     if not e:
         raise HTTPException(404, "Journal entry not found")
+    check_bu_access(user, e.business_unit_id)
     return serialize_entry(db, e)
 
 
@@ -425,6 +498,7 @@ def post_journal(entry_id: int, user: User = Depends(require_accounting),
     e = db.query(JournalEntry).filter(JournalEntry.id == entry_id).first()
     if not e:
         raise HTTPException(404, "Journal entry not found")
+    check_bu_access(user, e.business_unit_id)
     if e.status == "posted":
         raise HTTPException(400, "Entry already posted")
     approval = getattr(e, "approval_status", None) or "not_required"
@@ -484,6 +558,7 @@ def reverse_journal(entry_id: int, user: User = Depends(require_accounting),
     e = db.query(JournalEntry).filter(JournalEntry.id == entry_id).first()
     if not e:
         raise HTTPException(404, "Journal entry not found")
+    check_bu_access(user, e.business_unit_id)
     if e.status != "posted":
         raise HTTPException(400, "Only posted entries can be reversed")
     if e.reversed_by_id:
@@ -500,6 +575,7 @@ def delete_journal(entry_id: int, user: User = Depends(require_accounting),
     e = db.query(JournalEntry).filter(JournalEntry.id == entry_id).first()
     if not e:
         raise HTTPException(404, "Journal entry not found")
+    check_bu_access(user, e.business_unit_id)
     if e.status == "posted":
         raise HTTPException(400, "Posted entries cannot be deleted — reverse instead")
     db.delete(e)
@@ -666,6 +742,7 @@ def consolidated_pl(period: Optional[str] = None, user: User = Depends(require_a
                     db: Session = Depends(get_db)):
     """Group P&L: every BU summed by the shared account-code standard."""
     period = validate_period(period)
+    require_group_access(user)
     income: dict[str, Decimal] = {}
     expense: dict[str, Decimal] = {}
     names: dict[str, str] = {}
@@ -694,6 +771,7 @@ def consolidated_bs(period: Optional[str] = None, user: User = Depends(require_a
     (2180, liability) up to the smaller side — group-internal balances are
     not real assets/liabilities of the group."""
     period = validate_period(period)
+    require_group_access(user)
     groups: dict[str, dict[str, Decimal]] = {"asset": {}, "liability": {}, "equity": {}}
     names: dict[str, str] = {}
     retained = ZERO
@@ -741,6 +819,7 @@ def bu_comparison(period: Optional[str] = None, user: User = Depends(require_acc
                   db: Session = Depends(get_db)):
     """Per-BU P&L for a period — the group scoreboard."""
     period = validate_period(period)
+    require_group_access(user)
     per_bu: dict[int, dict[str, Decimal]] = {}
     for line, acc, e in _all_posted_lines(db, _period_end(period)):
         if period and period_of(e.entry_date) != period:
@@ -765,6 +844,7 @@ def bu_comparison(period: Optional[str] = None, user: User = Depends(require_acc
 @router.get("/periods")
 def list_periods(business_unit_id: int, user: User = Depends(require_accounting),
                  db: Session = Depends(get_db)):
+    check_bu_access(user, business_unit_id)
     rows = db.query(FiscalPeriod).filter(
         FiscalPeriod.business_unit_id == business_unit_id).order_by(FiscalPeriod.period.desc()).all()
     return {"items": [{"period": r.period, "status": r.status,
@@ -780,6 +860,7 @@ class PeriodAction(BaseModel):
 @router.post("/periods/close")
 def close_period(payload: PeriodAction, user: User = Depends(require_accounting),
                  db: Session = Depends(get_db)):
+    check_bu_access(user, payload.business_unit_id)
     row = db.query(FiscalPeriod).filter(
         FiscalPeriod.business_unit_id == payload.business_unit_id,
         FiscalPeriod.period == payload.period).first()
@@ -811,7 +892,16 @@ def reopen_period(payload: PeriodAction, user: User = Depends(require_admin),
 def list_posting_rules(business_unit_id: Optional[int] = None,
                        user: User = Depends(require_accounting), db: Session = Depends(get_db)):
     q = db.query(PostingRule)
-    if business_unit_id is not None:
+    scope = scoped_bu_id(user)
+    if scope is not None:
+        # A BU-assigned accountant naming no BU gets their own rules plus
+        # the shared group rules (the Setup tab resolves effective rules
+        # from exactly those two scopes); another BU's rules stay hidden.
+        if business_unit_id is not None and business_unit_id != scope:
+            raise HTTPException(403, "Accountants can only access their assigned business unit")
+        q = q.filter(or_(PostingRule.business_unit_id == scope,
+                         PostingRule.business_unit_id == None))  # noqa: E711
+    elif business_unit_id is not None:
         q = q.filter(PostingRule.business_unit_id == business_unit_id)
     rows = q.all()
     return {"items": [{"id": r.id, "business_unit_id": r.business_unit_id,
@@ -832,6 +922,11 @@ class PostingRuleIn(BaseModel):
 @router.put("/posting-rules")
 def upsert_posting_rule(payload: PostingRuleIn, user: User = Depends(require_accounting),
                         db: Session = Depends(get_db)):
+    scope = scoped_bu_id(user)
+    if scope is not None and payload.business_unit_id != scope:
+        # Covers both another BU's override and the group rule (None):
+        # either would reach beyond the accountant's own books.
+        raise HTTPException(403, "Accountants can only change posting rules for their assigned business unit")
     row = db.query(PostingRule).filter(
         PostingRule.business_unit_id == payload.business_unit_id,
         PostingRule.source_field == payload.source_field).first()
@@ -861,6 +956,7 @@ async def opening_balance(business_unit_id: int, as_of: date,
 
     from openpyxl import load_workbook
 
+    check_bu_access(user, business_unit_id)
     bu_or_404(db, business_unit_id)
     ensure_period_open(db, business_unit_id, as_of)
     content = await file.read()
@@ -949,6 +1045,7 @@ class FixedAssetIn(BaseModel):
 @router.get("/fixed-assets")
 def list_fixed_assets(business_unit_id: int, user: User = Depends(require_accounting),
                       db: Session = Depends(get_db)):
+    check_bu_access(user, business_unit_id)
     rows = db.query(FixedAsset).filter(
         FixedAsset.business_unit_id == business_unit_id).order_by(FixedAsset.purchase_date).all()
     return {"items": [serialize_asset(a) for a in rows]}
@@ -957,6 +1054,7 @@ def list_fixed_assets(business_unit_id: int, user: User = Depends(require_accoun
 @router.post("/fixed-assets")
 def create_fixed_asset(payload: FixedAssetIn, user: User = Depends(require_accounting),
                        db: Session = Depends(get_db)):
+    check_bu_access(user, payload.business_unit_id)
     bu_or_404(db, payload.business_unit_id)
     a = FixedAsset(**payload.model_dump(), created_by_id=user.id)
     db.add(a)
@@ -971,6 +1069,7 @@ def dispose_fixed_asset(asset_id: int, user: User = Depends(require_accounting),
     a = db.query(FixedAsset).filter(FixedAsset.id == asset_id).first()
     if not a:
         raise HTTPException(404, "Asset not found")
+    check_bu_access(user, a.business_unit_id)
     a.status = "disposed"
     db.commit()
     return serialize_asset(a)
@@ -986,6 +1085,7 @@ def run_depreciation(payload: DepreciateIn, user: User = Depends(require_account
                      db: Session = Depends(get_db)):
     """One month of straight-line depreciation for every active asset that
     has not been depreciated for this period yet. Idempotent per period."""
+    check_bu_access(user, payload.business_unit_id)
     assets = db.query(FixedAsset).filter(
         FixedAsset.business_unit_id == payload.business_unit_id,
         FixedAsset.status == "active").all()
@@ -1049,6 +1149,7 @@ class BankAccountIn(BaseModel):
 @router.get("/bank-accounts")
 def list_bank_accounts(business_unit_id: int, user: User = Depends(require_accounting),
                        db: Session = Depends(get_db)):
+    check_bu_access(user, business_unit_id)
     rows = db.query(BankAccount).filter(
         BankAccount.business_unit_id == business_unit_id,
         BankAccount.is_active == True).all()  # noqa: E712
@@ -1058,6 +1159,7 @@ def list_bank_accounts(business_unit_id: int, user: User = Depends(require_accou
 @router.post("/bank-accounts")
 def create_bank_account(payload: BankAccountIn, user: User = Depends(require_accounting),
                         db: Session = Depends(get_db)):
+    check_bu_access(user, payload.business_unit_id)
     bu_or_404(db, payload.business_unit_id)
     b = BankAccount(**payload.model_dump(), created_by_id=user.id)
     db.add(b)
@@ -1079,6 +1181,7 @@ def list_bank_txns(bank_id: int, user: User = Depends(require_accounting),
     b = db.query(BankAccount).filter(BankAccount.id == bank_id).first()
     if not b:
         raise HTTPException(404, "Bank account not found")
+    check_bu_access(user, b.business_unit_id)
     rows = sorted(b.transactions, key=lambda t: (t.txn_date, t.id))
     return {"items": [{"id": t.id, "txn_date": t.txn_date.isoformat(),
                        "description": t.description, "deposit": fmt(t.deposit),
@@ -1092,6 +1195,7 @@ def add_bank_txn(bank_id: int, payload: BankTxnIn, user: User = Depends(require_
     b = db.query(BankAccount).filter(BankAccount.id == bank_id).first()
     if not b:
         raise HTTPException(404, "Bank account not found")
+    check_bu_access(user, b.business_unit_id)
     t = BankTransaction(bank_account_id=bank_id, txn_date=payload.txn_date,
                         description=payload.description,
                         deposit=Decimal(str(payload.deposit)),
@@ -1113,6 +1217,9 @@ def set_reconciled(txn_id: int, payload: ReconcileIn, user: User = Depends(requi
     t = db.query(BankTransaction).filter(BankTransaction.id == txn_id).first()
     if not t:
         raise HTTPException(404, "Transaction not found")
+    bank = db.query(BankAccount).filter(BankAccount.id == t.bank_account_id).first()
+    if bank:
+        check_bu_access(user, bank.business_unit_id)
     t.is_reconciled = payload.is_reconciled
     db.commit()
     return {"ok": True}
@@ -1125,6 +1232,7 @@ def bank_reconciliation(bank_id: int, user: User = Depends(require_accounting),
     b = db.query(BankAccount).filter(BankAccount.id == bank_id).first()
     if not b:
         raise HTTPException(404, "Bank account not found")
+    check_bu_access(user, b.business_unit_id)
     info = serialize_bank_account(db, b)
     ledger_balance = None
     if b.account_id:
@@ -1152,6 +1260,7 @@ def opening_balance_template(business_unit_id: int, user: User = Depends(require
     from fastapi.responses import StreamingResponse
     from openpyxl import Workbook
 
+    check_bu_access(user, business_unit_id)
     bu = bu_or_404(db, business_unit_id)
     wb = Workbook()
     ws = wb.active
@@ -1248,9 +1357,9 @@ def export_report(report: str, format: str = "xlsx", business_unit_id: Optional[
     if report not in ("pl", "bs", "tb", "journal", "consolidated-pl", "consolidated-bs"):
         raise HTTPException(400, "report must be pl, bs, tb, journal, consolidated-pl or consolidated-bs")
     if not report.startswith("consolidated"):
-        if not business_unit_id:
-            raise HTTPException(400, "business_unit_id is required for this report")
-        check_bu_access(user, business_unit_id)
+        # Raises 400 when a group-wide caller names no BU; a BU-assigned
+        # accountant is forced to (and limited to) their own BU.
+        business_unit_id = effective_bu_id(user, business_unit_id)
     elif user.role == "CEO":
         raise HTTPException(403, "Consolidated reports are group-level")
     bu = bu_or_404(db, business_unit_id) if business_unit_id else None
@@ -1327,6 +1436,7 @@ def finance_summary(period: Optional[str] = None, user: User = Depends(require_a
                     db: Session = Depends(get_db)):
     """Group finance snapshot for the Chairman dashboard: this month's
     P&L, cash position (1110+1120), AR/AP outstanding, tax payable."""
+    require_group_access(user)
     period = validate_period(period) or date.today().strftime("%Y-%m")
     income = ZERO
     expense = ZERO
@@ -1449,6 +1559,7 @@ class BudgetIn(BaseModel):
 @router.put("/budgets")
 def upsert_budget(payload: BudgetIn, user: User = Depends(require_accounting),
                   db: Session = Depends(get_db)):
+    check_bu_access(user, payload.business_unit_id)
     bu_or_404(db, payload.business_unit_id)
     row = db.query(Budget).filter(Budget.business_unit_id == payload.business_unit_id,
                                   Budget.period == payload.period,
@@ -1468,6 +1579,7 @@ def delete_budget(budget_id: int, user: User = Depends(require_accounting),
     row = db.query(Budget).filter(Budget.id == budget_id).first()
     if not row:
         raise HTTPException(404, "Budget not found")
+    check_bu_access(user, row.business_unit_id)
     db.delete(row)
     db.commit()
     return {"ok": True}
@@ -1494,6 +1606,11 @@ def list_exchange_rates(currency: str = "USD", user: User = Depends(require_acco
 @router.post("/exchange-rates")
 def create_exchange_rate(payload: ExchangeRateIn, user: User = Depends(require_accounting),
                          db: Session = Depends(get_db)):
+    if scoped_bu_id(user) is not None:
+        # Rates are group-wide reference data: a BU-assigned accountant
+        # reads them but does not set them (legacy unassigned accountants
+        # and Chairman/HO still can).
+        raise HTTPException(403, "Exchange rates are maintained by head office")
     r = ExchangeRate(currency=payload.currency.upper(), rate_date=payload.rate_date,
                      rate=Decimal(str(payload.rate)), created_by_id=user.id)
     db.add(r)
@@ -1567,6 +1684,7 @@ class IntercompanyIn(BaseModel):
 
 @router.get("/intercompany")
 def list_intercompany(user: User = Depends(require_accounting), db: Session = Depends(get_db)):
+    require_group_access(user)
     rows = db.query(IntercompanyTransaction).order_by(
         IntercompanyTransaction.txn_date.desc(), IntercompanyTransaction.id.desc()).limit(200).all()
     return {"items": [serialize_intercompany(t) for t in rows]}
@@ -1575,6 +1693,7 @@ def list_intercompany(user: User = Depends(require_accounting), db: Session = De
 @router.post("/intercompany")
 def create_intercompany(payload: IntercompanyIn, user: User = Depends(require_accounting),
                         db: Session = Depends(get_db)):
+    require_group_access(user)
     if payload.from_business_unit_id == payload.to_business_unit_id:
         raise HTTPException(400, "Seller and buyer must be different BUs")
     bu_or_404(db, payload.from_business_unit_id)
@@ -1615,6 +1734,7 @@ def create_intercompany(payload: IntercompanyIn, user: User = Depends(require_ac
 @router.post("/intercompany/{txn_id}/settle")
 def settle_intercompany(txn_id: int, user: User = Depends(require_accounting),
                         db: Session = Depends(get_db)):
+    require_group_access(user)
     t = db.query(IntercompanyTransaction).filter(IntercompanyTransaction.id == txn_id).first()
     if not t:
         raise HTTPException(404, "Intercompany transaction not found")
