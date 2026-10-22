@@ -100,6 +100,9 @@ export const api = {
   activityDashboard: () => getJson('/api/admin/activity-dashboard'),
   ceoActivityCalendar: (buId, month) =>
     getJson(`/api/admin/ceo-activity-calendar?business_unit_id=${buId}${month ? `&month=${month}` : ''}`),
+  resolveHelp: (logId, response) => postJson(`/api/admin/activity-logs/${logId}/resolve-help`, { response }),
+  ceoMonthlySummaryUrl: (buId, month) =>
+    `/api/admin/ceo-monthly-summary?business_unit_id=${buId}${month ? `&month=${month}` : ''}`,
   healthDashboard: () => getJson('/api/admin/health-dashboard'),
   listUsers: () => getJson('/api/admin/users'),
   createUser: (payload) => postJson('/api/admin/users', payload),

@@ -50,8 +50,10 @@ const emptyForm = {
   other_amount: '',
   financial_other_notes: '',
   meetings_attended: '',
+  meetings_count: '',
   site_visits: '',
   key_decisions: '',
+  key_achievement: '',
   next_day_schedule: '',
   problems_today: '',
   help_needed: '',
@@ -64,12 +66,47 @@ const emptyForm = {
   sleep_hours: '',
   bp_systolic: '',
   bp_diastolic: '',
+  stress_level: '',
+  energy_mood: '',
+  weight_kg: '',
+  is_sick: false,
   health_other_notes: '',
   event_flag: false,
   meeting_flag: false,
   golf_flag: false,
   social_other_notes: '',
 };
+
+/** One-tap chip selector for the health check-in's enum fields (stress,
+ * energy/mood): tap to set, tap the active chip again to clear. */
+function ChipGroup({ label, options, value, onChange }) {
+  return (
+    <div>
+      <label className="block text-sm font-medium text-slate-700 mb-1.5">
+        {label} <span className="text-slate-400 font-normal">(optional)</span>
+      </label>
+      <div className="flex gap-2 flex-wrap">
+        {options.map((opt) => {
+          const selected = value === opt;
+          return (
+            <button
+              key={opt}
+              type="button"
+              onClick={() => onChange(selected ? '' : opt)}
+              className={`px-3.5 py-2 rounded-full text-xs font-semibold border transition-colors ${
+                selected
+                  ? 'bg-brand-600 border-brand-600 text-white'
+                  : 'bg-white border-slate-200 text-slate-600 hover:border-brand-300 hover:text-brand-700'
+              }`}
+            >
+              {opt}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 export default function CeoDashboardPage() {
   const [searchParams] = useSearchParams();
@@ -102,20 +139,29 @@ export default function CeoDashboardPage() {
       other_amount: payload.form_financial?.other_amount ?? '',
       financial_other_notes: payload.form_financial?.other_notes ?? '',
       meetings_attended: payload.form_activity?.meetings_attended ?? '',
+      meetings_count: payload.form_activity?.meetings_count ?? '',
       site_visits: payload.form_activity?.site_visits ?? '',
       key_decisions: payload.form_activity?.key_decisions ?? '',
+      key_achievement: payload.form_activity?.key_achievement ?? '',
       next_day_schedule: payload.form_activity?.next_day_schedule ?? '',
       problems_today: payload.form_activity?.problems_today ?? '',
       help_needed: payload.form_activity?.help_needed ?? '',
-      gym_percent: payload.form_activity?.gym_percent ?? '',
-      swimming_percent: payload.form_activity?.swimming_percent ?? '',
-      cycle_percent: payload.form_activity?.cycle_percent ?? '',
+      // Exercise % is collected in the Health section now and stored on
+      // the health row; fall back to the activity row's pre-move values
+      // so days filed before the move still show their percents.
+      gym_percent: payload.form_health?.gym_percent ?? payload.form_activity?.gym_percent ?? '',
+      swimming_percent: payload.form_health?.swimming_percent ?? payload.form_activity?.swimming_percent ?? '',
+      cycle_percent: payload.form_health?.cycle_percent ?? payload.form_activity?.cycle_percent ?? '',
       activity_other_notes: payload.form_activity?.other_notes ?? '',
       daily_steps: payload.form_health?.daily_steps ?? '',
       heart_rate: payload.form_health?.heart_rate ?? '',
       sleep_hours: payload.form_health?.sleep_hours ?? '',
       bp_systolic: payload.form_health?.bp_systolic ?? '',
       bp_diastolic: payload.form_health?.bp_diastolic ?? '',
+      stress_level: payload.form_health?.stress_level ?? '',
+      energy_mood: payload.form_health?.energy_mood ?? '',
+      weight_kg: payload.form_health?.weight_kg ?? '',
+      is_sick: payload.form_health?.is_sick ?? false,
       health_other_notes: payload.form_health?.other_notes ?? '',
       event_flag: payload.form_social?.event_flag ?? false,
       meeting_flag: payload.form_social?.meeting_flag ?? false,
@@ -192,20 +238,29 @@ export default function CeoDashboardPage() {
     formData.append('other_amount', form.other_amount);
     formData.append('financial_other_notes', form.financial_other_notes);
     formData.append('meetings_attended', form.meetings_attended);
+    formData.append('meetings_count', form.meetings_count);
     formData.append('site_visits', form.site_visits);
     formData.append('key_decisions', form.key_decisions);
+    formData.append('key_achievement', form.key_achievement);
     formData.append('next_day_schedule', form.next_day_schedule);
     formData.append('problems_today', form.problems_today);
     formData.append('help_needed', form.help_needed);
-    formData.append('gym_percent', form.gym_percent);
-    formData.append('swimming_percent', form.swimming_percent);
-    formData.append('cycle_percent', form.cycle_percent);
     formData.append('activity_other_notes', form.activity_other_notes);
     formData.append('daily_steps', form.daily_steps);
     formData.append('heart_rate', form.heart_rate);
     formData.append('sleep_hours', form.sleep_hours);
     formData.append('bp_systolic', form.bp_systolic);
     formData.append('bp_diastolic', form.bp_diastolic);
+    formData.append('stress_level', form.stress_level);
+    formData.append('energy_mood', form.energy_mood);
+    formData.append('weight_kg', form.weight_kg);
+    formData.append('is_sick', form.is_sick ? 'true' : 'false');
+    // Exercise % moved to the Health section: the health_* names tell
+    // the API to store them on the health row (and to leave the
+    // activity row's legacy percents untouched).
+    formData.append('health_gym_percent', form.gym_percent);
+    formData.append('health_swimming_percent', form.swimming_percent);
+    formData.append('health_cycle_percent', form.cycle_percent);
     formData.append('health_other_notes', form.health_other_notes);
     formData.append('event_flag', form.event_flag ? 'true' : 'false');
     formData.append('meeting_flag', form.meeting_flag ? 'true' : 'false');
@@ -801,6 +856,18 @@ export default function CeoDashboardPage() {
                   onChange={(e) => updateField('meetings_attended', e.target.value)}
                   className={inputClass}
                 />
+                <div className="flex items-center gap-2 mt-2">
+                  <label className="text-xs font-medium text-slate-500">Meetings (count)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="99"
+                    value={form.meetings_count}
+                    onChange={(e) => updateField('meetings_count', e.target.value)}
+                    placeholder="0"
+                    className="w-24 rounded-lg border border-slate-200 bg-white text-slate-800 px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                  />
+                </div>
               </div>
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1.5">Site Visits / Travel</label>
@@ -819,6 +886,18 @@ export default function CeoDashboardPage() {
                   placeholder="Summarize key decisions made today..."
                   value={form.key_decisions}
                   onChange={(e) => updateField('key_decisions', e.target.value)}
+                  className={inputClass}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-emerald-700 mb-1.5">
+                  Key Achievement <span className="text-slate-400 font-normal">(optional)</span>
+                </label>
+                <textarea
+                  rows={4}
+                  placeholder="The headline result of the day — what actually got achieved..."
+                  value={form.key_achievement}
+                  onChange={(e) => updateField('key_achievement', e.target.value)}
                   className={inputClass}
                 />
               </div>
@@ -858,11 +937,18 @@ export default function CeoDashboardPage() {
                 <p className="text-[11px] text-slate-400 mt-1.5">Filling this in flags your report to the Chairman &amp; Head Office as needing attention.</p>
               </div>
             </div>
-            <div className="px-6 pb-6 grid sm:grid-cols-3 gap-5">
-              <PercentProgress label="Gym %" value={form.gym_percent} onChange={(v) => updateField('gym_percent', v)} color="brand" />
-              <PercentProgress label="Swimming %" value={form.swimming_percent} onChange={(v) => updateField('swimming_percent', v)} color="emerald" />
-              <PercentProgress label="Cycle %" value={form.cycle_percent} onChange={(v) => updateField('cycle_percent', v)} color="amber" />
-            </div>
+            {data.form_activity?.help_resolved_at && (
+              <div className="px-6 pb-6">
+                <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/25 px-4 py-3">
+                  <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-emerald-700 mb-1">
+                    Response from HO / Chairman — resolved {data.form_activity.help_resolved_at}
+                    {data.form_activity.help_resolved_by_username ? ` by ${data.form_activity.help_resolved_by_username}` : ''}
+                  </p>
+                  <p className="text-sm text-slate-700 whitespace-pre-wrap">{data.form_activity.help_response || '—'}</p>
+                  <p className="text-[11px] text-slate-400 mt-1.5">Editing the help request above and resubmitting will re-open it for a new response.</p>
+                </div>
+              </div>
+            )}
             <div className="px-6 pb-6">
               <label className="block text-sm font-medium text-slate-700 mb-1.5">
                 Other <span className="text-slate-400 font-normal">(optional — anything else worth noting today)</span>
@@ -965,6 +1051,34 @@ export default function CeoDashboardPage() {
                   />
                 </div>
               </div>
+            </div>
+            <div className="px-6 pb-6 grid sm:grid-cols-2 gap-5">
+              <ChipGroup label="Stress Level" options={['Low', 'Medium', 'High']} value={form.stress_level} onChange={(v) => updateField('stress_level', v)} />
+              <ChipGroup label="Energy / Mood" options={['Energetic', 'Normal', 'Drained']} value={form.energy_mood} onChange={(v) => updateField('energy_mood', v)} />
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1.5">
+                  Weight <span className="text-slate-400 font-normal">(kg, optional)</span>
+                </label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    min="20"
+                    max="400"
+                    step="0.1"
+                    value={form.weight_kg}
+                    onChange={(e) => updateField('weight_kg', e.target.value)}
+                    placeholder="e.g. 68.5"
+                    className="w-full rounded-lg border border-slate-200 bg-white text-slate-800 pl-3 pr-12 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                  />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs font-medium">kg</span>
+                </div>
+              </div>
+              <YesNoToggle label="Feeling Sick Today" value={form.is_sick} onChange={(v) => updateField('is_sick', v)} />
+            </div>
+            <div className="px-6 pb-6 grid sm:grid-cols-3 gap-5">
+              <PercentProgress label="Gym %" value={form.gym_percent} onChange={(v) => updateField('gym_percent', v)} color="brand" />
+              <PercentProgress label="Swimming %" value={form.swimming_percent} onChange={(v) => updateField('swimming_percent', v)} color="emerald" />
+              <PercentProgress label="Cycle %" value={form.cycle_percent} onChange={(v) => updateField('cycle_percent', v)} color="amber" />
             </div>
             <div className="px-6 pb-6">
               <label className="block text-sm font-medium text-slate-700 mb-1.5">
