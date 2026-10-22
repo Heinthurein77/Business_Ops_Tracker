@@ -5,6 +5,7 @@ const AuthContext = createContext(null);
 
 export function roleHomePath(role) {
   if (role === 'CEO') return '/ceo';
+  if (role === 'Accountant') return '/accounting';
   if (role === 'Chairman' || role === 'HO') return '/admin';
   return '/login';
 }
