@@ -33,7 +33,8 @@ function DayDetail({ day, ceoName }) {
   }
 
   const hasFinancial = day.revenue != null;
-  const hasHealth = day.daily_steps != null || day.heart_rate != null || day.sleep_hours != null || day.bp_systolic != null;
+  const hasHealth = day.daily_steps != null || day.heart_rate != null || day.sleep_hours != null || day.bp_systolic != null
+    || day.stress_level != null || day.energy_mood != null || day.weight_kg != null || day.is_sick;
   const hasSocial = day.event_flag != null;
   const hasAnything = day.has_report || hasFinancial || hasHealth || hasSocial;
 
@@ -59,8 +60,20 @@ function DayDetail({ day, ceoName }) {
             {day.has_report ? (
               <div className="space-y-2 text-xs">
                 <DetailField label="Meetings" value={day.meetings_attended} />
+                {day.meetings_count != null && (
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Meetings (count)</span>
+                    <span className="font-semibold text-slate-700 tabular-nums">{day.meetings_count}</span>
+                  </div>
+                )}
                 <DetailField label="Site Visits" value={day.site_visits} />
                 <DetailField label="Key Decisions" value={day.key_decisions} />
+                {day.key_achievement && (
+                  <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/25 px-2.5 py-2">
+                    <p className="text-emerald-700 font-semibold uppercase tracking-wide text-[10px] mb-0.5">Key Achievement</p>
+                    <p className="text-slate-700 whitespace-pre-wrap">{day.key_achievement}</p>
+                  </div>
+                )}
                 <DetailField label="Next Day Schedule" value={day.next_day_schedule} />
                 {day.problems_today && (
                   <div className="rounded-lg bg-amber-500/10 border border-amber-500/25 px-2.5 py-2">
@@ -68,19 +81,32 @@ function DayDetail({ day, ceoName }) {
                     <p className="text-slate-700 whitespace-pre-wrap">{day.problems_today}</p>
                   </div>
                 )}
-                {day.help_needed && (
+                {day.help_needed && !day.help_resolved_at && (
                   <div className="rounded-lg bg-red-500/10 border border-red-500/30 px-2.5 py-2">
                     <p className="text-red-700 font-bold uppercase tracking-wide text-[10px] mb-0.5">Help Needed — HO / Chairman</p>
                     <p className="text-slate-700 whitespace-pre-wrap">{day.help_needed}</p>
+                  </div>
+                )}
+                {day.help_needed && day.help_resolved_at && (
+                  <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/30 px-2.5 py-2">
+                    <p className="text-emerald-700 font-bold uppercase tracking-wide text-[10px] mb-0.5">Help Needed — HO / Chairman</p>
+                    <p className="text-slate-700 whitespace-pre-wrap">{day.help_needed}</p>
+                    <div className="mt-1.5 pt-1.5 border-t border-emerald-500/20">
+                      <p className="text-emerald-700 font-semibold">
+                        Resolved ✓ — {day.help_resolved_at}
+                        {day.help_resolved_by_username ? ` by ${day.help_resolved_by_username}` : ''}
+                      </p>
+                      {day.help_response && <p className="text-slate-700 whitespace-pre-wrap mt-0.5">{day.help_response}</p>}
+                    </div>
                   </div>
                 )}
                 {day.activity_other_notes && <DetailField label="Other Notes" value={day.activity_other_notes} />}
                 <div className="pt-1.5 border-t border-slate-100 flex justify-between">
                   <span className="text-slate-500">Gym / Swim / Cycle</span>
                   <span className="font-semibold text-slate-700">
-                    {day.gym_percent != null ? `${day.gym_percent}%` : '—'} /{' '}
-                    {day.swimming_percent != null ? `${day.swimming_percent}%` : '—'} /{' '}
-                    {day.cycle_percent != null ? `${day.cycle_percent}%` : '—'}
+                    {(day.exercise_gym_percent ?? day.gym_percent) != null ? `${day.exercise_gym_percent ?? day.gym_percent}%` : '—'} /{' '}
+                    {(day.exercise_swimming_percent ?? day.swimming_percent) != null ? `${day.exercise_swimming_percent ?? day.swimming_percent}%` : '—'} /{' '}
+                    {(day.exercise_cycle_percent ?? day.cycle_percent) != null ? `${day.exercise_cycle_percent ?? day.cycle_percent}%` : '—'}
                   </span>
                 </div>
                 {safeUrl(day.document_url) && (
@@ -124,6 +150,12 @@ function DayDetail({ day, ceoName }) {
                   label="Blood Pressure"
                   value={day.bp_systolic != null && day.bp_diastolic != null ? `${day.bp_systolic}/${day.bp_diastolic}` : '—'}
                 />
+                <DetailRow label="Stress Level" value={day.stress_level || '—'} />
+                <DetailRow label="Energy / Mood" value={day.energy_mood || '—'} />
+                <DetailRow label="Weight" value={day.weight_kg != null ? `${day.weight_kg} kg` : '—'} />
+                {day.is_sick && (
+                  <p className="text-rose-600 font-semibold">Feeling sick this day</p>
+                )}
               </div>
             ) : (
               <p className="text-xs text-slate-400 italic">No health data</p>
@@ -221,23 +253,33 @@ export default function CeoCalendarPage() {
                 : 'Loading…'}
             </p>
           </div>
-          <label className="flex items-center gap-2 text-xs font-medium text-slate-500">
-            Business Unit
-            <select
-              value={buId ?? ''}
-              onChange={(e) => {
-                setBuId(Number(e.target.value));
-                setMonth('');
-              }}
-              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
-            >
-              {bus.map((bu) => (
-                <option key={bu.id} value={bu.id}>
-                  {bu.code} — {bu.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="flex items-center gap-3 flex-wrap">
+            {data && (
+              <a
+                href={api.ceoMonthlySummaryUrl(buId, month || data.current_month)}
+                className="text-xs font-semibold bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 px-3.5 py-2 rounded-lg hover:opacity-90 transition-opacity"
+              >
+                Monthly Summary PDF
+              </a>
+            )}
+            <label className="flex items-center gap-2 text-xs font-medium text-slate-500">
+              Business Unit
+              <select
+                value={buId ?? ''}
+                onChange={(e) => {
+                  setBuId(Number(e.target.value));
+                  setMonth('');
+                }}
+                className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+              >
+                {bus.map((bu) => (
+                  <option key={bu.id} value={bu.id}>
+                    {bu.code} — {bu.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
         </div>
 
         {!data ? (

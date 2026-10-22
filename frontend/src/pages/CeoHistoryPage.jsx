@@ -114,7 +114,7 @@ export default function CeoHistoryPage() {
                   {selectedDay.has_report || selectedDay.revenue != null ? (
                     <div className="mt-2 space-y-1.5 text-xs text-slate-600 max-w-2xl">
                       {selectedDay.meetings_attended && (
-                        <p><span className="text-slate-400 font-medium">Meetings: </span><span className="whitespace-pre-wrap">{selectedDay.meetings_attended}</span></p>
+                        <p><span className="text-slate-400 font-medium">Meetings: </span><span className="whitespace-pre-wrap">{selectedDay.meetings_attended}</span>{selectedDay.meetings_count != null && <span className="text-slate-500"> ({selectedDay.meetings_count})</span>}</p>
                       )}
                       {selectedDay.site_visits && (
                         <p><span className="text-slate-400 font-medium">Site Visits: </span><span className="whitespace-pre-wrap">{selectedDay.site_visits}</span></p>
@@ -122,16 +122,31 @@ export default function CeoHistoryPage() {
                       {selectedDay.key_decisions && (
                         <p><span className="text-slate-400 font-medium">Key Decisions: </span><span className="whitespace-pre-wrap">{selectedDay.key_decisions}</span></p>
                       )}
+                      {selectedDay.key_achievement && (
+                        <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/25 px-3 py-2">
+                          <p className="text-emerald-600 font-semibold">Key Achievement</p>
+                          <p className="whitespace-pre-wrap text-slate-700">{selectedDay.key_achievement}</p>
+                        </div>
+                      )}
                       {selectedDay.next_day_schedule && (
                         <p><span className="text-slate-400 font-medium">Next Day Schedule: </span><span className="whitespace-pre-wrap">{selectedDay.next_day_schedule}</span></p>
                       )}
                       {selectedDay.problems_today && (
                         <p><span className="text-amber-600 font-medium">Problems: </span><span className="whitespace-pre-wrap">{selectedDay.problems_today}</span></p>
                       )}
-                      {selectedDay.help_needed && (
+                      {selectedDay.help_needed && !selectedDay.help_resolved_at && (
                         <div className="rounded-lg bg-red-500/10 border border-red-500/25 px-3 py-2">
                           <p className="text-red-600 font-semibold">Help Needed from HO / Chairman</p>
                           <p className="whitespace-pre-wrap text-slate-700">{selectedDay.help_needed}</p>
+                        </div>
+                      )}
+                      {selectedDay.help_needed && selectedDay.help_resolved_at && (
+                        <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/25 px-3 py-2">
+                          <p className="text-emerald-600 font-semibold">
+                            Response from HO / Chairman — resolved {selectedDay.help_resolved_at}
+                            {selectedDay.help_resolved_by_username ? ` by ${selectedDay.help_resolved_by_username}` : ''}
+                          </p>
+                          <p className="whitespace-pre-wrap text-slate-700">{selectedDay.help_response || '—'}</p>
                         </div>
                       )}
                       {selectedDay.revenue != null && (
@@ -260,7 +275,7 @@ export default function CeoHistoryPage() {
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-3">Daily Activities</p>
                   <div className="space-y-2 text-xs">
                     <div>
-                      <p className="text-slate-500 mb-0.5">Meetings</p>
+                      <p className="text-slate-500 mb-0.5">Meetings{currentReview.meetings_count != null ? ` (${currentReview.meetings_count})` : ''}</p>
                       <p className="text-slate-700 line-clamp-2">{currentReview.meetings_attended || '—'}</p>
                     </div>
                     <div>
@@ -271,6 +286,12 @@ export default function CeoHistoryPage() {
                       <p className="text-slate-500 mb-0.5">Key Decisions</p>
                       <p className="text-slate-700 line-clamp-2">{currentReview.key_decisions || '—'}</p>
                     </div>
+                    {currentReview.key_achievement && (
+                      <div>
+                        <p className="text-emerald-600 font-medium mb-0.5">Key Achievement</p>
+                        <p className="text-slate-700 line-clamp-2">{currentReview.key_achievement}</p>
+                      </div>
+                    )}
                     <div>
                       <p className="text-slate-500 mb-0.5">Next Day Schedule</p>
                       <p className="text-slate-700 line-clamp-2">{currentReview.next_day_schedule || '—'}</p>
@@ -278,7 +299,7 @@ export default function CeoHistoryPage() {
                     <div className="pt-1.5 border-t border-slate-100 flex justify-between">
                       <span className="text-slate-500">Gym / Swim / Cycle</span>
                       <span className="font-semibold text-slate-700">
-                        {currentReview.gym_percent != null ? `${currentReview.gym_percent}%` : '—'} / {currentReview.swimming_percent != null ? `${currentReview.swimming_percent}%` : '—'} / {currentReview.cycle_percent != null ? `${currentReview.cycle_percent}%` : '—'}
+                        {(healthForDay?.gym_percent ?? currentReview.gym_percent) != null ? `${healthForDay?.gym_percent ?? currentReview.gym_percent}%` : '—'} / {(healthForDay?.swimming_percent ?? currentReview.swimming_percent) != null ? `${healthForDay?.swimming_percent ?? currentReview.swimming_percent}%` : '—'} / {(healthForDay?.cycle_percent ?? currentReview.cycle_percent) != null ? `${healthForDay?.cycle_percent ?? currentReview.cycle_percent}%` : '—'}
                       </span>
                     </div>
                     {currentReview.other_notes && (
@@ -303,6 +324,13 @@ export default function CeoHistoryPage() {
                       <div className="flex justify-between"><span className="text-slate-500">Heart Rate</span><span className="font-semibold text-slate-700 tabular-nums">{healthForDay.heart_rate != null ? `${healthForDay.heart_rate} bpm` : '—'}</span></div>
                       <div className="flex justify-between"><span className="text-slate-500">Sleep Time</span><span className="font-semibold text-slate-700 tabular-nums">{healthForDay.sleep_hours != null ? `${healthForDay.sleep_hours} hrs` : '—'}</span></div>
                       <div className="flex justify-between"><span className="text-slate-500">Blood Pressure</span><span className="font-semibold text-slate-700 tabular-nums">{healthForDay.bp_systolic != null && healthForDay.bp_diastolic != null ? `${healthForDay.bp_systolic}/${healthForDay.bp_diastolic}` : '—'}</span></div>
+                      <div className="flex justify-between"><span className="text-slate-500">Stress Level</span><span className="font-semibold text-slate-700">{healthForDay.stress_level || '—'}</span></div>
+                      <div className="flex justify-between"><span className="text-slate-500">Energy / Mood</span><span className="font-semibold text-slate-700">{healthForDay.energy_mood || '—'}</span></div>
+                      <div className="flex justify-between"><span className="text-slate-500">Weight</span><span className="font-semibold text-slate-700 tabular-nums">{healthForDay.weight_kg != null ? `${healthForDay.weight_kg} kg` : '—'}</span></div>
+                      {healthForDay.is_sick && (
+                        <p className="text-rose-600 font-semibold">Feeling sick this day</p>
+                      )}
+                      <div className="flex justify-between"><span className="text-slate-500">Gym / Swim / Cycle</span><span className="font-semibold text-slate-700">{healthForDay.gym_percent != null ? `${healthForDay.gym_percent}%` : '—'} / {healthForDay.swimming_percent != null ? `${healthForDay.swimming_percent}%` : '—'} / {healthForDay.cycle_percent != null ? `${healthForDay.cycle_percent}%` : '—'}</span></div>
                       {healthForDay.other_notes && (
                         <div className="pt-1.5 border-t border-slate-100">
                           <p className="text-slate-500 mb-0.5">Other</p>

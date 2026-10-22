@@ -113,12 +113,19 @@ export default function HealthDashboardPage() {
                           <p className="text-slate-500 dark:text-slate-400">Blood Pressure</p>
                           <p className="font-semibold text-slate-800 dark:text-slate-200">{h.bp_systolic != null && h.bp_diastolic != null ? `${h.bp_systolic}/${h.bp_diastolic} mmHg` : '—'}</p>
                         </div>
+                        <div className="bg-white dark:bg-slate-900 rounded-lg px-2.5 py-2"><p className="text-slate-500 dark:text-slate-400">Stress Level</p><p className="font-semibold text-slate-800 dark:text-slate-200">{h.stress_level || '—'}</p></div>
+                        <div className="bg-white dark:bg-slate-900 rounded-lg px-2.5 py-2"><p className="text-slate-500 dark:text-slate-400">Energy / Mood</p><p className="font-semibold text-slate-800 dark:text-slate-200">{h.energy_mood || '—'}</p></div>
+                        <div className="bg-white dark:bg-slate-900 rounded-lg px-2.5 py-2"><p className="text-slate-500 dark:text-slate-400">Weight</p><p className="font-semibold text-slate-800 dark:text-slate-200">{h.weight_kg != null ? `${h.weight_kg} kg` : '—'}</p></div>
+                        <div className="bg-white dark:bg-slate-900 rounded-lg px-2.5 py-2"><p className="text-slate-500 dark:text-slate-400">Gym / Swim / Cycle</p><p className="font-semibold text-slate-800 dark:text-slate-200">{h.gym_percent != null ? `${h.gym_percent}%` : '—'} / {h.swimming_percent != null ? `${h.swimming_percent}%` : '—'} / {h.cycle_percent != null ? `${h.cycle_percent}%` : '—'}</p></div>
                         <div className="bg-white dark:bg-slate-900 rounded-lg px-2.5 py-2 col-span-2">
                           <p className="text-slate-500 dark:text-slate-400">Step Counter</p>
                           <p className={`font-bold ${h.daily_steps == null ? 'text-slate-500 dark:text-slate-400' : h.step_status === 'red' ? 'text-red-600 dark:text-red-400' : h.step_status === 'yellow' ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
                             {h.daily_steps != null ? `${h.daily_steps.toLocaleString()} / ${DAILY_STEP_GOAL.toLocaleString()}` : '—'}
                           </p>
                         </div>
+                        {h.is_sick && (
+                          <p className="col-span-2 text-[11px] font-bold uppercase tracking-wide text-rose-600 dark:text-rose-400">Feeling sick today</p>
+                        )}
                       </div>
                     </Link>
                   ))}
@@ -181,6 +188,12 @@ export default function HealthDashboardPage() {
                         <span className="text-slate-500 dark:text-slate-400">Step Counter</span>
                         <span className="font-semibold text-slate-800 dark:text-slate-200">{w.daily_steps != null ? `${w.daily_steps.toLocaleString()} / ${DAILY_STEP_GOAL.toLocaleString()}` : '—'}</span>
                       </div>
+                      <div className="flex justify-between"><span className="text-slate-500 dark:text-slate-400">Stress Level</span><span className="font-semibold text-slate-800 dark:text-slate-200">{w.stress_level || '—'}</span></div>
+                      <div className="flex justify-between"><span className="text-slate-500 dark:text-slate-400">Energy / Mood</span><span className="font-semibold text-slate-800 dark:text-slate-200">{w.energy_mood || '—'}</span></div>
+                      <div className="flex justify-between"><span className="text-slate-500 dark:text-slate-400">Weight</span><span className="font-semibold text-slate-800 dark:text-slate-200">{w.weight_kg != null ? `${w.weight_kg} kg` : '—'}</span></div>
+                      {w.is_sick && (
+                        <p className="text-[11px] font-bold uppercase tracking-wide text-rose-600 dark:text-rose-400">Feeling sick</p>
+                      )}
                     </div>
                   ) : (
                     <p className="text-xs text-slate-500 dark:text-slate-400 italic">No health data submitted yet</p>
@@ -218,6 +231,8 @@ export default function HealthDashboardPage() {
                   <th className="px-6 py-3 text-left">Heart Rate</th>
                   <th className="px-6 py-3 text-left">Sleep Time</th>
                   <th className="px-6 py-3 text-left">Blood Pressure</th>
+                  <th className="px-6 py-3 text-left">Stress / Energy</th>
+                  <th className="px-6 py-3 text-left">Weight</th>
                   <th className="px-6 py-3 text-left">Step Counter</th>
                 </tr>
               </thead>
@@ -233,6 +248,8 @@ export default function HealthDashboardPage() {
                     <td className="px-6 py-3 text-slate-700 dark:text-slate-300">{h.heart_rate != null ? `${h.heart_rate} bpm` : '—'}</td>
                     <td className="px-6 py-3 text-slate-700 dark:text-slate-300">{h.sleep_hours != null ? `${h.sleep_hours} hrs` : '—'}</td>
                     <td className="px-6 py-3 text-slate-700 dark:text-slate-300">{h.bp_systolic != null && h.bp_diastolic != null ? `${h.bp_systolic}/${h.bp_diastolic}` : '—'}</td>
+                    <td className="px-6 py-3 text-slate-700 dark:text-slate-300">{[h.stress_level, h.energy_mood].filter(Boolean).join(' / ') || '—'}{h.is_sick ? ' · sick' : ''}</td>
+                    <td className="px-6 py-3 text-slate-700 dark:text-slate-300">{h.weight_kg != null ? `${h.weight_kg} kg` : '—'}</td>
                     <td className={`px-6 py-3 font-medium ${h.step_status === 'red' ? 'text-red-600 dark:text-red-400' : h.step_status === 'yellow' ? 'text-amber-600 dark:text-amber-400' : h.step_status === 'green' ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400'}`}>
                       {h.daily_steps != null ? `${h.daily_steps.toLocaleString()} / ${DAILY_STEP_GOAL.toLocaleString()}` : '—'}
                     </td>

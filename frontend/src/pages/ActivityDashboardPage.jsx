@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api } from '../api/client';
+import { api, ApiError } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
@@ -29,6 +29,67 @@ function HelpBlock({ text, clamp = false }) {
     <div className="rounded-lg bg-red-500/[0.07] dark:bg-red-500/10 border border-red-500/25 px-3 py-2.5">
       <p className="text-[10px] font-bold uppercase tracking-[0.1em] text-red-600 dark:text-red-400 mb-1">Help Needed — HO / Chairman</p>
       <p className={`text-xs text-slate-700 dark:text-slate-200 whitespace-pre-wrap ${clamp ? 'line-clamp-4' : ''}`}>{text}</p>
+    </div>
+  );
+}
+
+function ResolvedBlock({ a }) {
+  return (
+    <div className="rounded-lg bg-emerald-500/[0.08] dark:bg-emerald-500/10 border border-emerald-500/25 px-3 py-2.5">
+      <p className="text-[10px] font-bold uppercase tracking-[0.1em] text-emerald-700 dark:text-emerald-400 mb-1">
+        Resolved ✓ — {a.help_resolved_at}
+        {a.help_resolved_by_username ? ` · ${a.help_resolved_by_username}` : ''}
+      </p>
+      {a.help_needed && <p className="text-[11px] text-slate-500 dark:text-slate-400 whitespace-pre-wrap mb-1">{a.help_needed}</p>}
+      <p className="text-xs text-slate-700 dark:text-slate-200 whitespace-pre-wrap">{a.help_response}</p>
+    </div>
+  );
+}
+
+/** Chairman/HO answer form for an open help request: posts the response
+ * to the resolve endpoint (which notifies the CEO) and reloads the page
+ * data, so the request immediately leaves Needs Attention. */
+function ResolveHelpForm({ logId, onResolved }) {
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [formError, setFormError] = useState('');
+  if (!logId) return null;
+
+  async function submit() {
+    if (!text.trim()) {
+      setFormError('Write a response first — the CEO is notified with exactly this text.');
+      return;
+    }
+    setBusy(true);
+    setFormError('');
+    try {
+      await api.resolveHelp(logId, text.trim());
+      if (onResolved) onResolved();
+    } catch (err) {
+      setFormError(err instanceof ApiError ? err.message : 'Failed to resolve this request');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-3 space-y-2">
+      <textarea
+        rows={2}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder="Response from HO / Chairman — what was decided or provided?"
+        className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+      />
+      {formError && <p className="text-[11px] font-medium text-red-600 dark:text-red-400">{formError}</p>}
+      <button
+        type="button"
+        onClick={submit}
+        disabled={busy}
+        className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-3.5 py-2 rounded-lg transition-colors"
+      >
+        {busy ? 'Resolving…' : 'Mark resolved & notify CEO'}
+      </button>
     </div>
   );
 }
@@ -67,7 +128,7 @@ function FitnessChips({ a }) {
   );
 }
 
-function ActivityCard({ a }) {
+function ActivityCard({ a, onResolved }) {
   return (
     <div
       className={`rounded-xl border bg-white dark:bg-slate-900 p-5 hover:shadow-md transition-shadow ${
@@ -96,16 +157,19 @@ function ActivityCard({ a }) {
             <HelpBlock text={a.help_needed} />
           </div>
         )}
+        {!a.needs_help && a.help_resolved_at && <ResolvedBlock a={a} />}
         {a.problems_today && <ProblemsBlock text={a.problems_today} />}
       </div>
 
       <dl className="space-y-2.5 text-xs">
-        <FieldRow label="Meetings Attended" value={a.meetings_attended} />
+        <FieldRow label={`Meetings Attended${a.meetings_count != null ? ` (${a.meetings_count})` : ''}`} value={a.meetings_attended} />
         <FieldRow label="Site Visits / Travel" value={a.site_visits} />
         <FieldRow label="Key Decisions Made" value={a.key_decisions} />
+        {a.key_achievement && <FieldRow label="Key Achievement" value={a.key_achievement} />}
         <FieldRow label="Next Day Schedule" value={a.next_day_schedule} />
         <FitnessChips a={a} />
       </dl>
+      {a.needs_help && <ResolveHelpForm logId={a.id} onResolved={onResolved} />}
       {safeUrl(a.document_url) && (
         <a href={safeUrl(a.document_url)} target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-brand-600 dark:text-brand-400 hover:text-brand-700 dark:hover:text-brand-300">
           View attachment
@@ -131,8 +195,13 @@ export default function ActivityDashboardPage() {
   const [dirSearch, setDirSearch] = useState('');
   const [dirFilter, setDirFilter] = useState('all');
 
+  const reload = () => {
+    api.activityDashboard().then(setData).catch(() => {});
+  };
+
   useEffect(() => {
-    api.activityDashboard().then(setData);
+    reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const filteredHistory = useMemo(() => {
@@ -140,7 +209,7 @@ export default function ActivityDashboardPage() {
     const query = search.trim().toLowerCase();
     if (!query) return data.activity_history;
     return data.activity_history.filter((a) =>
-      `${a.bu_code} ${a.bu_name} ${a.ceo_username} ${a.meetings_attended} ${a.site_visits} ${a.key_decisions} ${a.next_day_schedule} ${a.problems_today || ''} ${a.help_needed || ''}`
+      `${a.bu_code} ${a.bu_name} ${a.ceo_username} ${a.meetings_attended} ${a.site_visits} ${a.key_decisions} ${a.key_achievement || ''} ${a.next_day_schedule} ${a.problems_today || ''} ${a.help_needed || ''} ${a.help_response || ''}`
         .toLowerCase()
         .includes(query)
     );
@@ -238,6 +307,7 @@ export default function ActivityDashboardPage() {
                         {d.problems_today}
                       </p>
                     )}
+                    <ResolveHelpForm logId={d.help_log_id} onResolved={reload} />
                   </div>
                   <div className="flex items-center justify-between mt-4 pt-3 border-t border-slate-100 dark:border-slate-800">
                     <p className="text-[11px] text-slate-400 dark:text-slate-500">Reported {d.reported_display}</p>
@@ -270,7 +340,7 @@ export default function ActivityDashboardPage() {
             {data.today_briefing.length > 0 ? (
               <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-5">
                 {data.today_briefing.map((a, i) => (
-                  <ActivityCard a={a} key={i} />
+                  <ActivityCard a={a} key={i} onResolved={reload} />
                 ))}
               </div>
             ) : (
@@ -314,10 +384,20 @@ export default function ActivityDashboardPage() {
                       <HelpBadge />
                     </div>
                   )}
+                  {!d.needs_help && d.help_needed && d.help_resolved_at && (
+                    <div className="mb-2.5">
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/25 text-emerald-600 dark:text-emerald-400">
+                        Help resolved ✓
+                      </span>
+                    </div>
+                  )}
                   {d.reported_display ? (
                     <div className="space-y-1 text-xs">
-                      <div className="flex justify-between"><span className="text-slate-500 dark:text-slate-400">Meetings</span><span className="font-semibold text-slate-800 dark:text-slate-200 truncate max-w-[9rem]" title={d.meetings_attended || ''}>{d.meetings_attended || '—'}</span></div>
+                      <div className="flex justify-between"><span className="text-slate-500 dark:text-slate-400">Meetings{d.meetings_count != null ? ` (${d.meetings_count})` : ''}</span><span className="font-semibold text-slate-800 dark:text-slate-200 truncate max-w-[9rem]" title={d.meetings_attended || ''}>{d.meetings_attended || '—'}</span></div>
                       <div className="flex justify-between"><span className="text-slate-500 dark:text-slate-400">Site Visits</span><span className="font-semibold text-slate-800 dark:text-slate-200 truncate max-w-[9rem]" title={d.site_visits || ''}>{d.site_visits || '—'}</span></div>
+                      {d.key_achievement && (
+                        <div className="flex justify-between"><span className="text-emerald-600 dark:text-emerald-400">Achievement</span><span className="font-semibold text-slate-800 dark:text-slate-200 truncate max-w-[9rem]" title={d.key_achievement}>{d.key_achievement}</span></div>
+                      )}
                       <div className="flex justify-between"><span className="text-slate-500 dark:text-slate-400">Fitness Avg</span><span className={`font-semibold ${d.status === 'red' ? 'text-red-600 dark:text-red-400' : d.status === 'yellow' ? 'text-amber-600 dark:text-amber-400' : d.status === 'green' ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400'}`}>{STATUS_LABEL[d.status]}</span></div>
                       {d.problems_today && (
                         <div className="flex justify-between"><span className="text-slate-500 dark:text-slate-400">Problems</span><span className="font-semibold text-amber-600 dark:text-amber-400">Reported</span></div>
@@ -382,6 +462,11 @@ export default function ActivityDashboardPage() {
                             Help requested
                           </span>
                         )}
+                        {!a.needs_help && a.help_resolved_at && (
+                          <span className="mt-1 inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/25 text-emerald-600 dark:text-emerald-400">
+                            Help resolved ✓
+                          </span>
+                        )}
                       </td>
                       <td className="px-6 py-3.5 text-slate-600 dark:text-slate-400">{a.ceo_username}</td>
                       <td className="px-6 py-3.5 text-slate-500 dark:text-slate-400">{a.report_date}</td>
@@ -398,7 +483,7 @@ export default function ActivityDashboardPage() {
                         <td colSpan={6} className="px-6 py-5 bg-slate-50 dark:bg-slate-900">
                           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
                             <div>
-                              <p className="text-slate-500 dark:text-slate-400 font-semibold uppercase tracking-wide text-[10px] mb-1">Meetings Attended</p>
+                              <p className="text-slate-500 dark:text-slate-400 font-semibold uppercase tracking-wide text-[10px] mb-1">Meetings Attended{a.meetings_count != null ? ` (${a.meetings_count})` : ''}</p>
                               <p className="text-slate-700 dark:text-slate-300 whitespace-pre-wrap">{a.meetings_attended || '—'}</p>
                             </div>
                             <div>
@@ -408,6 +493,10 @@ export default function ActivityDashboardPage() {
                             <div>
                               <p className="text-slate-500 dark:text-slate-400 font-semibold uppercase tracking-wide text-[10px] mb-1">Key Decisions Made</p>
                               <p className="text-slate-700 dark:text-slate-300 whitespace-pre-wrap">{a.key_decisions || '—'}</p>
+                            </div>
+                            <div>
+                              <p className="text-slate-500 dark:text-slate-400 font-semibold uppercase tracking-wide text-[10px] mb-1">Key Achievement</p>
+                              <p className="text-slate-700 dark:text-slate-300 whitespace-pre-wrap">{a.key_achievement || '—'}</p>
                             </div>
                             <div>
                               <p className="text-slate-500 dark:text-slate-400 font-semibold uppercase tracking-wide text-[10px] mb-1">Next Day Schedule</p>
@@ -427,6 +516,12 @@ export default function ActivityDashboardPage() {
                           {a.needs_help && (
                             <div className="mt-4 max-w-2xl">
                               <HelpBlock text={a.help_needed} />
+                              <ResolveHelpForm logId={a.id} onResolved={reload} />
+                            </div>
+                          )}
+                          {!a.needs_help && a.help_resolved_at && (
+                            <div className="mt-4 max-w-2xl">
+                              <ResolvedBlock a={a} />
                             </div>
                           )}
                           {safeUrl(a.document_url) && (
