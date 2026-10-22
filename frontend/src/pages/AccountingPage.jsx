@@ -56,6 +56,11 @@ const today = () => new Date().toISOString().slice(0, 10);
 export default function AccountingPage() {
   const [tab, setTab] = useState('reports');
   const [bus, setBus] = useState([]);
+  // "group" (Chairman/HO + legacy accountants) or "bu" (accountant pinned
+  // to one BU) — comes from the accounting business-units endpoint; group
+  // tabs are hidden for BU-pinned accountants because the consolidated
+  // numbers are head-office only.
+  const [scope, setScope] = useState('group');
   const [buId, setBuId] = useState('');
   const [period, setPeriod] = useState(thisPeriod());
   const [error, setError] = useState('');
@@ -102,10 +107,14 @@ export default function AccountingPage() {
   const [icForm, setIcForm] = useState({ from_business_unit_id: '', to_business_unit_id: '', amount: '', description: '', txn_date: today(), buyer_account_code: '6600' });
 
   useEffect(() => {
-    api.adminOverview().then((d) => {
-      const ops = d.operations || [];
-      setBus(ops);
-      if (ops.length && !buId) setBuId(String(ops[0].bu_id));
+    // The accounting API's own BU list (scoped to the caller) — the admin
+    // overview is Chairman/HO-only, which left accountants with an empty
+    // page. Same default selection as before: the first BU in the list.
+    api.accBusinessUnits().then((d) => {
+      const list = d.items || [];
+      setBus(list);
+      setScope(d.scope || 'group');
+      if (list.length && !buId) setBuId(String(list[0].bu_id));
     }).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -343,7 +352,7 @@ export default function AccountingPage() {
         {error && <div className="text-sm font-medium text-red-700 dark:text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-2.5">{error}</div>}
 
         <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 rounded-lg p-1 flex-wrap w-fit">
-          {TABS.map((t) => (
+          {TABS.filter((t) => t.key !== 'group' || scope === 'group').map((t) => (
             <button key={t.key} onClick={() => setTab(t.key)} className={`text-xs font-semibold px-3.5 py-1.5 rounded-md transition-colors whitespace-nowrap ${tab === t.key ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300'}`}>
               {t.label}
             </button>

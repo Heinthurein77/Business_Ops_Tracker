@@ -95,6 +95,9 @@ export const api = {
   healthDashboard: () => getJson('/api/admin/health-dashboard'),
   listUsers: () => getJson('/api/admin/users'),
   createUser: (payload) => postJson('/api/admin/users', payload),
+  updateUser: (userId, payload) => fetch(`/api/admin/users/${userId}`, {
+    method: 'PATCH', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
+  }).then(handle),
   resetUserPassword: (userId) => postJson(`/api/admin/users/${userId}/reset-password`),
   setUserActive: (userId, isActive) => postJson(`/api/admin/users/${userId}/active`, { is_active: isActive }),
   unlockUserLogin: (userId) => postJson(`/api/admin/users/${userId}/unlock-login`),
@@ -228,6 +231,7 @@ export const api = {
   },
 
   // ---- Accounting (ERP Phase 1) ----
+  accBusinessUnits: () => getJson('/api/accounting/business-units'),
   accTemplates: () => getJson('/api/accounting/templates'),
   accProvision: (buId, template) => postJson(`/api/accounting/provision/${buId}?template=${template}`),
   accCoa: (buId) => getJson(`/api/accounting/coa?business_unit_id=${buId}`),

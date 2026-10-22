@@ -87,8 +87,8 @@ export default function ManageUsersPage() {
       setFormError('Username and full name are required.');
       return;
     }
-    if (form.role === 'CEO' && !form.business_unit_id) {
-      setFormError('Pick a business unit for this CEO.');
+    if ((form.role === 'CEO' || form.role === 'Accountant') && !form.business_unit_id) {
+      setFormError(`Pick a business unit for this ${form.role}.`);
       return;
     }
     setSaving(true);
@@ -97,7 +97,7 @@ export default function ManageUsersPage() {
         username: form.username.trim(),
         full_name: form.full_name.trim(),
         role: form.role,
-        business_unit_id: form.role === 'CEO' ? Number(form.business_unit_id) : null,
+        business_unit_id: (form.role === 'CEO' || form.role === 'Accountant') ? Number(form.business_unit_id) : null,
       });
       setForm(EMPTY_FORM);
       setShowAddForm(false);
@@ -184,6 +184,23 @@ export default function ManageUsersPage() {
       showBanner({ text: `${u.username} was ${u.is_active ? 'deactivated' : 'reactivated'}.`, tone: 'success' });
     } catch (err) {
       showBanner({ text: err instanceof ApiError ? err.message : 'Failed to update account status', tone: 'error' });
+    } finally {
+      setBusyUserId(null);
+    }
+  }
+
+  // One BU per accountant: reassign (or assign a legacy unassigned
+  // accountant) inline. The backend bumps the user's token version, so a
+  // signed-in accountant re-logs in under the new scope immediately.
+  async function handleAssignBu(u, value) {
+    setBusyUserId(u.id);
+    setBanner(null);
+    try {
+      await api.updateUser(u.id, { business_unit_id: value ? Number(value) : null });
+      await loadUsers();
+      showBanner({ text: `${u.username}'s business unit was updated.`, tone: 'success' });
+    } catch (err) {
+      showBanner({ text: err instanceof ApiError ? err.message : 'Failed to update business unit', tone: 'error' });
     } finally {
       setBusyUserId(null);
     }
@@ -309,7 +326,7 @@ export default function ManageUsersPage() {
                   <option value="Accountant">Accountant</option>
                 </select>
               </div>
-              {form.role === 'CEO' && (
+              {(form.role === 'CEO' || form.role === 'Accountant') && (
                 <div>
                   <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">Business Unit</label>
                   <select
@@ -322,6 +339,11 @@ export default function ManageUsersPage() {
                       <option key={bu.id} value={bu.id}>{bu.name}</option>
                     ))}
                   </select>
+                  {form.role === 'Accountant' && (
+                    <p className="mt-1.5 text-[11px] text-slate-400 dark:text-slate-500">
+                      The accountant sees only this business unit's books — one account per BU.
+                    </p>
+                  )}
                 </div>
               )}
               <div>
@@ -508,7 +530,21 @@ export default function ManageUsersPage() {
                       <p className="text-xs text-slate-500 dark:text-slate-400">{u.username}</p>
                     </td>
                     <td className="px-6 py-3.5 text-slate-600 dark:text-slate-400">{u.role === 'HO' ? 'Head Office' : u.role}</td>
-                    <td className="px-6 py-3.5 text-slate-600 dark:text-slate-400">{u.business_unit_name || '—'}</td>
+                    <td className="px-6 py-3.5 text-slate-600 dark:text-slate-400">
+                      {u.role === 'Accountant' ? (
+                        <select
+                          value={u.business_unit_id || ''}
+                          disabled={busyUserId === u.id}
+                          onChange={(e) => handleAssignBu(u, e.target.value)}
+                          className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent disabled:opacity-50"
+                        >
+                          <option value="">— assign a BU —</option>
+                          {businessUnits.map((bu) => (
+                            <option key={bu.id} value={bu.id}>{bu.name}</option>
+                          ))}
+                        </select>
+                      ) : (u.business_unit_name || '—')}
+                    </td>
                     <td className="px-6 py-3.5 text-center">
                       <div className="flex flex-col items-center gap-1">
                         {u.is_active ? (
