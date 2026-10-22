@@ -125,6 +125,15 @@ export default function CeoHistoryPage() {
                       {selectedDay.next_day_schedule && (
                         <p><span className="text-slate-400 font-medium">Next Day Schedule: </span><span className="whitespace-pre-wrap">{selectedDay.next_day_schedule}</span></p>
                       )}
+                      {selectedDay.problems_today && (
+                        <p><span className="text-amber-600 font-medium">Problems: </span><span className="whitespace-pre-wrap">{selectedDay.problems_today}</span></p>
+                      )}
+                      {selectedDay.help_needed && (
+                        <div className="rounded-lg bg-red-500/10 border border-red-500/25 px-3 py-2">
+                          <p className="text-red-600 font-semibold">Help Needed from HO / Chairman</p>
+                          <p className="whitespace-pre-wrap text-slate-700">{selectedDay.help_needed}</p>
+                        </div>
+                      )}
                       {selectedDay.revenue != null && (
                         <p><span className="text-slate-400 font-medium">Revenue: </span><span className="font-semibold text-slate-700 tabular-nums">{money(selectedDay.revenue)}</span></p>
                       )}

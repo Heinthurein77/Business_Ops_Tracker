@@ -62,6 +62,18 @@ function DayDetail({ day, ceoName }) {
                 <DetailField label="Site Visits" value={day.site_visits} />
                 <DetailField label="Key Decisions" value={day.key_decisions} />
                 <DetailField label="Next Day Schedule" value={day.next_day_schedule} />
+                {day.problems_today && (
+                  <div className="rounded-lg bg-amber-500/10 border border-amber-500/25 px-2.5 py-2">
+                    <p className="text-amber-700 font-semibold uppercase tracking-wide text-[10px] mb-0.5">Problems Today</p>
+                    <p className="text-slate-700 whitespace-pre-wrap">{day.problems_today}</p>
+                  </div>
+                )}
+                {day.help_needed && (
+                  <div className="rounded-lg bg-red-500/10 border border-red-500/30 px-2.5 py-2">
+                    <p className="text-red-700 font-bold uppercase tracking-wide text-[10px] mb-0.5">Help Needed — HO / Chairman</p>
+                    <p className="text-slate-700 whitespace-pre-wrap">{day.help_needed}</p>
+                  </div>
+                )}
                 {day.activity_other_notes && <DetailField label="Other Notes" value={day.activity_other_notes} />}
                 <div className="pt-1.5 border-t border-slate-100 flex justify-between">
                   <span className="text-slate-500">Gym / Swim / Cycle</span>

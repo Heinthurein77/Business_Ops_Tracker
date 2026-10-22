@@ -53,6 +53,8 @@ const emptyForm = {
   site_visits: '',
   key_decisions: '',
   next_day_schedule: '',
+  problems_today: '',
+  help_needed: '',
   gym_percent: '',
   swimming_percent: '',
   cycle_percent: '',
@@ -103,6 +105,8 @@ export default function CeoDashboardPage() {
       site_visits: payload.form_activity?.site_visits ?? '',
       key_decisions: payload.form_activity?.key_decisions ?? '',
       next_day_schedule: payload.form_activity?.next_day_schedule ?? '',
+      problems_today: payload.form_activity?.problems_today ?? '',
+      help_needed: payload.form_activity?.help_needed ?? '',
       gym_percent: payload.form_activity?.gym_percent ?? '',
       swimming_percent: payload.form_activity?.swimming_percent ?? '',
       cycle_percent: payload.form_activity?.cycle_percent ?? '',
@@ -191,6 +195,8 @@ export default function CeoDashboardPage() {
     formData.append('site_visits', form.site_visits);
     formData.append('key_decisions', form.key_decisions);
     formData.append('next_day_schedule', form.next_day_schedule);
+    formData.append('problems_today', form.problems_today);
+    formData.append('help_needed', form.help_needed);
     formData.append('gym_percent', form.gym_percent);
     formData.append('swimming_percent', form.swimming_percent);
     formData.append('cycle_percent', form.cycle_percent);
@@ -825,6 +831,31 @@ export default function CeoDashboardPage() {
                   onChange={(e) => updateField('next_day_schedule', e.target.value)}
                   className={inputClass}
                 />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1.5">
+                  Problems Today <span className="text-slate-400 font-normal">(optional)</span>
+                </label>
+                <textarea
+                  rows={4}
+                  placeholder="Blockers, issues, delays — anything that slowed the business down today..."
+                  value={form.problems_today}
+                  onChange={(e) => updateField('problems_today', e.target.value)}
+                  className={inputClass}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-amber-700 mb-1.5">
+                  Help Needed from HO / Chairman <span className="text-slate-400 font-normal">(optional)</span>
+                </label>
+                <textarea
+                  rows={4}
+                  placeholder="What decision or support do you need from Head Office or the Chairman?"
+                  value={form.help_needed}
+                  onChange={(e) => updateField('help_needed', e.target.value)}
+                  className="w-full rounded-lg border border-amber-300 bg-amber-50/60 text-slate-800 placeholder:text-slate-400 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                />
+                <p className="text-[11px] text-slate-400 mt-1.5">Filling this in flags your report to the Chairman &amp; Head Office as needing attention.</p>
               </div>
             </div>
             <div className="px-6 pb-6 grid sm:grid-cols-3 gap-5">
