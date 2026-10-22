@@ -82,7 +82,18 @@ class User(Base):
             sqlite_where=text("role = 'CEO' AND is_active = 1"),
         ),
         _pg_check("role IN ('Chairman', 'HO', 'CEO', 'Accountant')", name="ck_users_role"),
-        _pg_check("(role = 'CEO') = (business_unit_id IS NOT NULL)", name="ck_users_ceo_has_bu"),
+        # BU assignment: a CEO always belongs to exactly one BU; an
+        # Accountant is likewise assigned to exactly one BU (legacy rows
+        # created before per-BU accountants existed may still be NULL —
+        # those keep group-wide accounting access, so the rule can't
+        # require a BU for them at the database level); Chairman/HO are
+        # group-level and never carry a BU.
+        _pg_check(
+            "(role = 'CEO' AND business_unit_id IS NOT NULL) OR "
+            "(role IN ('Chairman', 'HO') AND business_unit_id IS NULL) OR "
+            "(role = 'Accountant')",
+            name="ck_users_bu_assignment",
+        ),
         _pg_check("username = lower(username)", name="ck_users_username_lower"),
     )
 

@@ -140,6 +140,14 @@ class SetUserActiveRequest(BaseModel):
     is_active: bool
 
 
+class UpdateUserRequest(BaseModel):
+    # The field is required-but-nullable on purpose: an edit must say what
+    # the account's BU assignment should become (null = unassign, which
+    # only group-level roles may end up in — the endpoint enforces the
+    # per-role rules).
+    business_unit_id: Optional[int]
+
+
 class CeoProfileRequest(BaseModel):
     full_name: str = Field(min_length=1, max_length=150)
     executive_title: str = Field(min_length=1, max_length=120, default="Chief Executive Officer")

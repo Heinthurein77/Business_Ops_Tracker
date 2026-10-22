@@ -20,7 +20,7 @@ from src.client_ip import get_client_ip
 from src.config import settings
 from src.database import get_db
 from src.models import AuditLog, BusinessUnit, PasswordResetRequest, User
-from src.schemas import CreateUserRequest, SetUserActiveRequest
+from src.schemas import CreateUserRequest, SetUserActiveRequest, UpdateUserRequest
 from src.throttle import LOGIN_UNLOCK, login_lockout_remaining
 from src.utils import format_local_datetime, log_audit
 
@@ -69,7 +69,7 @@ def _no_store(response: Response) -> None:
 
 @router.get("/users")
 def list_users(user: User = Depends(require_chairman), db: Session = Depends(get_db)):
-    users = db.query(User).filter(User.role.in_(["CEO", "HO"])).order_by(User.role.desc(), User.business_unit_id).all()
+    users = db.query(User).filter(User.role.in_(["CEO", "HO", "Accountant"])).order_by(User.role.desc(), User.business_unit_id).all()
     business_units = {bu.id: bu for bu in db.query(BusinessUnit).all()}
 
     entries = []
@@ -108,12 +108,17 @@ def create_user(
         raise HTTPException(status_code=400, detail=f'Username "{payload.username}" is already taken')
 
     business_unit_id = None
-    if payload.role == "CEO":
+    if payload.role in ("CEO", "Accountant"):
+        # CEOs and accountants both belong to exactly one business unit:
+        # the CEO runs it, the accountant keeps its books — and the
+        # accounting API pins a BU-assigned accountant to that BU.
         if payload.business_unit_id is None:
-            raise HTTPException(status_code=400, detail="A business unit is required for a CEO account")
+            raise HTTPException(status_code=400, detail=f"A business unit is required for a {payload.role} account")
         bu = db.query(BusinessUnit).filter(BusinessUnit.id == payload.business_unit_id).first()
         if not bu:
             raise HTTPException(status_code=404, detail="Business unit not found")
+        business_unit_id = bu.id
+    if payload.role == "CEO":
         # Every dashboard query keys its CEO lookup by business_unit_id
         # assuming exactly one CEO per BU (see admin.py's ceo_by_bu, and
         # ceo.py's own "strictly one CEO per business unit" comment) — a
@@ -128,7 +133,6 @@ def create_user(
                 status_code=400,
                 detail=f'"{bu.name}" already has an active CEO account ("{existing_ceo.username}") — deactivate it first before creating a replacement.',
             )
-        business_unit_id = bu.id
 
     new_user = User(
         username=payload.username,
@@ -266,6 +270,84 @@ def set_user_active(
     )
 
     return {"ok": True}
+
+
+@router.patch("/users/{user_id}")
+def update_user(
+    user_id: int,
+    payload: UpdateUserRequest,
+    request: Request,
+    user: User = Depends(require_chairman),
+    db: Session = Depends(get_db),
+):
+    """Change an account's business-unit assignment.
+
+    The assignment is access control, not bookkeeping: a CEO runs the BU,
+    an accountant is pinned to it by the accounting API, and Chairman/HO
+    are group-level (never assigned). Moving an account therefore bumps
+    its token_version — every live session dies and the holder signs back
+    in under the new scope, instead of an open tab silently keeping access
+    to the wrong BU's books."""
+    target = db.query(User).filter(User.id == user_id).with_for_update().first()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    new_bu_id = payload.business_unit_id
+    if target.role in ("CEO", "Accountant") and new_bu_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"A {target.role} account must be assigned to a business unit",
+        )
+    if target.role in ("Chairman", "HO") and new_bu_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{target.role} accounts are group-level and cannot be assigned to a business unit",
+        )
+    if new_bu_id is not None:
+        bu = db.query(BusinessUnit).filter(BusinessUnit.id == new_bu_id).first()
+        if not bu:
+            raise HTTPException(status_code=404, detail="Business unit not found")
+
+    if target.business_unit_id == new_bu_id:
+        return {"ok": True, "user_id": target.id, "business_unit_id": new_bu_id}
+
+    if target.role == "CEO" and target.is_active:
+        other_ceo = (
+            db.query(User)
+            .filter(
+                User.role == "CEO",
+                User.business_unit_id == new_bu_id,
+                User.is_active == True,
+                User.id != target.id,
+            )
+            .first()
+        )
+        if other_ceo:
+            raise HTTPException(
+                status_code=409,
+                detail=f'This business unit already has an active CEO ("{other_ceo.username}") — deactivate that account first.',
+            )
+
+    target.business_unit_id = new_bu_id
+    try:
+        # Commits the assignment and revokes every session issued under
+        # the old one (same pattern as set_user_active).
+        bump_token_version(db, target)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This business unit already has an active CEO — deactivate that account first.",
+        )
+
+    log_audit(
+        db,
+        user,
+        "USER_BU_UPDATED",
+        f"target_username={target.username} business_unit_id={new_bu_id}",
+        request,
+    )
+    return {"ok": True, "user_id": target.id, "business_unit_id": new_bu_id}
 
 
 @router.post("/users/{user_id}/unlock-login")
