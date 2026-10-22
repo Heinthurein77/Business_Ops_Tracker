@@ -1647,7 +1647,7 @@ def ceo_monthly_summary(
         else:
             pdf.set_font("helvetica", "", 10.5)
             pdf.set_text_color(185, 28, 28)
-            pdf.cell(W, 5.5, "Status: Open — awaiting a response", ln=1)
+            pdf.cell(W, 5.5, t("Status: Open - awaiting a response"), ln=1)
             pdf.set_text_color(0, 0, 0)
         pdf.set_font("helvetica", "", 11)
         pdf.ln(1.5)
