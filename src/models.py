@@ -177,6 +177,11 @@ class ActivityLog(Base):
     site_visits = Column(Text, nullable=True)
     key_decisions = Column(Text, nullable=True)
     next_day_schedule = Column(Text, nullable=True)
+    # Blockers the CEO hit today, and support they are asking HO/Chairman
+    # for — a non-empty help_needed is the escalation flag the executive
+    # Daily Activities page surfaces in its "Needs Attention" section.
+    problems_today = Column(Text, nullable=True)
+    help_needed = Column(Text, nullable=True)
     document_url = Column(String(500), nullable=True)
     gym_percent = Column(Integer, nullable=True)  # 0-100
     swimming_percent = Column(Integer, nullable=True)  # 0-100

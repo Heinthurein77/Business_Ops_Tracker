@@ -182,7 +182,8 @@ def test_ceo_dashboard_form_date_prefills_that_day(db):
 _SUBMIT_DEFAULTS = dict(
     report_date="", revenue="", cash_flow="", receivable="", payable="",
     other_amount="", financial_other_notes="", meetings_attended="",
-    site_visits="", key_decisions="", next_day_schedule="", gym_percent="",
+    site_visits="", key_decisions="", next_day_schedule="", problems_today="",
+    help_needed="", gym_percent="",
     swimming_percent="", cycle_percent="", activity_other_notes="",
     daily_steps="", heart_rate="", sleep_hours="", bp_systolic="",
     bp_diastolic="", health_other_notes="", event_flag="false",

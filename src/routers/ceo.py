@@ -395,6 +395,8 @@ def ceo_dashboard(
             "site_visits": a.site_visits,
             "key_decisions": a.key_decisions,
             "next_day_schedule": a.next_day_schedule,
+            "problems_today": a.problems_today,
+            "help_needed": a.help_needed,
             "document_url": a.document_url,
             "gym_percent": a.gym_percent,
             "swimming_percent": a.swimming_percent,
@@ -825,6 +827,8 @@ def submit_report(
     site_visits: str = Form(""),
     key_decisions: str = Form(""),
     next_day_schedule: str = Form(""),
+    problems_today: str = Form(""),
+    help_needed: str = Form(""),
     gym_percent: str = Form(""),
     swimming_percent: str = Form(""),
     cycle_percent: str = Form(""),
@@ -909,6 +913,8 @@ def submit_report(
     site_visits = form_text(site_visits, "Site visits", MAX_NARRATIVE_TEXT_LEN)
     key_decisions = form_text(key_decisions, "Key decisions", MAX_NARRATIVE_TEXT_LEN)
     next_day_schedule = form_text(next_day_schedule, "Next day schedule", MAX_NARRATIVE_TEXT_LEN)
+    problems_today = form_text(problems_today, "Problems today", MAX_NARRATIVE_TEXT_LEN)
+    help_needed = form_text(help_needed, "Help needed", MAX_NARRATIVE_TEXT_LEN)
     activity_other_notes = form_text(activity_other_notes, "Activity notes", MAX_NARRATIVE_TEXT_LEN)
     health_other_notes = form_text(health_other_notes, "Health notes", MAX_NARRATIVE_TEXT_LEN)
     social_other_notes = form_text(social_other_notes, "Social notes", MAX_NARRATIVE_TEXT_LEN)
@@ -984,6 +990,8 @@ def submit_report(
             "site_visits": activity.site_visits,
             "key_decisions": activity.key_decisions,
             "next_day_schedule": activity.next_day_schedule,
+            "problems_today": activity.problems_today,
+            "help_needed": activity.help_needed,
             "gym_percent": activity.gym_percent,
             "swimming_percent": activity.swimming_percent,
             "cycle_percent": activity.cycle_percent,
@@ -1004,6 +1012,8 @@ def submit_report(
     activity.site_visits = site_visits
     activity.key_decisions = key_decisions
     activity.next_day_schedule = next_day_schedule
+    activity.problems_today = problems_today or None
+    activity.help_needed = help_needed or None
     if document_url:
         activity.document_url = document_url
     activity.gym_percent = gym_percent_val
@@ -1098,6 +1108,8 @@ def submit_report(
             "site_visits": activity.site_visits,
             "key_decisions": activity.key_decisions,
             "next_day_schedule": activity.next_day_schedule,
+            "problems_today": activity.problems_today,
+            "help_needed": activity.help_needed,
             "gym_percent": gym_percent_val,
             "swimming_percent": swimming_percent_val,
             "cycle_percent": cycle_percent_val,

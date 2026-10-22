@@ -472,6 +472,8 @@ FIELD_LABELS = {
     "site_visits": "Site Visits",
     "key_decisions": "Key Decisions",
     "next_day_schedule": "Next Day Schedule",
+    "problems_today": "Problems Today",
+    "help_needed": "Help Needed",
     "gym_percent": "Gym %",
     "swimming_percent": "Swimming %",
     "cycle_percent": "Cycle %",
@@ -492,7 +494,8 @@ _PERCENT_FIELDS = {"gym_percent", "swimming_percent", "cycle_percent"}
 _BOOL_FIELDS = {"event_flag", "meeting_flag", "golf_flag"}
 _TEXT_FIELDS = {
     "financial_other_notes", "meetings_attended", "site_visits", "key_decisions",
-    "next_day_schedule", "activity_other_notes", "health_other_notes", "social_other_notes",
+    "next_day_schedule", "problems_today", "help_needed", "activity_other_notes",
+    "health_other_notes", "social_other_notes",
 }
 
 # Personal data that must never be copied into audit_logs.details: health
@@ -689,6 +692,8 @@ def build_ceo_activity_calendar(
                     "site_visits": log.site_visits if log else None,
                     "key_decisions": log.key_decisions if log else None,
                     "next_day_schedule": log.next_day_schedule if log else None,
+                    "problems_today": log.problems_today if log else None,
+                    "help_needed": log.help_needed if log else None,
                     "document_url": log.document_url if log else None,
                     "gym_percent": log.gym_percent if log else None,
                     "swimming_percent": log.swimming_percent if log else None,
