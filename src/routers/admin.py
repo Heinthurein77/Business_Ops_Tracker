@@ -28,10 +28,11 @@ from src.models import (
     HeadOfficeMonthlyTarget,
     HeadOfficeSocialLog,
     MonthlyTarget,
+    Notification,
     SocialLog,
     User,
 )
-from src.schemas import MonthlyTargetRequest
+from src.schemas import MonthlyTargetRequest, ResolveHelpRequest
 from src.utils import (
     APP_TZ,
     activity_quadrant_status,
@@ -1216,20 +1217,57 @@ def ceo_activity_calendar(
     }
 
 
-def _activity_entry(log: ActivityLog, bu: Optional[BusinessUnit], ceo_username: str) -> dict:
+def _needs_help(log: Optional[ActivityLog]) -> bool:
+    """An OPEN help escalation: the CEO wrote a help request and no
+    Chairman/HO response has been recorded yet. A resolved request stops
+    flagging everywhere (Needs Attention, badges, header counts) even
+    though the help text itself stays on the report."""
+    return bool(
+        log is not None
+        and log.help_needed
+        and log.help_needed.strip()
+        and log.help_resolved_at is None
+    )
+
+
+def _help_fields(log: ActivityLog, resolver_username: Optional[str] = None) -> dict:
+    """The help-request fields shared by every admin activity payload —
+    the ask, its open/resolved state, and (once answered) the response."""
     return {
+        "problems_today": log.problems_today or "",
+        "help_needed": log.help_needed or "",
+        "needs_help": _needs_help(log),
+        "help_resolved_at": format_local_datetime(log.help_resolved_at),
+        "help_resolved_by_username": resolver_username,
+        "help_response": log.help_response or "",
+    }
+
+
+def _effective_percent(health_row, activity_row, field: str):
+    """Exercise % display value: the health row's post-move value when
+    present, else the activity row's pre-move legacy value."""
+    value = getattr(health_row, field, None) if health_row is not None else None
+    if value is not None:
+        return value
+    return getattr(activity_row, field, None) if activity_row is not None else None
+
+
+def _activity_entry(log: ActivityLog, bu: Optional[BusinessUnit], ceo_username: str,
+                    resolver_username: Optional[str] = None) -> dict:
+    return {
+        "id": log.id,
         "bu_code": bu.code if bu else "-",
         "bu_name": bu.name if bu else "-",
         "ceo_username": ceo_username,
         "report_date": log.report_date.strftime("%d %b %Y"),
         "submitted_at": format_local_datetime(log.updated_at),
         "meetings_attended": log.meetings_attended or "",
+        "meetings_count": log.meetings_count,
         "site_visits": log.site_visits or "",
         "key_decisions": log.key_decisions or "",
+        "key_achievement": log.key_achievement or "",
         "next_day_schedule": log.next_day_schedule or "",
-        "problems_today": log.problems_today or "",
-        "help_needed": log.help_needed or "",
-        "needs_help": bool(log.help_needed and log.help_needed.strip()),
+        **_help_fields(log, resolver_username),
         "document_url": log.document_url,
         "gym_percent": log.gym_percent,
         "swimming_percent": log.swimming_percent,
@@ -1251,33 +1289,78 @@ def activity_dashboard(user: User = Depends(require_admin), db: Session = Depend
         db.query(ActivityLog).filter(ActivityLog.report_date == today)
         .order_by(ActivityLog.updated_at.desc()).all()
     )
-    today_briefing = [
-        _activity_entry(log, bu_by_id.get(log.business_unit_id), ceo_by_bu.get(log.business_unit_id, "-"))
-        for log in today_rows
-    ]
-
-    directory = []
+    history_rows = (
+        db.query(ActivityLog).order_by(ActivityLog.report_date.desc(), ActivityLog.updated_at.desc()).limit(300).all()
+    )
+    latest_by_bu = {}
+    latest_health_by_bu = {}
     for bu in business_units:
-        latest = (
+        latest_by_bu[bu.id] = (
             db.query(ActivityLog).filter(ActivityLog.business_unit_id == bu.id)
             .order_by(ActivityLog.report_date.desc()).first()
         )
+        latest_health_by_bu[bu.id] = (
+            db.query(HealthStatus).filter(HealthStatus.business_unit_id == bu.id)
+            .order_by(HealthStatus.report_date.desc()).first()
+        )
+    today_health_by_bu = {
+        h.business_unit_id: h
+        for h in db.query(HealthStatus).filter(HealthStatus.report_date == today).all()
+    }
+
+    # Resolver usernames for every log this payload serializes, in one
+    # query — the help fields name who answered each request.
+    resolver_ids = {
+        log.help_resolved_by
+        for log in today_rows + history_rows + [l for l in latest_by_bu.values() if l is not None]
+        if log.help_resolved_by is not None
+    }
+    resolver_usernames = {}
+    if resolver_ids:
+        resolver_usernames = {
+            u.id: u.username for u in db.query(User).filter(User.id.in_(resolver_ids)).all()
+        }
+
+    def _resolver_name(log):
+        return resolver_usernames.get(log.help_resolved_by) if log.help_resolved_by else None
+
+    today_briefing = []
+    for log in today_rows:
+        entry = _activity_entry(log, bu_by_id.get(log.business_unit_id),
+                                ceo_by_bu.get(log.business_unit_id, "-"), _resolver_name(log))
+        # Briefing cards read exercise % from the health row first (the
+        # form collects it there now), falling back to the activity row.
+        health_today = today_health_by_bu.get(log.business_unit_id)
+        for field in ("gym_percent", "swimming_percent", "cycle_percent"):
+            entry[field] = _effective_percent(health_today, log, field)
+        today_briefing.append(entry)
+
+    directory = []
+    for bu in business_units:
+        latest = latest_by_bu[bu.id]
+        latest_health = latest_health_by_bu[bu.id]
         directory.append(
             {
                 "bu_id": bu.id,
                 "bu_code": bu.code,
                 "bu_name": bu.name,
                 "ceo_username": ceo_by_bu.get(bu.id, "-"),
+                "help_log_id": latest.id if latest else None,
                 "meetings_attended": latest.meetings_attended if latest else None,
+                "meetings_count": latest.meetings_count if latest else None,
                 "site_visits": latest.site_visits if latest else None,
                 "key_decisions": latest.key_decisions if latest else None,
+                "key_achievement": latest.key_achievement if latest else None,
                 "next_day_schedule": latest.next_day_schedule if latest else None,
                 "problems_today": latest.problems_today if latest else None,
                 "help_needed": latest.help_needed if latest else None,
-                "needs_help": bool(latest and latest.help_needed and latest.help_needed.strip()),
-                "gym_percent": latest.gym_percent if latest else None,
-                "swimming_percent": latest.swimming_percent if latest else None,
-                "cycle_percent": latest.cycle_percent if latest else None,
+                "needs_help": _needs_help(latest),
+                "help_resolved_at": format_local_datetime(latest.help_resolved_at) if latest else None,
+                "help_resolved_by_username": _resolver_name(latest) if latest else None,
+                "help_response": latest.help_response if latest else None,
+                "gym_percent": _effective_percent(latest_health, latest, "gym_percent"),
+                "swimming_percent": _effective_percent(latest_health, latest, "swimming_percent"),
+                "cycle_percent": _effective_percent(latest_health, latest, "cycle_percent"),
                 "document_url": latest.document_url if latest else None,
                 "status": activity_quadrant_status(latest),
                 "reported_display": format_local_datetime(latest.updated_at) if latest else None,
@@ -1291,11 +1374,9 @@ def activity_dashboard(user: User = Depends(require_admin), db: Session = Depend
         "no_data": sum(1 for d in directory if d["status"] == "grey"),
     }
 
-    history_rows = (
-        db.query(ActivityLog).order_by(ActivityLog.report_date.desc(), ActivityLog.updated_at.desc()).limit(300).all()
-    )
     activity_history = [
-        _activity_entry(log, bu_by_id.get(log.business_unit_id), ceo_by_bu.get(log.business_unit_id, "-"))
+        _activity_entry(log, bu_by_id.get(log.business_unit_id),
+                        ceo_by_bu.get(log.business_unit_id, "-"), _resolver_name(log))
         for log in history_rows
     ]
 
@@ -1308,6 +1389,293 @@ def activity_dashboard(user: User = Depends(require_admin), db: Session = Depend
         "submitted_count": len(today_briefing),
         "total_business_units": len(business_units),
     }
+
+
+@router.post("/activity-logs/{log_id}/resolve-help")
+def resolve_help_request(
+    log_id: int,
+    payload: ResolveHelpRequest,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Answers one CEO help_needed escalation: records the Chairman/HO
+    response on the activity log (which clears the Needs Attention flag
+    everywhere, since needs_help requires an unresolved request) and
+    notifies the CEO who asked. The response is deliberately NOT copied
+    into the audit details — like other free text, the audit trail only
+    records that the resolution happened, and for which report."""
+    response_text = payload.response.strip()
+    if not response_text:
+        raise HTTPException(status_code=422, detail="Response must not be empty")
+
+    log = db.query(ActivityLog).filter(ActivityLog.id == log_id).first()
+    if log is None:
+        raise HTTPException(status_code=404, detail="Activity log not found")
+    if not (log.help_needed and log.help_needed.strip()):
+        raise HTTPException(status_code=400, detail="This report has no help request to resolve")
+    if log.help_resolved_at is not None:
+        raise HTTPException(status_code=400, detail="This help request has already been resolved")
+
+    business_unit = db.query(BusinessUnit).filter(BusinessUnit.id == log.business_unit_id).first()
+    log.help_resolved_at = datetime.utcnow()
+    log.help_resolved_by = user.id
+    log.help_response = response_text
+
+    if log.submitted_by:
+        title = (
+            f"Help request answered — {business_unit.name if business_unit else 'your unit'} "
+            f"({log.report_date.strftime('%d %b %Y')})"
+        )[:200]
+        db.add(Notification(
+            user_id=log.submitted_by,
+            type="help_resolved",
+            title=title,
+            message=response_text,
+            link=f"/ceo?date={log.report_date.isoformat()}",
+        ))
+    db.commit()
+    log_audit(
+        db, user, "HELP_REQUEST_RESOLVED",
+        f"log_id={log.id} bu_id={log.business_unit_id} date={log.report_date.isoformat()}",
+        request,
+    )
+    return {
+        "ok": True,
+        "help_resolved_at": format_local_datetime(log.help_resolved_at),
+        "help_resolved_by_username": user.username,
+        "help_response": log.help_response,
+    }
+
+
+@router.get("/ceo-monthly-summary")
+def ceo_monthly_summary(
+    business_unit_id: int,
+    month: str = "",
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """One business unit's CEO month as a printable PDF: reporting stats,
+    the month's achievements, problems and help requests (with their
+    resolution state), and a health snapshot. `month` is YYYY-MM;
+    malformed values fall back to the current month, mirroring the CEO
+    activity calendar endpoint."""
+    import calendar as _cal
+    from io import BytesIO
+
+    from fpdf import FPDF
+
+    business_unit = db.query(BusinessUnit).filter(BusinessUnit.id == business_unit_id).first()
+    if business_unit is None:
+        raise HTTPException(status_code=404, detail="Business unit not found")
+
+    today = today_local()
+    try:
+        year, month_num = (int(part) for part in month.split("-", 1))
+        date(year, month_num, 1)  # validates the month is real
+        if not (2000 <= year <= 2100):
+            raise ValueError("month out of supported range")
+    except (ValueError, TypeError):
+        year, month_num = today.year, today.month
+    month_start = date(year, month_num, 1)
+    days_in_month = _cal.monthrange(year, month_num)[1]
+    month_end = date(year, month_num, days_in_month)
+    month_label = month_start.strftime("%B %Y")
+
+    ceo_user = (
+        db.query(User)
+        .filter(User.business_unit_id == business_unit.id, User.role == "CEO", User.is_active == True)  # noqa: E712
+        .first()
+    )
+
+    logs = (
+        db.query(ActivityLog)
+        .filter(
+            ActivityLog.business_unit_id == business_unit.id,
+            ActivityLog.report_date >= month_start,
+            ActivityLog.report_date <= month_end,
+        )
+        .order_by(ActivityLog.report_date)
+        .all()
+    )
+    health_rows = (
+        db.query(HealthStatus)
+        .filter(
+            HealthStatus.business_unit_id == business_unit.id,
+            HealthStatus.report_date >= month_start,
+            HealthStatus.report_date <= month_end,
+        )
+        .order_by(HealthStatus.report_date)
+        .all()
+    )
+    fin_rows = (
+        db.query(DailyFinancial)
+        .filter(
+            DailyFinancial.business_unit_id == business_unit.id,
+            DailyFinancial.report_date >= month_start,
+            DailyFinancial.report_date <= month_end,
+        )
+        .all()
+    )
+
+    days_reported = len({log.report_date for log in logs})
+    total_meetings = sum(log.meetings_count or 0 for log in logs)
+    month_revenue = sum(float(f.revenue or 0) for f in fin_rows)
+
+    achievements = [
+        (log.report_date, log.key_achievement) for log in logs
+        if log.key_achievement and log.key_achievement.strip()
+    ]
+    problems = [
+        (log.report_date, log.problems_today) for log in logs
+        if log.problems_today and log.problems_today.strip()
+    ]
+    help_requests = [
+        log for log in logs if log.help_needed and log.help_needed.strip()
+    ]
+    resolver_usernames = {}
+    resolver_ids = {log.help_resolved_by for log in help_requests if log.help_resolved_by is not None}
+    if resolver_ids:
+        resolver_usernames = {
+            u.id: u.username for u in db.query(User).filter(User.id.in_(resolver_ids)).all()
+        }
+
+    # Health snapshot — averages over the days that recorded each metric.
+    steps = [h.daily_steps for h in health_rows if h.daily_steps is not None]
+    sleeps = [float(h.sleep_hours) for h in health_rows if h.sleep_hours is not None]
+    weighted = [h for h in health_rows if h.weight_kg is not None]
+    latest_weight = float(weighted[-1].weight_kg) if weighted else None
+    health_by_date = {h.report_date: h for h in health_rows}
+    logs_by_date = {log.report_date: log for log in logs}
+
+    def _exercise_average(field: str):
+        values = []
+        for day in sorted(set(health_by_date) | set(logs_by_date)):
+            value = _effective_percent(health_by_date.get(day), logs_by_date.get(day), field)
+            if value is not None:
+                values.append(value)
+        return (sum(values) / len(values)) if values else None
+
+    exercise_averages = {
+        "Gym": _exercise_average("gym_percent"),
+        "Swimming": _exercise_average("swimming_percent"),
+        "Cycle": _exercise_average("cycle_percent"),
+    }
+
+    def t(text):
+        """Strip characters the core latin-1 PDF font can't render."""
+        return (text or "").encode("latin-1", errors="replace").decode("latin-1")
+
+    def money(v):
+        return f"Ks {v:,.0f}"
+
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=16)
+    pdf.add_page()
+    W = pdf.w - 20
+
+    pdf.set_font("helvetica", "B", 18)
+    pdf.cell(W, 10, "CEO Monthly Summary", ln=1)
+    pdf.set_font("helvetica", "", 11)
+    pdf.set_text_color(100, 100, 100)
+    ceo_label = (
+        f"{ceo_user.full_name or ceo_user.username} ({ceo_user.username})" if ceo_user else "No active CEO assigned"
+    )
+    pdf.cell(W, 6, t(f"{business_unit.name} ({business_unit.code})  |  {month_label}  |  Generated {today.isoformat()}"), ln=1)
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(4)
+
+    pdf.set_font("helvetica", "B", 13)
+    pdf.cell(W, 8, "Overview", ln=1)
+    pdf.set_font("helvetica", "", 11)
+    for key, value in [
+        ("CEO", ceo_label),
+        ("Days reported", f"{days_reported} of {days_in_month}"),
+        ("Total meetings", str(total_meetings)),
+        ("Month revenue", money(month_revenue)),
+    ]:
+        pdf.cell(45, 6.5, key)
+        pdf.cell(0, 6.5, t(value), ln=1)
+    pdf.ln(3)
+
+    def _section(title: str):
+        pdf.set_font("helvetica", "B", 13)
+        pdf.cell(W, 8, title, ln=1)
+        pdf.set_font("helvetica", "", 11)
+
+    def _dated_entries(entries, empty_text: str):
+        if not entries:
+            pdf.set_font("helvetica", "I", 11)
+            pdf.cell(W, 6.5, empty_text, ln=1)
+            pdf.set_font("helvetica", "", 11)
+            return
+        for entry_date, text in entries:
+            pdf.set_font("helvetica", "B", 10.5)
+            pdf.cell(W, 5.5, entry_date.strftime("%d %b %Y"), ln=1)
+            pdf.set_font("helvetica", "", 11)
+            pdf.multi_cell(W, 6, t(text.strip()))
+            pdf.ln(1.5)
+
+    _section("Key Achievements")
+    _dated_entries(achievements, "No achievements recorded this month.")
+    pdf.ln(2)
+
+    _section("Problems Reported")
+    _dated_entries(problems, "No problems recorded this month.")
+    pdf.ln(2)
+
+    _section("Help Requests")
+    if not help_requests:
+        pdf.set_font("helvetica", "I", 11)
+        pdf.cell(W, 6.5, "No help requests this month.", ln=1)
+        pdf.set_font("helvetica", "", 11)
+    for log in help_requests:
+        pdf.set_font("helvetica", "B", 10.5)
+        pdf.cell(W, 5.5, log.report_date.strftime("%d %b %Y"), ln=1)
+        pdf.set_font("helvetica", "", 11)
+        pdf.multi_cell(W, 6, t(log.help_needed.strip()))
+        if log.help_resolved_at is not None:
+            resolver = resolver_usernames.get(log.help_resolved_by, "HO / Chairman")
+            pdf.set_font("helvetica", "", 10.5)
+            pdf.set_text_color(21, 128, 61)
+            pdf.multi_cell(
+                W, 5.5,
+                t(f"Status: Resolved — {log.help_response or ''} "
+                  f"(by {resolver}, {format_local_datetime(log.help_resolved_at)})"),
+            )
+            pdf.set_text_color(0, 0, 0)
+        else:
+            pdf.set_font("helvetica", "", 10.5)
+            pdf.set_text_color(185, 28, 28)
+            pdf.cell(W, 5.5, "Status: Open — awaiting a response", ln=1)
+            pdf.set_text_color(0, 0, 0)
+        pdf.set_font("helvetica", "", 11)
+        pdf.ln(1.5)
+    pdf.ln(2)
+
+    _section("Health Snapshot")
+    health_lines = []
+    if steps:
+        health_lines.append(("Average daily steps", f"{sum(steps) / len(steps):,.0f}"))
+    if sleeps:
+        health_lines.append(("Average sleep", f"{sum(sleeps) / len(sleeps):.1f} hrs"))
+    if latest_weight is not None:
+        health_lines.append(("Latest weight", f"{latest_weight:.1f} kg"))
+    for label, average in exercise_averages.items():
+        if average is not None:
+            health_lines.append((f"Average {label.lower()} completion", f"{average:.0f}%"))
+    if not health_lines:
+        pdf.set_font("helvetica", "I", 11)
+        pdf.cell(W, 6.5, "No health data recorded this month.", ln=1)
+        pdf.set_font("helvetica", "", 11)
+    for key, value in health_lines:
+        pdf.cell(55, 6.5, key)
+        pdf.cell(0, 6.5, t(value), ln=1)
+
+    buf = BytesIO(pdf.output())
+    filename = f"ceo_monthly_summary_{business_unit.code}_{month_start.strftime('%Y-%m')}.pdf"
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 def _health_entry(h: HealthStatus, bu: Optional[BusinessUnit], ceo_username: str) -> dict:
@@ -1328,6 +1696,11 @@ def _health_entry(h: HealthStatus, bu: Optional[BusinessUnit], ceo_username: str
         "sleep_hours": float(h.sleep_hours) if h.sleep_hours is not None else None,
         "bp_systolic": h.bp_systolic,
         "bp_diastolic": h.bp_diastolic,
+        "weight_kg": float(h.weight_kg) if h.weight_kg is not None else None,
+        "is_sick": h.is_sick,
+        "gym_percent": h.gym_percent,
+        "swimming_percent": h.swimming_percent,
+        "cycle_percent": h.cycle_percent,
         "risk": compute_health_risk(h),
     }
 
@@ -1373,6 +1746,11 @@ def health_dashboard(user: User = Depends(require_admin), db: Session = Depends(
                 "sleep_hours": float(latest.sleep_hours) if latest and latest.sleep_hours is not None else None,
                 "bp_systolic": latest.bp_systolic if latest else None,
                 "bp_diastolic": latest.bp_diastolic if latest else None,
+                "weight_kg": float(latest.weight_kg) if latest and latest.weight_kg is not None else None,
+                "is_sick": latest.is_sick if latest else None,
+                "gym_percent": latest.gym_percent if latest else None,
+                "swimming_percent": latest.swimming_percent if latest else None,
+                "cycle_percent": latest.cycle_percent if latest else None,
                 "risk": compute_health_risk(latest),
                 "reported_display": format_local_datetime(latest.updated_at) if latest else None,
             }

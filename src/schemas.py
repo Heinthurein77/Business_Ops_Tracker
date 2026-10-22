@@ -108,6 +108,13 @@ class FinancialNoteRequest(BaseModel):
     note_text: str = Field(min_length=1, max_length=2000)
 
 
+class ResolveHelpRequest(BaseModel):
+    # The Chairman/HO response to a CEO's help_needed escalation. The
+    # endpoint additionally rejects whitespace-only text (422) — a stored
+    # blank "response" would read as answered while saying nothing.
+    response: str = Field(min_length=1, max_length=2000)
+
+
 class CreateUserRequest(BaseModel):
     username: str = Field(min_length=3, max_length=80)
     full_name: str = Field(min_length=1, max_length=150)

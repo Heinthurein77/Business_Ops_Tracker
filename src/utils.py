@@ -469,8 +469,10 @@ FIELD_LABELS = {
     "other_amount": "Other Amount",
     "financial_other_notes": "Financial Notes",
     "meetings_attended": "Meetings Attended",
+    "meetings_count": "Meetings Count",
     "site_visits": "Site Visits",
     "key_decisions": "Key Decisions",
+    "key_achievement": "Key Achievement",
     "next_day_schedule": "Next Day Schedule",
     "problems_today": "Problems Today",
     "help_needed": "Help Needed",
@@ -483,6 +485,10 @@ FIELD_LABELS = {
     "sleep_hours": "Sleep Hours",
     "bp_systolic": "BP Systolic",
     "bp_diastolic": "BP Diastolic",
+    "stress_level": "Stress Level",
+    "energy_mood": "Energy Mood",
+    "weight_kg": "Weight (kg)",
+    "is_sick": "Feeling Sick",
     "health_other_notes": "Health Notes",
     "event_flag": "Event",
     "meeting_flag": "Meeting",
@@ -494,7 +500,7 @@ _PERCENT_FIELDS = {"gym_percent", "swimming_percent", "cycle_percent"}
 _BOOL_FIELDS = {"event_flag", "meeting_flag", "golf_flag"}
 _TEXT_FIELDS = {
     "financial_other_notes", "meetings_attended", "site_visits", "key_decisions",
-    "next_day_schedule", "problems_today", "help_needed", "activity_other_notes",
+    "key_achievement", "next_day_schedule", "problems_today", "help_needed", "activity_other_notes",
     "health_other_notes", "social_other_notes",
 }
 
@@ -504,7 +510,10 @@ _TEXT_FIELDS = {
 # fields are deliberately NOT hidden — they are the tamper trail for
 # financial edits.
 HIDDEN_VALUE_MARKER = "(hidden)"
-_HEALTH_VITAL_FIELDS = {"daily_steps", "heart_rate", "sleep_hours", "bp_systolic", "bp_diastolic"}
+_HEALTH_VITAL_FIELDS = {
+    "daily_steps", "heart_rate", "sleep_hours", "bp_systolic", "bp_diastolic",
+    "stress_level", "energy_mood", "weight_kg", "is_sick",
+}
 _HIDDEN_VALUE_FIELDS = _HEALTH_VITAL_FIELDS | _TEXT_FIELDS
 _HIDDEN_VALUE_LABELS = {FIELD_LABELS[f] for f in _HIDDEN_VALUE_FIELDS}
 
@@ -664,10 +673,11 @@ def build_ceo_activity_calendar(
     social_by_date = {s.report_date: s for s in _in_range(SocialLog, personal=True)}
 
     submitter_usernames = {}
-    submitter_ids = {log.submitted_by for log in activity_logs if log.submitted_by is not None}
-    if submitter_ids:
+    user_ids = {log.submitted_by for log in activity_logs if log.submitted_by is not None}
+    user_ids |= {log.help_resolved_by for log in activity_logs if log.help_resolved_by is not None}
+    if user_ids:
         submitter_usernames = {
-            u.id: u.username for u in db.query(User).filter(User.id.in_(submitter_ids)).all()
+            u.id: u.username for u in db.query(User).filter(User.id.in_(user_ids)).all()
         }
 
     weeks = []
@@ -689,15 +699,43 @@ def build_ceo_activity_calendar(
                     "is_future": d > today,
                     "has_report": log is not None,
                     "meetings_attended": log.meetings_attended if log else None,
+                    "meetings_count": log.meetings_count if log else None,
                     "site_visits": log.site_visits if log else None,
                     "key_decisions": log.key_decisions if log else None,
+                    "key_achievement": log.key_achievement if log else None,
                     "next_day_schedule": log.next_day_schedule if log else None,
                     "problems_today": log.problems_today if log else None,
                     "help_needed": log.help_needed if log else None,
+                    # An open escalation: help text present and not yet
+                    # resolved by a Chairman/HO response.
+                    "needs_help": bool(
+                        log and log.help_needed and log.help_needed.strip() and log.help_resolved_at is None
+                    ),
+                    "help_resolved_at": format_local_datetime(log.help_resolved_at) if log else None,
+                    "help_resolved_by_username": (
+                        submitter_usernames.get(log.help_resolved_by) if log else None
+                    ),
+                    "help_response": log.help_response if log else None,
                     "document_url": log.document_url if log else None,
                     "gym_percent": log.gym_percent if log else None,
                     "swimming_percent": log.swimming_percent if log else None,
                     "cycle_percent": log.cycle_percent if log else None,
+                    # Exercise completion moved to the health row (2026-10-22);
+                    # these effective values prefer the health row and fall
+                    # back to the activity row's pre-move percents so old
+                    # days still display their exercise data.
+                    "exercise_gym_percent": (
+                        health.gym_percent if health and health.gym_percent is not None
+                        else (log.gym_percent if log else None)
+                    ),
+                    "exercise_swimming_percent": (
+                        health.swimming_percent if health and health.swimming_percent is not None
+                        else (log.swimming_percent if log else None)
+                    ),
+                    "exercise_cycle_percent": (
+                        health.cycle_percent if health and health.cycle_percent is not None
+                        else (log.cycle_percent if log else None)
+                    ),
                     "activity_other_notes": log.other_notes if log else None,
                     "activity_submitted_by": log.submitted_by if log else None,
                     "activity_submitted_by_username": (
@@ -721,6 +759,8 @@ def build_ceo_activity_calendar(
                     "sleep_hours": float(health.sleep_hours) if health and health.sleep_hours is not None else None,
                     "bp_systolic": health.bp_systolic if health else None,
                     "bp_diastolic": health.bp_diastolic if health else None,
+                    "weight_kg": float(health.weight_kg) if health and health.weight_kg is not None else None,
+                    "is_sick": health.is_sick if health else None,
                     "event_flag": social.event_flag if social else None,
                     "meeting_flag": social.meeting_flag if social else None,
                     "golf_flag": social.golf_flag if social else None,
@@ -1144,8 +1184,10 @@ def build_activity_rows(activity_history: list) -> list:
             "report_date": a.report_date.strftime("%d %b %Y"),
             "submitted_at": format_local_datetime(a.updated_at),
             "meetings_attended": a.meetings_attended,
+            "meetings_count": a.meetings_count,
             "site_visits": a.site_visits,
             "key_decisions": a.key_decisions,
+            "key_achievement": a.key_achievement,
             "next_day_schedule": a.next_day_schedule,
             "document_url": a.document_url,
             "gym_percent": a.gym_percent,
@@ -1174,6 +1216,11 @@ def build_health_rows(health_history: list) -> list:
             "sleep_hours": float(h.sleep_hours) if h.sleep_hours is not None else None,
             "bp_systolic": h.bp_systolic,
             "bp_diastolic": h.bp_diastolic,
+            "weight_kg": float(h.weight_kg) if h.weight_kg is not None else None,
+            "is_sick": h.is_sick,
+            "gym_percent": h.gym_percent,
+            "swimming_percent": h.swimming_percent,
+            "cycle_percent": h.cycle_percent,
             "other_notes": h.other_notes,
         }
         for h in health_history

@@ -390,13 +390,23 @@ def ceo_dashboard(
         } if f else None
 
     def _activity_payload(a):
+        resolver_username = None
+        if a and a.help_resolved_by:
+            resolver = db.query(User).filter(User.id == a.help_resolved_by).first()
+            resolver_username = resolver.username if resolver else None
         return {
             "meetings_attended": a.meetings_attended,
+            "meetings_count": a.meetings_count,
             "site_visits": a.site_visits,
             "key_decisions": a.key_decisions,
+            "key_achievement": a.key_achievement,
             "next_day_schedule": a.next_day_schedule,
             "problems_today": a.problems_today,
             "help_needed": a.help_needed,
+            "needs_help": bool(a.help_needed and a.help_needed.strip() and a.help_resolved_at is None),
+            "help_resolved_at": format_local_datetime(a.help_resolved_at),
+            "help_resolved_by_username": resolver_username,
+            "help_response": a.help_response,
             "document_url": a.document_url,
             "gym_percent": a.gym_percent,
             "swimming_percent": a.swimming_percent,
@@ -416,6 +426,11 @@ def ceo_dashboard(
             "sleep_hours": float(h.sleep_hours) if h.sleep_hours is not None else None,
             "bp_systolic": h.bp_systolic,
             "bp_diastolic": h.bp_diastolic,
+            "weight_kg": float(h.weight_kg) if h.weight_kg is not None else None,
+            "is_sick": h.is_sick,
+            "gym_percent": h.gym_percent,
+            "swimming_percent": h.swimming_percent,
+            "cycle_percent": h.cycle_percent,
             "other_notes": h.other_notes,
         } if h else None
 
@@ -523,9 +538,21 @@ def ceo_dashboard(
             "monthly_meeting_count": monthly_social["meeting_count"],
             "monthly_golf_count": monthly_social["golf_count"],
             "monthly_days_submitted": monthly_social["days_submitted"],
-            "gym_percent": latest_activity.gym_percent if latest_activity else None,
-            "swimming_percent": latest_activity.swimming_percent if latest_activity else None,
-            "cycle_percent": latest_activity.cycle_percent if latest_activity else None,
+            # Exercise completion lives on the health row since the form
+            # move (2026-10-22); fall back to the activity row's pre-move
+            # percents so older days keep displaying theirs.
+            "gym_percent": (
+                latest_health.gym_percent if latest_health and latest_health.gym_percent is not None
+                else (latest_activity.gym_percent if latest_activity else None)
+            ),
+            "swimming_percent": (
+                latest_health.swimming_percent if latest_health and latest_health.swimming_percent is not None
+                else (latest_activity.swimming_percent if latest_activity else None)
+            ),
+            "cycle_percent": (
+                latest_health.cycle_percent if latest_health and latest_health.cycle_percent is not None
+                else (latest_activity.cycle_percent if latest_activity else None)
+            ),
             "activity_other_notes": latest_activity.other_notes if latest_activity else None,
             "daily_steps": latest_health.daily_steps if latest_health else None,
             "heart_rate": latest_health.heart_rate if latest_health else None,
@@ -813,6 +840,55 @@ def add_financial_note(
     return {"ok": True}
 
 
+# Legacy HealthStatus chip value sets — the health form collects these
+# again as one-tap chips, and only these exact values may be stored (the
+# dashboards switch on them).
+STRESS_LEVELS = ("Low", "Medium", "High")
+ENERGY_MOODS = ("Energetic", "Normal", "Drained")
+
+
+def _form_choice(raw: Optional[str], allowed: tuple, label: str) -> Optional[str]:
+    """Optional chip value: blank -> None; anything outside the allowed
+    set -> 422 (a tampered client must not store free text in a column
+    the dashboards treat as an enum)."""
+    value = (raw or "").strip()
+    if not value:
+        return None
+    if value not in allowed:
+        raise HTTPException(status_code=422, detail=f"{label} must be one of: {', '.join(allowed)}")
+    return value
+
+
+def _form_health_percent(raw: Optional[str], label: str) -> Optional[int]:
+    """Exercise % sent by the health section (health_*_percent fields).
+    None means the field was absent entirely (an older client) and the
+    caller keeps the pre-move behavior; a present value must be a whole
+    number 0-100, else 422. Blank -> None (not given)."""
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if raw == "":
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"{label} must be a whole number between 0 and 100")
+    if not 0 <= value <= 100:
+        raise HTTPException(status_code=422, detail=f"{label} must be between 0 and 100")
+    return value
+
+
+def _form_weight(raw: Optional[str]) -> Optional[Decimal]:
+    """Optional body weight in kg: blank -> None; non-numeric or outside
+    the sane 20-400 kg range -> 422."""
+    if raw is None or raw.strip() == "":
+        return None
+    value = parse_bounded_decimal(raw, places=1, limit=Decimal(10) ** 6)
+    if value is None or not (Decimal("20") <= value <= Decimal("400")):
+        raise HTTPException(status_code=422, detail="Weight must be a number between 20 and 400 kg")
+    return value
+
+
 @router.post("/submit-report")
 def submit_report(
     request: Request,
@@ -824,8 +900,10 @@ def submit_report(
     other_amount: str = Form(""),
     financial_other_notes: str = Form(""),
     meetings_attended: str = Form(""),
+    meetings_count: str = Form(""),
     site_visits: str = Form(""),
     key_decisions: str = Form(""),
+    key_achievement: str = Form(""),
     next_day_schedule: str = Form(""),
     problems_today: str = Form(""),
     help_needed: str = Form(""),
@@ -838,6 +916,13 @@ def submit_report(
     sleep_hours: str = Form(""),
     bp_systolic: str = Form(""),
     bp_diastolic: str = Form(""),
+    stress_level: str = Form(""),
+    energy_mood: str = Form(""),
+    weight_kg: str = Form(""),
+    is_sick: str = Form("false"),
+    health_gym_percent: Optional[str] = Form(None),
+    health_swimming_percent: Optional[str] = Form(None),
+    health_cycle_percent: Optional[str] = Form(None),
     health_other_notes: str = Form(""),
     event_flag: str = Form("false"),
     meeting_flag: str = Form("false"),
@@ -852,6 +937,23 @@ def submit_report(
     # 10 MB), so FastAPI must run it in its threadpool instead of on the event
     # loop, where it would stall every other request while locks are held.
     # UploadFile.file is a regular SpooledTemporaryFile, safe to use from here.
+    #
+    # Direct callers (the test suite invokes this function with keyword
+    # arguments) leave any omitted parameter holding its Form(...)
+    # declaration object instead of the declared default — normalize the
+    # fields added in 2026-10 back to plain values so the validation
+    # below always sees strings / None. Over HTTP FastAPI injects real
+    # strings and this is a no-op.
+    meetings_count = meetings_count if isinstance(meetings_count, str) else ""
+    key_achievement = key_achievement if isinstance(key_achievement, str) else ""
+    stress_level = stress_level if isinstance(stress_level, str) else ""
+    energy_mood = energy_mood if isinstance(energy_mood, str) else ""
+    weight_kg = weight_kg if isinstance(weight_kg, str) else ""
+    is_sick = is_sick if isinstance(is_sick, str) else "false"
+    health_gym_percent = health_gym_percent if isinstance(health_gym_percent, (str, type(None))) else None
+    health_swimming_percent = health_swimming_percent if isinstance(health_swimming_percent, (str, type(None))) else None
+    health_cycle_percent = health_cycle_percent if isinstance(health_cycle_percent, (str, type(None))) else None
+
     if _is_rate_limited(user.id):
         log_audit(db, user, "REPORT_SUBMIT_RATE_LIMITED", "", request)
         raise HTTPException(status_code=429, detail="Too many submissions in a short time. Please wait a moment and try again.")
@@ -908,10 +1010,29 @@ def submit_report(
     swimming_percent_val = form_percent(swimming_percent, "Swimming %")
     cycle_percent_val = form_percent(cycle_percent, "Cycle %")
 
+    meetings_count_val = form_int(meetings_count, "Meetings count", 0, 99)
+
+    # Health-section additions (2026-10-22): the chips, weight and sick
+    # toggle validate to 422 — they are new fields, so they follow the
+    # JSON-API convention rather than the legacy form 400s above. The
+    # health_*_percent fields' mere presence switches exercise storage
+    # from the activity row to the health row (see the writes below).
+    stress_level_val = _form_choice(stress_level, STRESS_LEVELS, "Stress level")
+    energy_mood_val = _form_choice(energy_mood, ENERGY_MOODS, "Energy mood")
+    weight_kg_val = _form_weight(weight_kg)
+    is_sick_val = _parse_bool(is_sick)
+    health_exercise_present = (
+        health_gym_percent is not None or health_swimming_percent is not None or health_cycle_percent is not None
+    )
+    health_gym_percent_val = _form_health_percent(health_gym_percent, "Gym %")
+    health_swimming_percent_val = _form_health_percent(health_swimming_percent, "Swimming %")
+    health_cycle_percent_val = _form_health_percent(health_cycle_percent, "Cycle %")
+
     financial_other_notes = form_text(financial_other_notes, "Financial notes", MAX_NARRATIVE_TEXT_LEN)
     meetings_attended = form_text(meetings_attended, "Meetings attended", MAX_NARRATIVE_TEXT_LEN)
     site_visits = form_text(site_visits, "Site visits", MAX_NARRATIVE_TEXT_LEN)
     key_decisions = form_text(key_decisions, "Key decisions", MAX_NARRATIVE_TEXT_LEN)
+    key_achievement = form_text(key_achievement, "Key achievement", MAX_NARRATIVE_TEXT_LEN)
     next_day_schedule = form_text(next_day_schedule, "Next day schedule", MAX_NARRATIVE_TEXT_LEN)
     problems_today = form_text(problems_today, "Problems today", MAX_NARRATIVE_TEXT_LEN)
     help_needed = form_text(help_needed, "Help needed", MAX_NARRATIVE_TEXT_LEN)
@@ -987,8 +1108,10 @@ def submit_report(
     previous_activity = (
         {
             "meetings_attended": activity.meetings_attended,
+            "meetings_count": activity.meetings_count,
             "site_visits": activity.site_visits,
             "key_decisions": activity.key_decisions,
+            "key_achievement": activity.key_achievement,
             "next_day_schedule": activity.next_day_schedule,
             "problems_today": activity.problems_today,
             "help_needed": activity.help_needed,
@@ -1000,6 +1123,11 @@ def submit_report(
         if activity is not None
         else None
     )
+    # Captured for the help re-open rule below: if this day's request was
+    # already resolved and the CEO now changes the ask, the resolution is
+    # cleared (the old response no longer matches the request).
+    previous_help_needed = activity.help_needed if activity is not None else None
+    previous_help_resolved_at = activity.help_resolved_at if activity is not None else None
     if activity is None:
         activity = ActivityLog(business_unit_id=user.business_unit_id, report_date=report_date)
         db.add(activity)
@@ -1009,16 +1137,31 @@ def submit_report(
         # new file is sent — never carry their document over as this CEO's.
         activity.document_url = None
     activity.meetings_attended = meetings_attended
+    activity.meetings_count = meetings_count_val
     activity.site_visits = site_visits
     activity.key_decisions = key_decisions
+    activity.key_achievement = key_achievement or None
     activity.next_day_schedule = next_day_schedule
     activity.problems_today = problems_today or None
     activity.help_needed = help_needed or None
+    if previous_help_resolved_at is not None and activity.help_needed != previous_help_needed:
+        # Re-open: the ask changed after HO/Chairman answered it, so the
+        # recorded response no longer applies. An unchanged resubmission
+        # (e.g. fixing the day's revenue) keeps the resolution intact.
+        activity.help_resolved_at = None
+        activity.help_resolved_by = None
+        activity.help_response = None
     if document_url:
         activity.document_url = document_url
-    activity.gym_percent = gym_percent_val
-    activity.swimming_percent = swimming_percent_val
-    activity.cycle_percent = cycle_percent_val
+    if not health_exercise_present:
+        # Pre-move clients still send exercise % as activity fields. The
+        # current form sends health_*_percent instead, and then the
+        # activity row's legacy percents are left exactly as stored —
+        # overwriting them with blanks would erase the fallback data
+        # older days rely on for display.
+        activity.gym_percent = gym_percent_val
+        activity.swimming_percent = swimming_percent_val
+        activity.cycle_percent = cycle_percent_val
     activity.other_notes = activity_other_notes or None
     activity.submitted_by = user.id
 
@@ -1035,6 +1178,13 @@ def submit_report(
             "sleep_hours": health.sleep_hours,
             "bp_systolic": health.bp_systolic,
             "bp_diastolic": health.bp_diastolic,
+            "stress_level": health.stress_level,
+            "energy_mood": health.energy_mood,
+            "weight_kg": health.weight_kg,
+            "is_sick": health.is_sick,
+            "gym_percent": health.gym_percent,
+            "swimming_percent": health.swimming_percent,
+            "cycle_percent": health.cycle_percent,
             "health_other_notes": health.other_notes,
         }
         if health is not None
@@ -1043,14 +1193,23 @@ def submit_report(
     if health is None:
         health = HealthStatus(business_unit_id=user.business_unit_id, report_date=report_date)
         db.add(health)
-    # physical_health/stress_level/energy_mood/sleep_quality are legacy fields no
-    # longer collected from the form — left null; the health-risk calculation
-    # already treats a null base as neutral and relies on steps + vitals instead.
+    # physical_health/sleep_quality remain legacy fields no longer
+    # collected — left null. stress_level/energy_mood are collected again
+    # (one-tap chips), alongside weight, the sick toggle, and the exercise
+    # percents that moved here from the activity section.
     health.daily_steps = daily_steps_val
     health.heart_rate = heart_rate_val
     health.sleep_hours = sleep_hours_val
     health.bp_systolic = bp_systolic_val
     health.bp_diastolic = bp_diastolic_val
+    health.stress_level = stress_level_val
+    health.energy_mood = energy_mood_val
+    health.weight_kg = weight_kg_val
+    health.is_sick = is_sick_val
+    if health_exercise_present:
+        health.gym_percent = health_gym_percent_val
+        health.swimming_percent = health_swimming_percent_val
+        health.cycle_percent = health_cycle_percent_val
     health.other_notes = health_other_notes or None
     health.submitted_by = user.id
 
@@ -1105,14 +1264,16 @@ def submit_report(
         }
         current_activity = {
             "meetings_attended": activity.meetings_attended,
+            "meetings_count": activity.meetings_count,
             "site_visits": activity.site_visits,
             "key_decisions": activity.key_decisions,
+            "key_achievement": activity.key_achievement,
             "next_day_schedule": activity.next_day_schedule,
             "problems_today": activity.problems_today,
             "help_needed": activity.help_needed,
-            "gym_percent": gym_percent_val,
-            "swimming_percent": swimming_percent_val,
-            "cycle_percent": cycle_percent_val,
+            "gym_percent": activity.gym_percent,
+            "swimming_percent": activity.swimming_percent,
+            "cycle_percent": activity.cycle_percent,
             "activity_other_notes": activity.other_notes,
         }
         current_health = {
@@ -1121,6 +1282,13 @@ def submit_report(
             "sleep_hours": sleep_hours_val,
             "bp_systolic": bp_systolic_val,
             "bp_diastolic": bp_diastolic_val,
+            "stress_level": stress_level_val,
+            "energy_mood": energy_mood_val,
+            "weight_kg": weight_kg_val,
+            "is_sick": is_sick_val,
+            "gym_percent": health.gym_percent,
+            "swimming_percent": health.swimming_percent,
+            "cycle_percent": health.cycle_percent,
             "health_other_notes": health.other_notes,
         }
         current_social = {
