@@ -182,6 +182,18 @@ class ActivityLog(Base):
     # Daily Activities page surfaces in its "Needs Attention" section.
     problems_today = Column(Text, nullable=True)
     help_needed = Column(Text, nullable=True)
+    # Help-request resolution loop: when a Chairman/HO user answers a
+    # help_needed escalation, the resolution is recorded here and the flag
+    # clears (needs_help = help text present AND help_resolved_at IS NULL).
+    # If the CEO later edits the help text on that day, the resolution is
+    # cleared again (the request re-opens) — see submit_report.
+    help_resolved_at = Column(DateTime, nullable=True)
+    help_resolved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    help_response = Column(Text, nullable=True)
+    # The day's headline result, kept separate from key_decisions (what was
+    # decided) — what actually got achieved.
+    key_achievement = Column(Text, nullable=True)
+    meetings_count = Column(Integer, nullable=True)  # 0-99, validated on submit
     document_url = Column(String(500), nullable=True)
     gym_percent = Column(Integer, nullable=True)  # 0-100
     swimming_percent = Column(Integer, nullable=True)  # 0-100
@@ -206,14 +218,23 @@ class HealthStatus(Base):
     business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
     report_date = Column(Date, nullable=False, default=date.today, index=True)
     physical_health = Column(String(20), nullable=True)  # Healthy | Tired | Sick (legacy, no longer collected)
-    stress_level = Column(String(20), nullable=True)  # Low | Medium | High (legacy, no longer collected)
-    energy_mood = Column(String(20), nullable=True)  # Energetic | Normal | Drained (legacy, no longer collected)
+    stress_level = Column(String(20), nullable=True)  # Low | Medium | High (collected again as one-tap chips)
+    energy_mood = Column(String(20), nullable=True)  # Energetic | Normal | Drained (collected again as one-tap chips)
     sleep_quality = Column(String(20), nullable=True)  # Good | Average | Poor (legacy, no longer collected)
     daily_steps = Column(Integer, nullable=True)  # <3000 red | 3000-6999 yellow | >=7000 green
     heart_rate = Column(Integer, nullable=True)  # bpm
     sleep_hours = Column(Numeric(4, 1), nullable=True)
     bp_systolic = Column(Integer, nullable=True)
     bp_diastolic = Column(Integer, nullable=True)
+    weight_kg = Column(Numeric(5, 1), nullable=True)  # 20-400, validated on submit
+    is_sick = Column(Boolean, default=False, nullable=False)  # "feeling sick today" toggle
+    # Exercise completion moved here from ActivityLog (2026-10-22): the CEO
+    # form's Health section collects them now. ActivityLog's percent
+    # columns are kept for pre-move history and read paths fall back to
+    # them when a day's health row has none.
+    gym_percent = Column(Integer, nullable=True)  # 0-100
+    swimming_percent = Column(Integer, nullable=True)  # 0-100
+    cycle_percent = Column(Integer, nullable=True)  # 0-100
     # Free-text catch-all for anything not covered by the fields above.
     other_notes = Column(EncryptedText, nullable=True)  # health free text — encrypted at rest
     submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
