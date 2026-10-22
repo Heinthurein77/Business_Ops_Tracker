@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api, ApiError } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
+import ActivityMonthCalendar from '../components/ActivityMonthCalendar';
 import Footer from '../components/Footer';
 import { formatVariance, money } from '../utils/quadrantMetrics';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
@@ -23,7 +25,9 @@ export default function CeoHistoryPage() {
   const [data, setData] = useState(null);
   const [month, setMonth] = useState('');
   const [reviewIndex, setReviewIndex] = useState(0);
+  const [selectedDay, setSelectedDay] = useState(null);
   const [error, setError] = useState('');
+  const navigate = useNavigate();
 
   useEffect(() => {
     api
@@ -31,6 +35,7 @@ export default function CeoHistoryPage() {
       .then((payload) => {
         setData(payload);
         setReviewIndex(0);
+        setSelectedDay(null);
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Failed to load history'));
   }, [month]);
@@ -81,6 +86,64 @@ export default function CeoHistoryPage() {
             </button>
           </div>
         </div>
+
+        <section className={`${GLASS} overflow-hidden mb-10`}>
+          <div className="p-6 border-b border-slate-200/70">
+            <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 mb-1">Month Calendar</p>
+            <h2 className="font-bold text-slate-900 tracking-tight text-lg">Fill &amp; Review by Day</h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Your whole month at a glance — pick any day to review it, or fill a day you missed.
+            </p>
+          </div>
+          <div className="p-4 sm:p-6">
+            <ActivityMonthCalendar
+              calendarWeeks={data.calendar_weeks}
+              monthLabel={data.calendar_month_label}
+              onPrevMonth={() => setMonth(data.prev_month)}
+              onNextMonth={() => setMonth(data.next_month)}
+              onToday={() => setMonth(data.current_month)}
+              onDayClick={(day) => setSelectedDay(day)}
+              selectedDate={selectedDay?.date_iso}
+            />
+          </div>
+          {selectedDay && (
+            <div className="px-6 py-5 border-t border-slate-200/70">
+              <div className="flex items-start justify-between flex-wrap gap-3">
+                <div className="min-w-0">
+                  <p className="font-semibold text-slate-900">{selectedDay.date_display}</p>
+                  {selectedDay.has_report || selectedDay.revenue != null ? (
+                    <div className="mt-2 space-y-1.5 text-xs text-slate-600 max-w-2xl">
+                      {selectedDay.meetings_attended && (
+                        <p><span className="text-slate-400 font-medium">Meetings: </span><span className="whitespace-pre-wrap">{selectedDay.meetings_attended}</span></p>
+                      )}
+                      {selectedDay.site_visits && (
+                        <p><span className="text-slate-400 font-medium">Site Visits: </span><span className="whitespace-pre-wrap">{selectedDay.site_visits}</span></p>
+                      )}
+                      {selectedDay.key_decisions && (
+                        <p><span className="text-slate-400 font-medium">Key Decisions: </span><span className="whitespace-pre-wrap">{selectedDay.key_decisions}</span></p>
+                      )}
+                      {selectedDay.next_day_schedule && (
+                        <p><span className="text-slate-400 font-medium">Next Day Schedule: </span><span className="whitespace-pre-wrap">{selectedDay.next_day_schedule}</span></p>
+                      )}
+                      {selectedDay.revenue != null && (
+                        <p><span className="text-slate-400 font-medium">Revenue: </span><span className="font-semibold text-slate-700 tabular-nums">{money(selectedDay.revenue)}</span></p>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-slate-400 italic mt-1">Nothing submitted for this day yet.</p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => navigate(`/ceo?date=${selectedDay.date_iso}`)}
+                  className="text-xs font-semibold bg-brand-600 hover:bg-brand-700 text-white px-4 py-2.5 rounded-lg transition-colors flex-shrink-0"
+                >
+                  {selectedDay.has_report ? 'Edit this day’s report' : 'Fill this day’s report'} &rarr;
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
 
         <section className={`${GLASS} overflow-hidden`}>
           <div className="p-6 border-b border-slate-200/70 flex items-center justify-between flex-wrap gap-3">

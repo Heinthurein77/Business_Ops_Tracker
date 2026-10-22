@@ -72,7 +72,13 @@ export const api = {
   getHoMonthlyTarget: (month) => getJson(`/api/ho/monthly-target${month ? `?month=${month}` : ''}`),
   setHoMonthlyTarget: (payload) => postJson('/api/ho/monthly-target', payload),
 
-  ceoDashboard: (month) => getJson(`/api/ceo/dashboard${month ? `?month=${month}` : ''}`),
+  ceoDashboard: (month, date) => {
+    const q = new URLSearchParams();
+    if (month) q.set('month', month);
+    if (date) q.set('date', date);
+    const query = q.toString();
+    return getJson(`/api/ceo/dashboard${query ? `?${query}` : ''}`);
+  },
   submitReport: (formData) => postForm('/api/ceo/submit-report', formData),
   getMonthlyTarget: (month) => getJson(`/api/ceo/monthly-target${month ? `?month=${month}` : ''}`),
   setMonthlyTarget: (payload) => postJson('/api/ceo/monthly-target', payload),
@@ -92,6 +98,8 @@ export const api = {
   headOfficeReport: () => getJson('/api/admin/head-office'),
   overrideHoMonthlyTarget: (payload) => postJson('/api/admin/head-office/monthly-target', payload),
   activityDashboard: () => getJson('/api/admin/activity-dashboard'),
+  ceoActivityCalendar: (buId, month) =>
+    getJson(`/api/admin/ceo-activity-calendar?business_unit_id=${buId}${month ? `&month=${month}` : ''}`),
   healthDashboard: () => getJson('/api/admin/health-dashboard'),
   listUsers: () => getJson('/api/admin/users'),
   createUser: (payload) => postJson('/api/admin/users', payload),

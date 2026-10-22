@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import Chart from 'react-apexcharts';
 import { api, ApiError } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
@@ -69,6 +70,11 @@ const emptyForm = {
 };
 
 export default function CeoDashboardPage() {
+  const [searchParams] = useSearchParams();
+  // Set when the page is opened from the History calendar for one specific
+  // day (/ceo?date=YYYY-MM-DD): the report form then edits that date's
+  // rows instead of today's. Absent = the long-standing today behavior.
+  const editDate = searchParams.get('date') || '';
   const [data, setData] = useState(null);
   const [form, setForm] = useState(emptyForm);
   const [attachment, setAttachment] = useState(null);
@@ -83,34 +89,34 @@ export default function CeoDashboardPage() {
   const [noteError, setNoteError] = useState('');
 
   async function load() {
-    const payload = await api.ceoDashboard();
+    const payload = await api.ceoDashboard('', editDate);
     setData(payload);
     setTargetForm(emptyTargetForm);
     setForm({
-      revenue: payload.financial?.revenue ?? '',
-      cash_flow: payload.financial?.cash_flow ?? '',
-      receivable: payload.financial?.receivable ?? '',
-      payable: payload.financial?.payable ?? '',
-      other_amount: payload.financial?.other_amount ?? '',
-      financial_other_notes: payload.financial?.other_notes ?? '',
-      meetings_attended: payload.activity?.meetings_attended ?? '',
-      site_visits: payload.activity?.site_visits ?? '',
-      key_decisions: payload.activity?.key_decisions ?? '',
-      next_day_schedule: payload.activity?.next_day_schedule ?? '',
-      gym_percent: payload.activity?.gym_percent ?? '',
-      swimming_percent: payload.activity?.swimming_percent ?? '',
-      cycle_percent: payload.activity?.cycle_percent ?? '',
-      activity_other_notes: payload.activity?.other_notes ?? '',
-      daily_steps: payload.health?.daily_steps ?? '',
-      heart_rate: payload.health?.heart_rate ?? '',
-      sleep_hours: payload.health?.sleep_hours ?? '',
-      bp_systolic: payload.health?.bp_systolic ?? '',
-      bp_diastolic: payload.health?.bp_diastolic ?? '',
-      health_other_notes: payload.health?.other_notes ?? '',
-      event_flag: payload.social?.event_flag ?? false,
-      meeting_flag: payload.social?.meeting_flag ?? false,
-      golf_flag: payload.social?.golf_flag ?? false,
-      social_other_notes: payload.social?.other_notes ?? '',
+      revenue: payload.form_financial?.revenue ?? '',
+      cash_flow: payload.form_financial?.cash_flow ?? '',
+      receivable: payload.form_financial?.receivable ?? '',
+      payable: payload.form_financial?.payable ?? '',
+      other_amount: payload.form_financial?.other_amount ?? '',
+      financial_other_notes: payload.form_financial?.other_notes ?? '',
+      meetings_attended: payload.form_activity?.meetings_attended ?? '',
+      site_visits: payload.form_activity?.site_visits ?? '',
+      key_decisions: payload.form_activity?.key_decisions ?? '',
+      next_day_schedule: payload.form_activity?.next_day_schedule ?? '',
+      gym_percent: payload.form_activity?.gym_percent ?? '',
+      swimming_percent: payload.form_activity?.swimming_percent ?? '',
+      cycle_percent: payload.form_activity?.cycle_percent ?? '',
+      activity_other_notes: payload.form_activity?.other_notes ?? '',
+      daily_steps: payload.form_health?.daily_steps ?? '',
+      heart_rate: payload.form_health?.heart_rate ?? '',
+      sleep_hours: payload.form_health?.sleep_hours ?? '',
+      bp_systolic: payload.form_health?.bp_systolic ?? '',
+      bp_diastolic: payload.form_health?.bp_diastolic ?? '',
+      health_other_notes: payload.form_health?.other_notes ?? '',
+      event_flag: payload.form_social?.event_flag ?? false,
+      meeting_flag: payload.form_social?.meeting_flag ?? false,
+      golf_flag: payload.form_social?.golf_flag ?? false,
+      social_other_notes: payload.form_social?.other_notes ?? '',
     });
   }
 
@@ -199,6 +205,9 @@ export default function CeoDashboardPage() {
     formData.append('meeting_flag', form.meeting_flag ? 'true' : 'false');
     formData.append('golf_flag', form.golf_flag ? 'true' : 'false');
     formData.append('social_other_notes', form.social_other_notes);
+    // Editing a specific day (opened from the History calendar): file the
+    // report against that date. Today-flow sends nothing, as before.
+    if (data && !data.form_is_today) formData.append('report_date', data.form_date);
     if (attachment) formData.append('attachment', attachment);
 
     setSubmitting(true);
@@ -249,13 +258,31 @@ export default function CeoDashboardPage() {
       <main className="flex-1 min-w-0 px-4 sm:px-6 py-6 sm:py-8 pb-24">
         <div className="mb-6 flex items-center justify-between flex-wrap gap-2">
           <p className="text-sm font-semibold text-slate-900">{data.report_date_display}</p>
-          {data.submitted_at_today ? (
-            <p className="text-xs text-emerald-600">Submitted today at {data.submitted_at_today.split(', ')[1]}</p>
+          {data.form_submitted_at ? (
+            <p className="text-xs text-emerald-600">
+              {data.form_is_today
+                ? `Submitted today at ${data.form_submitted_at.split(', ')[1]}`
+                : `Report saved for ${data.form_date_display}`}
+            </p>
           ) : (
             <p className="text-xs text-slate-500">Financials mandatory</p>
           )}
         </div>
-        {data.submission_events_today?.length > 1 && (
+        {!data.form_is_today && (
+          <div className="mb-6 rounded-xl bg-brand-500/10 border border-brand-500/20 px-5 py-4 text-sm text-slate-700 flex items-center gap-3 flex-wrap sm:flex-nowrap">
+            <span className="flex-1">
+              You’re filling the report for <strong>{data.form_date_display}</strong>, opened from your History calendar.
+              Saving updates that day — not today.
+            </span>
+            <Link
+              to="/ceo"
+              className="shrink-0 text-xs font-bold text-brand-700 bg-brand-500/15 hover:bg-brand-500/25 px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
+            >
+              Back to today
+            </Link>
+          </div>
+        )}
+        {data.form_is_today && data.submission_events_today?.length > 1 && (
           <div className="mb-6 rounded-xl border border-slate-200 bg-white px-4 py-3">
             <p className="text-xs font-semibold text-slate-700 mb-2">Updated {data.submission_events_today.length}&times; today</p>
             <ul className="space-y-1.5">
@@ -284,7 +311,7 @@ export default function CeoDashboardPage() {
             <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-emerald-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
               <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
             </svg>
-            <span>Your daily report for {data.report_date_display} has been submitted successfully.</span>
+            <span>Your daily report for {data.form_date_display} has been submitted successfully.</span>
           </div>
         )}
         {error && (
@@ -295,17 +322,21 @@ export default function CeoDashboardPage() {
             <span>{error}</span>
           </div>
         )}
-        {data.already_submitted_today && !success && (
+        {data.form_already_submitted && !success && (
           <div className="mb-6 rounded-xl bg-slate-100 border border-slate-200 px-5 py-4 text-sm text-slate-600 flex items-center gap-3">
             <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-slate-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
               <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
             <span>
-              You already submitted today's report at {data.submitted_at_today?.split(', ')[1]}. Submitting again will update it.
+              {data.form_is_today ? (
+                <>You already submitted today&apos;s report at {data.form_submitted_at?.split(', ')[1]}. Submitting again will update it.</>
+              ) : (
+                <>You already saved a report for {data.form_date_display}. Submitting again will update it.</>
+              )}
             </span>
           </div>
         )}
-        {!data.already_submitted_today && !success && new Date().getHours() >= 15 && (
+        {!data.form_already_submitted && !success && data.form_is_today && new Date().getHours() >= 15 && (
           <div className="mb-6 rounded-xl bg-amber-50 border border-amber-200 px-5 py-4 text-sm text-amber-800 flex items-center gap-3 flex-wrap sm:flex-nowrap">
             <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-amber-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
               <path strokeLinecap="round" strokeLinejoin="round" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
@@ -949,7 +980,7 @@ export default function CeoDashboardPage() {
 
           <div className="flex items-center justify-end gap-3">
             <p className="text-xs text-slate-500 mr-auto">
-              All entries are recorded against {data.report_date_display} for {data.business_unit?.name}.
+              All entries are recorded against {data.form_date_display} for {data.business_unit?.name}.
             </p>
             <button
               type="submit"

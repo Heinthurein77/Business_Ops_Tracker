@@ -15,6 +15,7 @@ import OperationsPage from './pages/OperationsPage';
 import OpsPage from './pages/OpsPage';
 import AccountingPage from './pages/AccountingPage';
 import ActivityDashboardPage from './pages/ActivityDashboardPage';
+import CeoCalendarPage from './pages/CeoCalendarPage';
 import HealthDashboardPage from './pages/HealthDashboardPage';
 import ReportLogsPage from './pages/ReportLogsPage';
 import SecurityLogPage from './pages/SecurityLogPage';
@@ -133,6 +134,14 @@ export default function App() {
             element={
               <ProtectedRoute roles={['Chairman', 'HO']}>
                 <ActivityDashboardPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/ceo-calendar"
+            element={
+              <ProtectedRoute roles={['Chairman', 'HO']}>
+                <CeoCalendarPage />
               </ProtectedRoute>
             }
           />
