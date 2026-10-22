@@ -1638,15 +1638,19 @@ def ceo_monthly_summary(
             resolver = resolver_usernames.get(log.help_resolved_by, "HO / Chairman")
             pdf.set_font("helvetica", "", 10.5)
             pdf.set_text_color(21, 128, 61)
+            # multi_cell leaves the cursor at the right margin — reset x,
+            # otherwise the status line renders off the page edge.
+            pdf.set_x(pdf.l_margin)
             pdf.multi_cell(
                 W, 5.5,
-                t(f"Status: Resolved — {log.help_response or ''} "
+                t(f"Status: Resolved - {log.help_response or ''} "
                   f"(by {resolver}, {format_local_datetime(log.help_resolved_at)})"),
             )
             pdf.set_text_color(0, 0, 0)
         else:
             pdf.set_font("helvetica", "", 10.5)
             pdf.set_text_color(185, 28, 28)
+            pdf.set_x(pdf.l_margin)
             pdf.cell(W, 5.5, t("Status: Open - awaiting a response"), ln=1)
             pdf.set_text_color(0, 0, 0)
         pdf.set_font("helvetica", "", 11)
