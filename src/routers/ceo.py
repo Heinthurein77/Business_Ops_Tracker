@@ -5,7 +5,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
@@ -100,6 +100,7 @@ def _parse_bool(raw: Optional[str]) -> bool:
 @router.get("/dashboard")
 def ceo_dashboard(
     month: str = "",
+    for_date: str = Query("", alias="date"),
     user: User = Depends(require_roles("CEO")),
     db: Session = Depends(get_db),
 ):
@@ -188,6 +189,49 @@ def ceo_dashboard(
         .filter(
             SocialLog.business_unit_id == user.business_unit_id,
             SocialLog.report_date == report_date,
+            SocialLog.submitted_by == user.id,
+        )
+        .first()
+    )
+
+    # Form date: the dashboard's report form normally edits today's rows.
+    # The History page's month calendar links here with ?date=YYYY-MM-DD so
+    # a CEO can fill or correct any day of the month; the form then
+    # prefills from (and submits back to) that date's rows instead.
+    # Everything else on this payload — targets, trends, quadrants — stays
+    # anchored to today, exactly as before.
+    try:
+        form_date = date.fromisoformat(for_date) if for_date else report_date
+    except ValueError:
+        form_date = report_date
+    form_financial = (
+        db.query(DailyFinancial)
+        .filter(DailyFinancial.business_unit_id == user.business_unit_id, DailyFinancial.report_date == form_date)
+        .first()
+    )
+    form_activity = (
+        db.query(ActivityLog)
+        .filter(
+            ActivityLog.business_unit_id == user.business_unit_id,
+            ActivityLog.report_date == form_date,
+            ActivityLog.submitted_by == user.id,
+        )
+        .first()
+    )
+    form_health = (
+        db.query(HealthStatus)
+        .filter(
+            HealthStatus.business_unit_id == user.business_unit_id,
+            HealthStatus.report_date == form_date,
+            HealthStatus.submitted_by == user.id,
+        )
+        .first()
+    )
+    form_social = (
+        db.query(SocialLog)
+        .filter(
+            SocialLog.business_unit_id == user.business_unit_id,
+            SocialLog.report_date == form_date,
             SocialLog.submitted_by == user.id,
         )
         .first()
@@ -332,6 +376,55 @@ def ceo_dashboard(
         report_date,
     )
 
+    def _financial_payload(f):
+        return {
+            "revenue": float(f.revenue),
+            "expenses": float(f.expenses),
+            "net_profit": float(f.net_profit),
+            "cash_in_hand": float(f.cash_in_hand),
+            "cash_flow": float(f.cash_flow) if f.cash_flow is not None else None,
+            "receivable": float(f.receivable) if f.receivable is not None else None,
+            "payable": float(f.payable) if f.payable is not None else None,
+            "other_amount": float(f.other_amount) if f.other_amount is not None else None,
+            "other_notes": f.other_notes,
+        } if f else None
+
+    def _activity_payload(a):
+        return {
+            "meetings_attended": a.meetings_attended,
+            "site_visits": a.site_visits,
+            "key_decisions": a.key_decisions,
+            "next_day_schedule": a.next_day_schedule,
+            "document_url": a.document_url,
+            "gym_percent": a.gym_percent,
+            "swimming_percent": a.swimming_percent,
+            "cycle_percent": a.cycle_percent,
+            "other_notes": a.other_notes,
+            "updated_at": format_local_datetime(a.updated_at),
+        } if a else None
+
+    def _health_payload(h):
+        return {
+            "physical_health": h.physical_health,
+            "stress_level": h.stress_level,
+            "energy_mood": h.energy_mood,
+            "sleep_quality": h.sleep_quality,
+            "daily_steps": h.daily_steps,
+            "heart_rate": h.heart_rate,
+            "sleep_hours": float(h.sleep_hours) if h.sleep_hours is not None else None,
+            "bp_systolic": h.bp_systolic,
+            "bp_diastolic": h.bp_diastolic,
+            "other_notes": h.other_notes,
+        } if h else None
+
+    def _social_payload(s):
+        return {
+            "event_flag": s.event_flag,
+            "meeting_flag": s.meeting_flag,
+            "golf_flag": s.golf_flag,
+            "other_notes": s.other_notes,
+        } if s else None
+
     return {
         "business_unit": {"id": business_unit.id, "code": business_unit.code, "name": business_unit.name} if business_unit else None,
         "submission_events_today": submission_events_today,
@@ -342,48 +435,23 @@ def ceo_dashboard(
         "ceo_profile": serialize_ceo_profile(user, ceo_profile_row, report_date),
         "report_date": report_date.isoformat(),
         "report_date_display": report_date.strftime("%A, %d %B %Y"),
-        "financial": {
-            "revenue": float(financial.revenue) if financial else None,
-            "expenses": float(financial.expenses) if financial else None,
-            "net_profit": float(financial.net_profit) if financial else None,
-            "cash_in_hand": float(financial.cash_in_hand) if financial else None,
-            "cash_flow": float(financial.cash_flow) if financial and financial.cash_flow is not None else None,
-            "receivable": float(financial.receivable) if financial and financial.receivable is not None else None,
-            "payable": float(financial.payable) if financial and financial.payable is not None else None,
-            "other_amount": float(financial.other_amount) if financial and financial.other_amount is not None else None,
-            "other_notes": financial.other_notes if financial else None,
-        } if financial else None,
+        "financial": _financial_payload(financial),
         "financial_trend": financial_trend,
-        "activity": {
-            "meetings_attended": activity.meetings_attended,
-            "site_visits": activity.site_visits,
-            "key_decisions": activity.key_decisions,
-            "next_day_schedule": activity.next_day_schedule,
-            "document_url": activity.document_url,
-            "gym_percent": activity.gym_percent,
-            "swimming_percent": activity.swimming_percent,
-            "cycle_percent": activity.cycle_percent,
-            "other_notes": activity.other_notes,
-            "updated_at": format_local_datetime(activity.updated_at),
-        } if activity else None,
-        "health": {
-            "physical_health": health.physical_health,
-            "stress_level": health.stress_level,
-            "energy_mood": health.energy_mood,
-            "sleep_quality": health.sleep_quality,
-            "daily_steps": health.daily_steps,
-            "heart_rate": health.heart_rate,
-            "sleep_hours": float(health.sleep_hours) if health.sleep_hours is not None else None,
-            "bp_systolic": health.bp_systolic,
-            "bp_diastolic": health.bp_diastolic,
-            "other_notes": health.other_notes,
-        } if health else None,
-        "social": {
-            "event_flag": social.event_flag,
-            "meeting_flag": social.meeting_flag,
-            "golf_flag": social.golf_flag,
-            "other_notes": social.other_notes,
-        } if social else None,
+        "activity": _activity_payload(activity),
+        "health": _health_payload(health),
+        "social": _social_payload(social),
+        # The report form's own rows (see form_date above): identical to
+        # the financial/activity/health/social keys above when no ?date=
+        # was given, so the form can always prefill from these.
+        "form_date": form_date.isoformat(),
+        "form_date_display": form_date.strftime("%A, %d %B %Y"),
+        "form_is_today": form_date == report_date,
+        "form_financial": _financial_payload(form_financial),
+        "form_activity": _activity_payload(form_activity),
+        "form_health": _health_payload(form_health),
+        "form_social": _social_payload(form_social),
+        "form_already_submitted": form_activity is not None,
+        "form_submitted_at": format_local_datetime(form_activity.updated_at) if form_activity else None,
         "submitted_at_today": format_local_datetime(activity.updated_at) if activity else None,
         "already_submitted_today": activity is not None,
         "recent_financials": [
@@ -746,6 +814,7 @@ def add_financial_note(
 @router.post("/submit-report")
 def submit_report(
     request: Request,
+    report_date: str = Form(""),
     revenue: str = Form(""),
     cash_flow: str = Form(""),
     receivable: str = Form(""),
@@ -783,7 +852,20 @@ def submit_report(
         log_audit(db, user, "REPORT_SUBMIT_RATE_LIMITED", "", request)
         raise HTTPException(status_code=429, detail="Too many submissions in a short time. Please wait a moment and try again.")
 
-    report_date = today_local()
+    # The dashboard form normally files today's report; an explicit
+    # report_date (sent when the dashboard was opened from the History
+    # calendar for a specific day) files that day's report instead. The
+    # business unit always comes from the caller's own assignment, never
+    # from the request, so a CEO can only ever write to their own unit.
+    # Any valid date is accepted — past days for corrections and
+    # backfill, future days for planning entries.
+    if report_date and report_date.strip():
+        try:
+            report_date = date.fromisoformat(report_date.strip())
+        except ValueError:
+            raise HTTPException(status_code=400, detail="report_date must be a valid date (YYYY-MM-DD)")
+    else:
+        report_date = today_local()
 
     # --- Validate every input up front, before any DB work, row lock or
     # upload. Invalid values are a clear HTTP 400 — never a 500, and never
@@ -1038,12 +1120,16 @@ def submit_report(
         # Health vitals and free-text values are recorded as "(hidden)" by
         # compute_field_changes (only THAT they changed is audited); money
         # keeps real values as the tamper trail for financial edits.
-        changes = (
-            compute_field_changes(previous_financial, current_financial)
-            + compute_field_changes(previous_activity, current_activity)
-            + compute_field_changes(previous_health, current_health)
-            + compute_field_changes(previous_social, current_social)
-        )
+        # Each area is diffed only when its previous row exists — a date
+        # can hold a financial row without health/social rows (e.g. a
+        # partially backfilled day), and diffing against None would 500.
+        changes = compute_field_changes(previous_financial, current_financial)
+        if previous_activity is not None:
+            changes += compute_field_changes(previous_activity, current_activity)
+        if previous_health is not None:
+            changes += compute_field_changes(previous_health, current_health)
+        if previous_social is not None:
+            changes += compute_field_changes(previous_social, current_social)
 
     audit_detail = build_resubmit_audit_detail(report_date, changes)
     log_audit(db, user, "DAILY_REPORT_SUBMITTED", audit_detail, request)

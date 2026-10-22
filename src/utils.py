@@ -623,7 +623,7 @@ def todays_submission_events(db: Session, user_id: Optional[int], action: str, t
 
 
 def build_ceo_activity_calendar(
-    db: Session, business_unit_id: int, year: int, month: int, today: date, user_id: int
+    db: Session, business_unit_id: int, year: int, month: int, today: date, user_id: Optional[int]
 ) -> list:
     """Builds a Monday-first month grid for the CEO dashboard's calendar view.
     Each day carries every business area submitted that day (activity,
@@ -637,7 +637,12 @@ def build_ceo_activity_calendar(
     them), but activity / health / social rows are the submitting CEO's own
     personal data, so those are additionally scoped to `user_id` — a newly
     appointed CEO of the same unit must not see their predecessor's history.
-    `user_id` is required (no default) so no caller can forget it."""
+
+    `user_id=None` is the Chairman/HO view (admin CEO calendar): personal
+    rows are NOT scoped to a submitter, so executives see the unit's days
+    exactly as recorded. An ActivityLog is unique per (BU, date), so there
+    is still at most one activity row per day; the day payload then names
+    its submitter via `activity_submitted_by_username`."""
     first_day = date(year, month, 1)
     last_day = date(year, month, calendar_module.monthrange(year, month)[1])
 
@@ -645,14 +650,22 @@ def build_ceo_activity_calendar(
         query = db.query(model).filter(
             model.business_unit_id == business_unit_id, model.report_date >= first_day, model.report_date <= last_day
         )
-        if personal:
+        if personal and user_id is not None:
             query = query.filter(model.submitted_by == user_id)
         return query.all()
 
-    logs_by_date = {log.report_date: log for log in _in_range(ActivityLog, personal=True)}
+    activity_logs = _in_range(ActivityLog, personal=True)
+    logs_by_date = {log.report_date: log for log in activity_logs}
     financial_by_date = {f.report_date: f for f in _in_range(DailyFinancial)}
     health_by_date = {h.report_date: h for h in _in_range(HealthStatus, personal=True)}
     social_by_date = {s.report_date: s for s in _in_range(SocialLog, personal=True)}
+
+    submitter_usernames = {}
+    submitter_ids = {log.submitted_by for log in activity_logs if log.submitted_by is not None}
+    if submitter_ids:
+        submitter_usernames = {
+            u.id: u.username for u in db.query(User).filter(User.id.in_(submitter_ids)).all()
+        }
 
     weeks = []
     for week in calendar_module.Calendar(firstweekday=0).monthdatescalendar(year, month):
@@ -680,6 +693,11 @@ def build_ceo_activity_calendar(
                     "gym_percent": log.gym_percent if log else None,
                     "swimming_percent": log.swimming_percent if log else None,
                     "cycle_percent": log.cycle_percent if log else None,
+                    "activity_other_notes": log.other_notes if log else None,
+                    "activity_submitted_by": log.submitted_by if log else None,
+                    "activity_submitted_by_username": (
+                        submitter_usernames.get(log.submitted_by) if log else None
+                    ),
                     "revenue": float(fin.revenue) if fin and fin.revenue is not None else None,
                     "cash_flow": float(fin.cash_flow) if fin and fin.cash_flow is not None else None,
                     "receivable": float(fin.receivable) if fin and fin.receivable is not None else None,

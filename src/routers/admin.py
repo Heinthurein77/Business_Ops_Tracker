@@ -36,6 +36,7 @@ from src.utils import (
     APP_TZ,
     activity_quadrant_status,
     build_activity_rows,
+    build_ceo_activity_calendar,
     build_financial_rows,
     build_health_rows,
     build_social_rows,
@@ -56,6 +57,7 @@ from src.utils import (
     parse_monthly_target_amounts,
     parse_resubmit_changes,
     serialize_ceo_profile,
+    shift_month,
     todays_submission_events,
     resolve_financial_status,
     social_quadrant_status,
@@ -1162,6 +1164,56 @@ def ceo_profiles(user: User = Depends(require_admin), db: Session = Depends(get_
         )
 
     return {"ceo_profiles": entries, "total": len(entries)}
+
+
+@router.get("/ceo-activity-calendar")
+def ceo_activity_calendar(
+    business_unit_id: int,
+    month: str = "",
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """One business unit's CEO activity month for the Chairman/HO calendar
+    page — the same Monday-first month grid the CEO sees on their own
+    dashboard, built by the shared helper with no submitter scoping
+    (user_id=None) so executives see the unit's days exactly as recorded,
+    whoever submitted them. Month parsing mirrors the CEO dashboard:
+    malformed values fall back to the current month."""
+    business_unit = db.query(BusinessUnit).filter(BusinessUnit.id == business_unit_id).first()
+    if business_unit is None:
+        raise HTTPException(status_code=404, detail="Business unit not found")
+
+    today = today_local()
+    try:
+        calendar_year, calendar_month = (int(part) for part in month.split("-", 1))
+        date(calendar_year, calendar_month, 1)  # validates the month is real
+        if not (2000 <= calendar_year <= 2100):
+            raise ValueError("month out of supported range")
+    except (ValueError, TypeError):
+        calendar_year, calendar_month = today.year, today.month
+
+    calendar_weeks = build_ceo_activity_calendar(db, business_unit.id, calendar_year, calendar_month, today, None)
+    prev_year, prev_month = shift_month(calendar_year, calendar_month, -1)
+    next_year, next_month = shift_month(calendar_year, calendar_month, 1)
+
+    ceo_user = (
+        db.query(User)
+        .filter(User.business_unit_id == business_unit.id, User.role == "CEO", User.is_active == True)  # noqa: E712
+        .first()
+    )
+    return {
+        "business_unit": {"id": business_unit.id, "code": business_unit.code, "name": business_unit.name},
+        "ceo": (
+            {"id": ceo_user.id, "username": ceo_user.username, "full_name": ceo_user.full_name}
+            if ceo_user is not None
+            else None
+        ),
+        "calendar_weeks": calendar_weeks,
+        "calendar_month_label": date(calendar_year, calendar_month, 1).strftime("%B %Y"),
+        "prev_month": f"{prev_year:04d}-{prev_month:02d}",
+        "next_month": f"{next_year:04d}-{next_month:02d}",
+        "current_month": f"{today.year:04d}-{today.month:02d}",
+    }
 
 
 def _activity_entry(log: ActivityLog, bu: Optional[BusinessUnit], ceo_username: str) -> dict:
