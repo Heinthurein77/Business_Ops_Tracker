@@ -346,7 +346,7 @@ export default function HeadOfficePage() {
           <div className="flex items-center justify-between flex-wrap gap-2">
             <div>
               <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">Head Office</p>
-              <h1 className="font-bold text-slate-900 dark:text-slate-100 text-lg">My Daily Report</h1>
+              <h1 className="font-bold text-slate-900 dark:text-slate-100 text-xl tracking-tight">My Daily Report</h1>
               <p className="text-xs text-slate-500 mt-0.5">{reportDateDisplay}</p>
             </div>
             {submittedToday ? (
@@ -361,7 +361,7 @@ export default function HeadOfficePage() {
           // view of any business unit.
           <section className={`${GLASS} px-5 sm:px-6 py-4 flex items-center justify-between flex-wrap gap-4`}>
             <div>
-              <h1 className="font-bold text-slate-900 dark:text-slate-100 text-lg">{greeting}, {user?.username} 👋</h1>
+              <h1 className="font-bold text-slate-900 dark:text-slate-100 text-xl tracking-tight">{greeting}, {user?.username} 👋</h1>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{reportDateDisplay} &middot; Head Office</p>
             </div>
           </section>
@@ -646,7 +646,7 @@ export default function HeadOfficePage() {
                       Cancel
                     </button>
                   )}
-                  <button type="submit" disabled={targetSaving} className="text-xs font-semibold bg-brand-600 hover:bg-brand-500 text-white px-4 py-2 rounded-lg transition-colors disabled:opacity-50">
+                  <button type="submit" disabled={targetSaving} className="text-xs font-semibold bg-brand-600 hover:bg-brand-700 text-white px-4 py-2 rounded-lg transition-colors disabled:opacity-50">
                     {targetSaving ? 'Saving…' : 'Save Target'}
                   </button>
                 </div>

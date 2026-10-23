@@ -77,7 +77,7 @@ export default function HealthDashboardPage() {
       <main className="flex-1 min-w-0 px-4 sm:px-6 py-6 sm:py-8 space-y-8 fade-in">
         <header className={`${GLASS} px-5 sm:px-6 py-4 flex items-center justify-between flex-wrap gap-4`}>
           <div>
-            <h1 className="font-bold text-slate-900 dark:text-slate-100 text-lg">Health and Fitness</h1>
+            <h1 className="font-bold text-slate-900 dark:text-slate-100 text-xl tracking-tight">Health and Fitness</h1>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{data.today_display}</p>
           </div>
         </header>

@@ -40,7 +40,7 @@ export default function NotificationBell() {
       <button
         type="button"
         onClick={() => (open ? setOpen(false) : openPanel())}
-        className="w-9 h-9 flex items-center justify-center rounded-lg bg-slate-900/5 dark:bg-white/5 text-slate-600 dark:text-slate-300 hover:bg-slate-900/10 dark:hover:bg-white/10 transition-colors relative"
+        className="w-9 h-9 flex items-center justify-center rounded-lg bg-white/10 text-slate-200 hover:bg-white/15 hover:text-white transition-colors relative"
         aria-label="Notifications"
       >
         <svg xmlns="http://www.w3.org/2000/svg" className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">

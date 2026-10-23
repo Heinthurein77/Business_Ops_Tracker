@@ -163,3 +163,59 @@ body {
 .mini-cal-day:not(.mini-cal-day-selected):hover {
   background-color: #f1f5f9;
 }
+
+/* ------------------------------------------------------------------ */
+/* Professional design system v2 — shared primitives. Pages opt in by  */
+/* swapping ad-hoc class strings for these; visuals stay consistent   */
+/* across dashboards, tables, forms and tab bars.                     */
+/* ------------------------------------------------------------------ */
+::selection {
+  background: #c7d2fe;
+}
+.card {
+  border-color: #e4e9f2;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 1px 3px rgba(16, 24, 40, 0.04);
+}
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60;
+  }
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800;
+  }
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-rose-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60;
+  }
+  .input {
+    @apply w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm transition placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/25 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100;
+  }
+  .label {
+    @apply mb-1.5 block text-[13px] font-medium text-slate-700 dark:text-slate-300;
+  }
+  /* Pill tab bar: a slate track with a raised white active pill. */
+  .tab-track {
+    @apply inline-flex max-w-full items-center gap-1 overflow-x-auto rounded-xl bg-slate-100 p-1 dark:bg-slate-800/80;
+  }
+  .tab-pill {
+    @apply whitespace-nowrap rounded-lg px-3.5 py-1.5 text-[13px] font-medium text-slate-500 transition hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100;
+  }
+  .tab-pill-active {
+    @apply bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white;
+  }
+  .page-title {
+    @apply text-[22px] font-bold leading-7 tracking-tight text-slate-900 dark:text-white;
+  }
+  .page-sub {
+    @apply mt-0.5 text-[13px] text-slate-500 dark:text-slate-400;
+  }
+  .th-pro {
+    @apply text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-400 dark:text-slate-500;
+  }
+  /* Sidebar nav (always on the navy shell, in both color modes). */
+  .side-link {
+    @apply flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium text-slate-400 transition-colors hover:bg-white/5 hover:text-white;
+  }
+  .side-link-active {
+    @apply bg-gradient-to-r from-brand-600 to-brand-500 text-white shadow-lg shadow-brand-950/40 hover:bg-none hover:text-white;
+  }
+}

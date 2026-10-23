@@ -140,17 +140,15 @@ export default function ComparisonPage() {
       <main className="flex-1 min-w-0 px-4 sm:px-6 py-6 sm:py-8 space-y-8 fade-in">
         <header className={`${GLASS} px-5 sm:px-6 py-4 flex items-center justify-between flex-wrap gap-4`}>
           <div>
-            <h1 className="font-bold text-slate-900 dark:text-slate-100 text-lg">Comparison & Analytics</h1>
+            <h1 className="font-bold text-slate-900 dark:text-slate-100 text-xl tracking-tight">Comparison & Analytics</h1>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{data.today_display} &middot; metric applies to trend &amp; ranking</p>
           </div>
-          <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 rounded-lg p-1 flex-wrap">
+          <div className="tab-track flex-wrap">
             {Object.entries(METRICS).map(([key, meta]) => (
               <button
                 key={key}
                 onClick={() => setMetric(key)}
-                className={`text-xs font-semibold px-3.5 py-1.5 rounded-md transition-colors whitespace-nowrap ${
-                  metric === key ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300'
-                }`}
+                className={`tab-pill ${metric === key ? 'tab-pill-active' : ''}`}
               >
                 {meta.label}
               </button>

@@ -261,7 +261,7 @@ export default function AdminDashboardPage() {
         {/* TOP BAR */}
         <section className={`${GLASS} relative z-10 px-5 sm:px-6 py-4 flex items-center justify-between flex-wrap gap-4`}>
           <div>
-            <h1 className="font-bold text-slate-900 dark:text-slate-100 text-lg">{greeting}, {displayNameOf(user)}</h1>
+            <h1 className="font-bold text-slate-900 dark:text-slate-100 text-xl tracking-tight">{greeting}, {displayNameOf(user)}</h1>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{ov.today_display} &middot; {ov.submission_compliance.submitted} of {ov.submission_compliance.total} BUs reported today</p>
           </div>
           <div className="flex items-center gap-3 flex-wrap w-full sm:w-auto">
@@ -350,7 +350,7 @@ export default function AdminDashboardPage() {
                 <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" /></svg>
               </button>
             </div>
-            <Link to={`/admin/business-unit/${selectedBuId}`} className="text-sm font-semibold bg-brand-600 hover:bg-brand-500 text-white px-4 py-2.5 rounded-xl transition-colors shadow-md shadow-brand-600/30 whitespace-nowrap">
+            <Link to={`/admin/business-unit/${selectedBuId}`} className="text-sm font-semibold bg-brand-600 hover:bg-brand-700 text-white px-4 py-2.5 rounded-lg transition-colors shadow-md shadow-brand-600/25 whitespace-nowrap">
               View Full History
             </Link>
           </div>
@@ -384,7 +384,7 @@ export default function AdminDashboardPage() {
                   type="button"
                   onClick={() => selectBu(op.bu_id)}
                   title={op.bu_name}
-                  className={`${GLASS} p-3.5 text-left transition-all hover:-translate-y-0.5 ${isSelected ? 'ring-2 ring-brand-500 ring-offset-1 dark:ring-offset-slate-950' : ''}`}
+                  className={`${GLASS} p-3.5 text-left transition-all hover:-translate-y-0.5 hover:shadow-lg hover:shadow-slate-900/5 ${isSelected ? 'ring-2 ring-brand-500 ring-offset-1 dark:ring-offset-slate-950' : ''}`}
                 >
                   <div className="flex items-center gap-1.5 mb-1.5 min-w-0">
                     <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: STATUS_COLOR[st] || STATUS_COLOR.grey }} />
@@ -423,7 +423,7 @@ export default function AdminDashboardPage() {
                   >
                     {m.bu_name}
                   </button>
-                  <span className="text-slate-400 dark:text-slate-500 tabular-nums flex-shrink-0">
+                  <span className="text-slate-400 dark:text-slate-500 tabular-nums min-w-0 text-right">
                     {m.missing_count}/{m.days_in_week_so_far} days · {m.missing_dates.join(', ')}
                   </span>
                 </li>

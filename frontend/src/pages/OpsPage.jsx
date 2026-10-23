@@ -512,7 +512,7 @@ export default function OpsPage() {
       <main className="flex-1 min-w-0 px-4 sm:px-6 py-6 sm:py-8 space-y-6 fade-in">
         <header className={`${GLASS} px-5 sm:px-6 py-4 flex items-center justify-between flex-wrap gap-4`}>
           <div>
-            <h1 className="font-bold text-slate-900 dark:text-slate-100 text-lg">Operations Center</h1>
+            <h1 className="font-bold text-slate-900 dark:text-slate-100 text-xl tracking-tight">Operations Center</h1>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Action items, inventory, purchasing, invoices, HR, expenses, documents, staff, customers & forecast</p>
           </div>
           <div className="flex items-center gap-3 flex-wrap">
@@ -538,9 +538,9 @@ export default function OpsPage() {
         {notice && <div className="text-sm font-medium text-emerald-700 dark:text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-4 py-2.5">{notice}</div>}
         {error && <div className="text-sm font-medium text-red-700 dark:text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-2.5">{error}</div>}
 
-        <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 rounded-lg p-1 flex-wrap w-fit">
+        <div className="tab-track flex-wrap w-fit">
           {TABS.map((t) => (
-            <button key={t.key} onClick={() => setTab(t.key)} className={`text-xs font-semibold px-3.5 py-1.5 rounded-md transition-colors whitespace-nowrap ${tab === t.key ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300'}`}>
+            <button key={t.key} onClick={() => setTab(t.key)} className={`tab-pill ${tab === t.key ? 'tab-pill-active' : ''}`}>
               {t.label}
               {t.key === 'inventory' && lowCount > 0 && <span className="ml-1.5 text-[10px] font-bold bg-red-500 text-white rounded-full px-1.5 py-0.5">{lowCount}</span>}
               {t.key === 'documents' && documents.filter((d) => d.days_left !== null && d.days_left <= 30).length > 0 && <span className="ml-1.5 text-[10px] font-bold bg-red-500 text-white rounded-full px-1.5 py-0.5">{documents.filter((d) => d.days_left !== null && d.days_left <= 30).length}</span>}

@@ -318,15 +318,15 @@ export default function CeoDashboardPage() {
 
       <main className="flex-1 min-w-0 px-4 sm:px-6 py-6 sm:py-8 pb-24">
         <div className="mb-6 flex items-center justify-between flex-wrap gap-2">
-          <p className="text-sm font-semibold text-slate-900">{data.report_date_display}</p>
+          <p className="text-base font-bold tracking-tight text-slate-900 dark:text-slate-100">{data.report_date_display}</p>
           {data.form_submitted_at ? (
-            <p className="text-xs text-emerald-600">
+            <p className="text-xs font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-full">
               {data.form_is_today
                 ? `Submitted today at ${data.form_submitted_at.split(', ')[1]}`
                 : `Report saved for ${data.form_date_display}`}
             </p>
           ) : (
-            <p className="text-xs text-slate-500">Financials mandatory</p>
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400 bg-slate-500/10 px-2.5 py-1 rounded-full">Financials mandatory</p>
           )}
         </div>
         {!data.form_is_today && (
@@ -592,7 +592,7 @@ export default function CeoDashboardPage() {
                   This can only be set once for the month — double-check the numbers before saving.
                 </p>
                 <div className="flex justify-end gap-2">
-                  <button type="submit" disabled={targetSaving} className="text-xs font-semibold bg-brand-600 hover:bg-brand-500 text-white px-4 py-2 rounded-lg transition-colors disabled:opacity-50">
+                  <button type="submit" disabled={targetSaving} className="text-xs font-semibold bg-brand-600 hover:bg-brand-700 text-white px-4 py-2 rounded-lg transition-colors disabled:opacity-50">
                     {targetSaving ? 'Saving…' : 'Save Target'}
                   </button>
                 </div>
@@ -709,7 +709,7 @@ export default function CeoDashboardPage() {
               <button
                 type="submit"
                 disabled={noteSubmitting}
-                className="text-xs font-semibold bg-brand-600 hover:bg-brand-500 text-white px-4 py-2.5 rounded-lg transition-colors disabled:opacity-50 flex-shrink-0"
+                className="text-xs font-semibold bg-brand-600 hover:bg-brand-700 text-white px-4 py-2.5 rounded-lg transition-colors disabled:opacity-50 flex-shrink-0"
               >
                 {noteSubmitting ? 'Saving…' : 'Add Note'}
               </button>

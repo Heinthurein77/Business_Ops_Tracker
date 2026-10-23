@@ -31,14 +31,14 @@ export default function FinanceStrip() {
   return (
     <section className={`${GLASS} px-5 sm:px-6 py-4`}>
       <div className="flex items-center justify-between mb-3">
-        <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">Group Finance — from the books</h2>
+        <h2 className="text-[11px] font-bold uppercase tracking-[0.1em] text-slate-400 dark:text-slate-500">Group Finance — from the books</h2>
         <Link to="/accounting" className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">Open Accounting →</Link>
       </div>
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
         {cards.map((c) => (
-          <div key={c.label} className="rounded-xl border border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40 px-3.5 py-3">
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">{c.label}</p>
-            <p className={`mt-1 text-base font-bold ${c.tone}`}>{c.value}</p>
+          <div key={c.label} className="rounded-xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 px-4 py-3.5 shadow-sm">
+            <p className="text-[10.5px] font-semibold uppercase tracking-wide whitespace-nowrap overflow-hidden text-ellipsis text-slate-400 dark:text-slate-500">{c.label}</p>
+            <p className={`mt-1.5 text-[17px] font-extrabold tabular-nums tracking-tight ${c.tone}`}>{c.value}</p>
           </div>
         ))}
       </div>

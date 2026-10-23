@@ -54,7 +54,7 @@ export default function OperationsPage() {
       <main className="flex-1 min-w-0 px-4 sm:px-6 py-6 sm:py-8 space-y-8 fade-in">
         <header className={`${GLASS} px-5 sm:px-6 py-4 flex items-center justify-between flex-wrap gap-4`}>
           <div>
-            <h1 className="font-bold text-slate-900 dark:text-slate-100 text-lg">Operations Grid</h1>
+            <h1 className="font-bold text-slate-900 dark:text-slate-100 text-xl tracking-tight">Operations Grid</h1>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{data.today_display}</p>
           </div>
           <a
@@ -87,7 +87,7 @@ export default function OperationsPage() {
               </div>
               <a
                 href={api.exportExcelUrl(startDate, endDate)}
-                className="flex items-center gap-2 text-xs font-semibold bg-brand-600 hover:bg-brand-500 text-white px-3.5 py-2.5 rounded-lg transition-colors shadow-lg shadow-brand-600/20"
+                className="flex items-center gap-2 text-xs font-semibold bg-brand-600 hover:bg-brand-700 text-white px-3.5 py-2.5 rounded-lg transition-colors shadow-lg shadow-brand-600/20"
               >
                 Export Range
               </a>

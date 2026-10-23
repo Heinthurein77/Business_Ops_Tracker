@@ -432,7 +432,7 @@ export default function BusinessUnitDetailPage() {
                 <button type="button" onClick={() => { setTargetEditing(false); setTargetError(''); }} className="text-xs font-semibold text-slate-600 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 px-4 py-2">
                   Cancel
                 </button>
-                <button type="submit" disabled={targetSaving} className="text-xs font-semibold bg-brand-600 hover:bg-brand-500 text-white px-4 py-2 rounded-lg transition-colors disabled:opacity-50">
+                <button type="submit" disabled={targetSaving} className="text-xs font-semibold bg-brand-600 hover:bg-brand-700 text-white px-4 py-2 rounded-lg transition-colors disabled:opacity-50">
                   {targetSaving ? 'Saving…' : 'Save Target'}
                 </button>
               </div>

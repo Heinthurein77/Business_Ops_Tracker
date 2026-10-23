@@ -50,7 +50,7 @@ export default function CeoProfileCard({ ceoProfile, subtitle, glassClass }) {
           <div className="min-w-0">
             <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">CEO Profile</p>
             <div className="flex items-center gap-2 flex-wrap">
-              <h2 className="font-bold text-slate-900 dark:text-slate-100 text-lg tracking-tight truncate">{ceoProfile.full_name}</h2>
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 text-xl tracking-tight tracking-tight truncate">{ceoProfile.full_name}</h2>
               {ceoProfile.is_profile_completed ? (
                 ceoProfile.executive_title && (
                   <span className="text-[11px] font-medium text-brand-700 dark:text-brand-300 bg-brand-500/10 border border-brand-500/20 px-2.5 py-0.5 rounded-full whitespace-nowrap">{ceoProfile.executive_title}</span>

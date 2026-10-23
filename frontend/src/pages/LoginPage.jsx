@@ -107,7 +107,8 @@ export default function LoginPage() {
 
             {!showForgot ? (
               <div>
-                <h2 className="text-2xl font-bold tracking-tight lg:text-slate-900 text-white">Sign in to your workspace</h2>
+                <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-brand-500">abcMIB &middot; Business Ops Tracker</p>
+                <h2 className="mt-2 text-[28px] font-bold tracking-tight lg:text-slate-900 text-white">Sign in to your workspace</h2>
                 <p className="mt-2 text-sm lg:text-slate-500 text-slate-400">Enter your credentials to access your dashboard.</p>
 
                 {error && (
@@ -128,7 +129,7 @@ export default function LoginPage() {
                       placeholder="Your username"
                       value={username}
                       onChange={(e) => setUsername(e.target.value)}
-                      className="w-full rounded-lg border lg:border-slate-300 border-slate-700 lg:bg-white bg-slate-900 lg:text-slate-900 text-white px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent placeholder:text-slate-500"
+                      className="w-full rounded-lg border lg:border-slate-300 border-slate-700 lg:bg-white bg-slate-900 lg:text-slate-900 text-white px-4 py-2.5 text-sm shadow-sm focus:outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 placeholder:text-slate-500 transition"
                     />
                   </div>
                   <div>
@@ -141,13 +142,13 @@ export default function LoginPage() {
                       placeholder="••••••••"
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      className="w-full rounded-lg border lg:border-slate-300 border-slate-700 lg:bg-white bg-slate-900 lg:text-slate-900 text-white px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent placeholder:text-slate-500"
+                      className="w-full rounded-lg border lg:border-slate-300 border-slate-700 lg:bg-white bg-slate-900 lg:text-slate-900 text-white px-4 py-2.5 text-sm shadow-sm focus:outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 placeholder:text-slate-500 transition"
                     />
                   </div>
                   <button
                     type="submit"
                     disabled={submitting}
-                    className="w-full rounded-lg bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-700 hover:to-indigo-700 text-white font-semibold py-2.5 text-sm shadow-lg shadow-brand-600/30 transition-all disabled:opacity-60"
+                    className="w-full rounded-lg bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-700 hover:to-indigo-700 text-white font-semibold py-2.5 text-sm shadow-lg shadow-brand-600/30 transition-all active:scale-[0.99] disabled:opacity-60"
                   >
                     {submitting ? 'Signing In…' : 'Sign In Securely'}
                   </button>
@@ -188,13 +189,13 @@ export default function LoginPage() {
                       placeholder="Your username"
                       value={forgotUsername}
                       onChange={(e) => setForgotUsername(e.target.value)}
-                      className="w-full rounded-lg border lg:border-slate-300 border-slate-700 lg:bg-white bg-slate-900 lg:text-slate-900 text-white px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent placeholder:text-slate-500"
+                      className="w-full rounded-lg border lg:border-slate-300 border-slate-700 lg:bg-white bg-slate-900 lg:text-slate-900 text-white px-4 py-2.5 text-sm shadow-sm focus:outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 placeholder:text-slate-500 transition"
                     />
                   </div>
                   <button
                     type="submit"
                     disabled={submitting}
-                    className="w-full rounded-lg bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-700 hover:to-indigo-700 text-white font-semibold py-2.5 text-sm shadow-lg shadow-brand-600/30 transition-all disabled:opacity-60"
+                    className="w-full rounded-lg bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-700 hover:to-indigo-700 text-white font-semibold py-2.5 text-sm shadow-lg shadow-brand-600/30 transition-all active:scale-[0.99] disabled:opacity-60"
                   >
                     {submitting ? 'Sending…' : 'Submit Request'}
                   </button>

@@ -11,7 +11,7 @@ function ToggleIcon({ d, className = 'w-4 h-4' }) {
 /** Light/dark toggle for the admin section — flips the `dark` class on
  * <html> via ThemeContext. Pass `iconOnly` for compact placements (e.g. a
  * page header) instead of the labelled sidebar/mobile-menu form. */
-export default function ThemeToggle({ className = '', iconOnly = false }) {
+export default function ThemeToggle({ className = '', iconOnly = false, onDark = false }) {
   const { theme, toggleTheme } = useTheme();
   const isDark = theme === 'dark';
   const iconPath = isDark
@@ -23,7 +23,7 @@ export default function ThemeToggle({ className = '', iconOnly = false }) {
       type="button"
       onClick={toggleTheme}
       aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
-      className={`flex items-center gap-2.5 text-xs font-semibold text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 transition-colors ${className}`}
+      className={`flex items-center gap-2.5 text-xs font-semibold transition-colors ${onDark ? 'text-slate-400 hover:text-white' : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'} ${className}`}
     >
       <ToggleIcon d={iconPath} />
       {!iconOnly && (isDark ? 'Light Mode' : 'Dark Mode')}

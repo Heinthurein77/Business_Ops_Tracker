@@ -337,23 +337,23 @@ export default function AccountingPage() {
       <main className="flex-1 min-w-0 px-4 sm:px-6 py-6 sm:py-8 space-y-6 fade-in">
         <header className={`${GLASS} px-5 sm:px-6 py-4 flex items-center justify-between flex-wrap gap-4`}>
           <div>
-            <h1 className="font-bold text-slate-900 dark:text-slate-100 text-lg">Accounting</h1>
+            <h1 className="font-bold text-slate-900 dark:text-slate-100 text-xl tracking-tight">Accounting</h1>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Double-entry books per business unit — journal, ledger, trial balance, P&L, balance sheet</p>
           </div>
           <div className="flex items-center gap-3 flex-wrap">
-            <select value={buId} onChange={(e) => setBuId(e.target.value)} className="text-sm font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2">
+            <select value={buId} onChange={(e) => setBuId(e.target.value)} className="text-sm font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 shadow-sm focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/25">
               {bus.map((b) => <option key={b.bu_id} value={b.bu_id}>{b.bu_name}</option>)}
             </select>
-            <input type="month" value={period} onChange={(e) => setPeriod(e.target.value)} className="text-sm font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2" />
+            <input type="month" value={period} onChange={(e) => setPeriod(e.target.value)} className="text-sm font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 shadow-sm focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/25" />
           </div>
         </header>
 
         {notice && <div className="text-sm font-medium text-emerald-700 dark:text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-4 py-2.5">{notice}</div>}
         {error && <div className="text-sm font-medium text-red-700 dark:text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-2.5">{error}</div>}
 
-        <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 rounded-lg p-1 flex-wrap w-fit">
+        <div className="tab-track flex-wrap w-fit">
           {TABS.filter((t) => t.key !== 'group' || scope === 'group').map((t) => (
-            <button key={t.key} onClick={() => setTab(t.key)} className={`text-xs font-semibold px-3.5 py-1.5 rounded-md transition-colors whitespace-nowrap ${tab === t.key ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300'}`}>
+            <button key={t.key} onClick={() => setTab(t.key)} className={`tab-pill ${tab === t.key ? 'tab-pill-active' : ''}`}>
               {t.label}
             </button>
           ))}
@@ -366,8 +366,8 @@ export default function AccountingPage() {
               {[['pl', 'P&L'], ['bs', 'Balance Sheet'], ['tb', 'Trial Balance'], ['journal', 'Journal']].map(([r, label]) => (
                 <span key={r} className="flex items-center gap-1.5">
                   <span className="font-semibold text-slate-600 dark:text-slate-300">{label}</span>
-                  <a href={api.accExportUrl(r, 'xlsx', Number(buId), period)} className="font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Excel</a>
-                  <a href={api.accExportUrl(r, 'pdf', Number(buId), period)} className="font-semibold text-red-500 hover:underline">PDF</a>
+                  <a href={api.accExportUrl(r, 'xlsx', Number(buId), period)} className="px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 font-semibold hover:bg-emerald-500/20 transition-colors">Excel</a>
+                  <a href={api.accExportUrl(r, 'pdf', Number(buId), period)} className="px-2 py-0.5 rounded-md bg-red-500/10 text-red-600 dark:text-red-400 font-semibold hover:bg-red-500/20 transition-colors">PDF</a>
                 </span>
               ))}
             </div>
@@ -522,8 +522,8 @@ export default function AccountingPage() {
               {[['consolidated-pl', 'Consolidated P&L'], ['consolidated-bs', 'Consolidated Balance Sheet']].map(([r, label]) => (
                 <span key={r} className="flex items-center gap-1.5">
                   <span className="font-semibold text-slate-600 dark:text-slate-300">{label}</span>
-                  <a href={api.accExportUrl(r, 'xlsx', null, period)} className="font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Excel</a>
-                  <a href={api.accExportUrl(r, 'pdf', null, period)} className="font-semibold text-red-500 hover:underline">PDF</a>
+                  <a href={api.accExportUrl(r, 'xlsx', null, period)} className="px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 font-semibold hover:bg-emerald-500/20 transition-colors">Excel</a>
+                  <a href={api.accExportUrl(r, 'pdf', null, period)} className="px-2 py-0.5 rounded-md bg-red-500/10 text-red-600 dark:text-red-400 font-semibold hover:bg-red-500/20 transition-colors">PDF</a>
                 </span>
               ))}
             </div>
