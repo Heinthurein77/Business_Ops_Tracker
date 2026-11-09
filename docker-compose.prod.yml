@@ -2,8 +2,17 @@
 # Usage (on the server):
 #   1. Create the database in Neon (new database in your existing project, or a new project)
 #   2. Copy the connection string from the Neon dashboard
-#   3. export DATABASE_URL=<redacted>
-#      export JWT_SECRET_KEY='<a long random secret, 32+ chars>'
+#   3. Put the secrets in a `.env` file next to this file (0600 perms) —
+#      Compose reads it automatically for the ${...} variables below.
+#      NEVER `export` a secret on the command line: it lands in shell
+#      history on a shared server (D-m10). Generate values with the
+#      commands in runbook §2B and append them with `read -s`, e.g.
+#        read -s -p "JWT_SECRET_KEY: " V; printf 'JWT_SECRET_KEY=%s\n' "$V" >> .env
+#        chmod 600 .env
+#      (`read -s` does not echo and the value never appears on a command
+#      line, so history stays clean. If a secret ever does land on a
+#      command line, run `history -d <n>` immediately, or set
+#      HISTCONTROL=ignorespace and prefix the command with a space.)
 #   4. docker compose -f docker-compose.prod.yml up -d --build
 #
 # Migrations do NOT run inside the web container. The one-shot `migrate`
@@ -41,6 +50,11 @@ services:
     environment:
       ENVIRONMENT: production
       DATABASE_URL: <redacted>
+      # Database TLS (D-m8) — same values as the app service below:
+      # migrations connect through the same config, so the migrate job
+      # must verify the server's identity too, not just the web process.
+      DATABASE_SSLMODE: ${DATABASE_SSLMODE:-verify-full}
+      DATABASE_CA_CERT: ${DATABASE_CA_CERT:-}
       MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:-}
       # Migrations connect as MIGRATION_DATABASE_URL (bot_migrator) when
       # set; see deploy/db_roles.sql. Leave empty until the roles exist.
@@ -52,6 +66,19 @@ services:
       dockerfile: Dockerfile
     container_name: bot_app
     restart: unless-stopped
+    # Resource limits + log rotation (D-m9): Docker's json-file driver
+    # grows without bound by default, so a log-spam event could fill the
+    # VPS disk. 10 MB x 3 files bounds this container's logs to ~30 MB.
+    # The single uvicorn worker stays single — see the Dockerfile CMD
+    # comment (no --workers until the in-process export budget moves out
+    # of process memory).
+    mem_limit: 768m
+    cpus: 1.0
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -61,6 +88,18 @@ services:
       APP_TIMEZONE: Asia/Yangon
       APP_NAME: Business Operations & CEO Tracking System
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set to the Neon connection string}
+      # Database TLS (D-m8): verify the Neon server's identity, don't just
+      # encrypt the channel. verify-full is Neon's recommended mode, and
+      # the app refuses to start in verify-full without the CA certificate
+      # (src/config.py raises) — that fail-loud is the go-live gate, not a
+      # bug. Neon uses the public ISRG Root X1 (Let's Encrypt) certificate:
+      # fetch its PEM from Neon's "Connect to Neon securely" docs and paste
+      # it into the .env file as a quoted multi-line value. Until the CA
+      # cert is in place, DATABASE_SSLMODE may stay at `require` — encrypted
+      # but unverified — as an explicitly weaker interim step; do NOT put
+      # real data in before verify-full works.
+      DATABASE_SSLMODE: ${DATABASE_SSLMODE:-verify-full}
+      DATABASE_CA_CERT: ${DATABASE_CA_CERT:-}
       # Least privilege (go-live gate, see deploy/db_roles.sql): after the
       # roles are applied, DATABASE_URL must point at the restricted
       # bot_app role (SELECT/INSERT/UPDATE only, no DDL, no DELETE, audit
@@ -87,6 +126,14 @@ services:
       # /healthz is exempt from the check anyway. When DOMAIN is set,
       # ALLOWED_ORIGINS becomes https://<DOMAIN> — the origin the browser
       # sends for state-changing requests.
+      # Host/CSRF (P3-8): Caddy forwards the Host header it received — it
+      # does not rewrite it. The allowlist below is therefore the
+      # enforcement point for the edge middleware's Host check
+      # (src/edge.py): a Host that is not the public domain (or
+      # localhost/127.0.0.1 for the local health check) is rejected with
+      # 400 before the Origin check runs. Never set ALLOWED_HOSTS to "*",
+      # and never rely on the proxy to rewrite Host unless the Caddyfile
+      # is changed to do so explicitly.
       ALLOWED_HOSTS: ${DOMAIN:+${DOMAIN},}localhost,127.0.0.1
       ALLOWED_ORIGINS: ${DOMAIN:+https://${DOMAIN}}
       # Client IP: Caddy is exactly ONE hop in front of the app and sets
