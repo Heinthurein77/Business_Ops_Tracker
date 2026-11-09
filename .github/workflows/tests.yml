@@ -1,0 +1,41 @@
+name: tests
+
+# Test gate on deploys (A-m2, BOT security review 2026-11-09): the full
+# pytest suite (+ the frontend production build) runs on every push/PR,
+# so a bad change cannot reach main — and, via deploy_on_push, DigitalOcean
+# — untested. The DO PRE_DEPLOY migration job only catches schema errors;
+# this is the gate that catches everything else.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    env:
+      ENVIRONMENT: test
+      DATABASE_URL: sqlite://
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+      - name: Pytest suite
+        run: python -m pytest tests/ -q
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Frontend production build
+        working-directory: frontend
+        run: npm ci --ignore-scripts && npm run build

@@ -2,27 +2,71 @@
 # Usage (on the server):
 #   1. Create the database in Neon (new database in your existing project, or a new project)
 #   2. Copy the connection string from the Neon dashboard
-#   3. export DATABASE_URL='<redacted>'  # pooled URL works fine
+#   3. export DATABASE_URL=<redacted>
 #      export JWT_SECRET_KEY='<a long random secret, 32+ chars>'
 #   4. docker compose -f docker-compose.prod.yml up -d --build
 #
-# Migrations run automatically on container startup (RUN_MIGRATIONS_ON_STARTUP=true).
+# Migrations do NOT run inside the web container. The one-shot `migrate`
+# service runs `alembic upgrade head` first (it uses MIGRATION_DATABASE_URL
+# when set, else DATABASE_URL — see alembic/env.py) and the web service
+# only starts once it exits successfully (depends_on:
+# service_completed_successfully). Verify the head before every deploy:
+# `alembic heads` / `git log -1 --oneline`. Rollback: revert code +
+# rebuild + `alembic downgrade <previous revision>` — see the go-live
+# runbook; downgrades past e4f8a2b6d0c5 cannot restore scrubbed audit data,
+# so a forward-fix is preferred.
+#
+# TLS: by default this file is HTTP-only (the app listens on
+# 127.0.0.1:8123). For a public deployment add the `tls` profile and a
+# domain — Caddy then terminates HTTPS automatically:
+#   export DOMAIN=erp.example.com
+#   docker compose -f docker-compose.prod.yml --profile tls up -d --build
+# Caddy needs ports 80/443 free and the domain's DNS pointed at the
+# server. Without a domain, do NOT expose the app directly: production
+# cookies are Secure + __Host-, which browsers refuse over plain HTTP,
+# so login breaks (see runbook §2C).
+#
 # The local postgres/pgadmin services from docker-compose.yml are NOT started here —
 # Neon is the database.
 
 services:
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bot_migrate
+    # One-shot: exits after `alembic upgrade head`. Re-running it is a
+    # no-op once the DB is at head. Uses the schema-owner URL when set.
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: <redacted>
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:-}
+      # Migrations connect as MIGRATION_DATABASE_URL (bot_migrator) when
+      # set; see deploy/db_roles.sql. Leave empty until the roles exist.
+      RUN_MIGRATIONS_ON_STARTUP: "false"
+
   app:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: bot_app
     restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     environment:
       ENVIRONMENT: production
       PORT: 8000
       APP_TIMEZONE: Asia/Yangon
       APP_NAME: Business Operations & CEO Tracking System
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set to the Neon connection string}
+      # Least privilege (go-live gate, see deploy/db_roles.sql): after the
+      # roles are applied, DATABASE_URL must point at the restricted
+      # bot_app role (SELECT/INSERT/UPDATE only, no DDL, no DELETE, audit
+      # trail append-only) and MIGRATION_DATABASE_URL at bot_migrator.
+      # Until then this stays empty and DATABASE_URL is the owner URL.
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:-}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
       DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?DATA_ENCRYPTION_KEY must be set}
       BOOTSTRAP_CHAIRMAN_PASSWORD: ${BOOTSTRAP_CHAIRMAN_PASSWORD:-}
@@ -30,11 +74,26 @@ services:
       # configurable via env, so no variable is passed here.
       JWT_EXPIRE_MINUTES: "480"
       TOTAL_BUSINESS_UNITS: "23"
-      # If deploy/db_roles.sql has been applied and DATABASE_URL points at the
-      # restricted bot_app role, set this to "false" — bot_app cannot run DDL,
-      # so startup migrations would fail with permission denied. Migrations
-      # then run via MIGRATION_DATABASE_URL (bot_migrator) instead.
-      RUN_MIGRATIONS_ON_STARTUP: "true"
+      # Migrations run in the one-shot `migrate` service above, never in
+      # the web container: with the least-privilege roles the runtime role
+      # (bot_app) cannot run DDL, so startup migrations would fail with
+      # permission denied. Keep this "false".
+      RUN_MIGRATIONS_ON_STARTUP: "false"
+      # Public host / origin. Derived from DOMAIN when set (tls profile);
+      # without a domain they fall back to localhost-only, which is the
+      # correct value for the HTTP-only default (the app is only reached
+      # on 127.0.0.1:8123). ALLOWED_HOSTS always includes localhost /
+      # 127.0.0.1 because the container HEALTHCHECK hits 127.0.0.1 and
+      # /healthz is exempt from the check anyway. When DOMAIN is set,
+      # ALLOWED_ORIGINS becomes https://<DOMAIN> — the origin the browser
+      # sends for state-changing requests.
+      ALLOWED_HOSTS: ${DOMAIN:+${DOMAIN},}localhost,127.0.0.1
+      ALLOWED_ORIGINS: ${DOMAIN:+https://${DOMAIN}}
+      # Client IP: Caddy is exactly ONE hop in front of the app and sets
+      # X-Forwarded-For (a list — never name it in CLIENT_IP_HEADER,
+      # src/client_ip.py rejects list-valued headers). Leave
+      # CLIENT_IP_HEADER unset and count one hop in from the right.
+      TRUSTED_PROXY_HOPS: "1"
       R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
       R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
       R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
@@ -46,5 +105,28 @@ services:
     ports:
       - "127.0.0.1:8123:8000"
 
+  caddy:
+    # Reverse proxy with automatic HTTPS (R-2). Only started with the
+    # `tls` profile: `docker compose --profile tls up -d`. DOMAIN is
+    # required then and the Caddyfile fails to load without it.
+    image: caddy:2-alpine
+    container_name: bot_caddy
+    restart: unless-stopped
+    profiles:
+      - tls
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN must be set when using the tls profile (e.g. export DOMAIN=erp.example.com)}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+
 volumes:
   bot_uploads_data:
+  caddy_data:
+  caddy_config:

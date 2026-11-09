@@ -31,4 +31,8 @@ boto3==1.35.90
 openpyxl==3.1.5
 python-dotenv==1.2.3
 tzdata==2025.2
-fpdf2>=2.7.9
+# fpdf2 was the one unpinned runtime dep (A-m2): pinned to 2.8.9, the
+# version the suite runs against, so a rebuild cannot pull an untested
+# minor (PDF payslips/statements). Pin fpdf2 ONLY — see the sec-review
+# fix pass; other lines are owned by their own workstreams.
+fpdf2==2.8.9
