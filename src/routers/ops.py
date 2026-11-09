@@ -133,8 +133,12 @@ _IDEMPOTENCY_TTL_HOURS = 24
 
 def _idempotency_lookup(db, user, endpoint: str, key: Optional[str]):
     """CM-6: return the stored response for a replayed Idempotency-Key,
-    or None when this is a fresh request (no key, unknown key, expired)."""
-    if not key or user is None or getattr(user, "id", None) is None:
+    or None when this is a fresh request (no key, unknown key, expired).
+
+    The key must be a non-empty string: direct (non-HTTP) calls leave
+    the FastAPI Header() default object in place, which is not a key —
+    treat it as absent rather than binding it into a query."""
+    if not isinstance(key, str) or not key or user is None or getattr(user, "id", None) is None:
         return None
     row = db.query(IdempotencyKey).filter(
         IdempotencyKey.user_id == user.id,
@@ -155,7 +159,7 @@ def _idempotency_store(db, user, endpoint: str, key: Optional[str], body) -> Non
     the business transaction committed). A concurrent first execution
     storing the same key wins the unique constraint; the loser just
     drops its copy — the replay will read the winner's response."""
-    if not key or user is None or getattr(user, "id", None) is None:
+    if not isinstance(key, str) or not key or user is None or getattr(user, "id", None) is None:
         return
     try:
         db.add(IdempotencyKey(
