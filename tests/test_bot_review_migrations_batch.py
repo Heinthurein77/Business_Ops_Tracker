@@ -56,8 +56,11 @@ NEW_REVISION = "ee078d0716ad"
 PREV_HEAD = "c9ec96d6b1e5"
 # Current head after the 2026-11-09 sec-review fix pass linearised the
 # three new revisions (D-12 -> job heartbeats -> revenue anomaly flag).
-CURRENT_HEAD = "f58eca28a187"
-CURRENT_HEAD_DOWN = "73a8ede3c7c4"
+# Workstream A (realtime review) added 7f3a9c1e5b2d on top of it:
+# CM-8 version columns, CM-6 idempotency table, CC-1 stock-batch CHECK
+# + unique, Cm-7 year-close partial unique index.
+CURRENT_HEAD = "7f3a9c1e5b2d"
+CURRENT_HEAD_DOWN = "f58eca28a187"
 
 from types import SimpleNamespace
 
@@ -511,6 +514,9 @@ def test_every_pg_check_in_models_has_a_migration():
         "ck_users_role", "ck_users_bu_assignment", "ck_users_username_lower",
         "ck_financial_notes_text", "ck_pwreset_status",
         "ck_inventory_items_stock_non_negative",
+        # Workstream A (realtime review, migration 7f3a9c1e5b2d): the
+        # stock-batch quantity CHECK (CC-1).
+        "ck_stock_batches_qty_non_negative",
     }
     expected |= {f"ck_{t}_percent_range" for t in b1c5.ACTIVITY_TABLES}
     expected |= {f"ck_{t}_vitals_range" for t in b1c5.HEALTH_TABLES}

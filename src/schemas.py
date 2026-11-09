@@ -5,8 +5,6 @@ only *incoming* request shapes are modeled here.
 """
 import re
 from datetime import date
-
-from src.utils import today_local
 from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
@@ -200,6 +198,11 @@ class CeoProfileRequest(BaseModel):
     def validate_date_of_birth(cls, value: date) -> date:
         # SM-12: Yangon date, not the server UTC date — a birthday at
         # the day boundary used to flip validity by timezone.
+        # Local import: a top-level `from src.utils import ...` here
+        # creates a config -> schemas -> utils -> config cycle that only
+        # fires when src.config is imported first (it broke the
+        # bootstrap-password tests).
+        from src.utils import today_local
         today = today_local()
         if value >= today:
             raise ValueError("Date of birth must be in the past")

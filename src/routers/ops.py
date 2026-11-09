@@ -784,35 +784,57 @@ def transfer_stock(item_id: int, payload: TransferIn, user: User = Depends(get_c
                          reason=f"Transfer from BU {src.business_unit_id}", recorded_by_id=user.id))
     journal_posted = None
     if total_cost > 0:
-        try:
-            from src.routers.accounting import (
-                _ensure_intercompany_accounts, account_by_code, create_entry,
-            )
-            for bu_id in (src.business_unit_id, payload.to_business_unit_id):
-                _ensure_intercompany_accounts(db, bu_id)
-                db.flush()
-                inv_acc = account_by_code(db, bu_id, "1140")
-                if bu_id == src.business_unit_id:
-                    recv = account_by_code(db, bu_id, "1180")
-                    if not (recv and inv_acc):
-                        raise RuntimeError(f"intercompany accounts missing in BU {bu_id}")
-                    spec = [{"account_id": recv.id, "debit": total_cost, "credit": 0},
-                            {"account_id": inv_acc.id, "debit": 0, "credit": total_cost}]
-                    desc = f"Stock transfer to BU {payload.to_business_unit_id} — {src.name}"
-                else:
-                    pay = account_by_code(db, bu_id, "2180")
-                    if not (pay and inv_acc):
-                        raise RuntimeError(f"intercompany accounts missing in BU {bu_id}")
-                    spec = [{"account_id": inv_acc.id, "debit": total_cost, "credit": 0},
-                            {"account_id": pay.id, "debit": 0, "credit": total_cost}]
-                    desc = f"Stock transfer from BU {src.business_unit_id} — {src.name}"
-                create_entry(db, bu_id, today_local(), desc, "stock_transfer",
-                             user.id, spec, source_id=src.id, post=True)
-            journal_posted = True
-        except Exception as exc:
-            db.rollback()
-            raise server_error("Transfer journal could not be posted; transfer rolled back",
-                               exc, logger, context=f"item {item_id}")
+        from src.routers.accounting import (
+            _ensure_intercompany_accounts, account_by_code, create_entry,
+        )
+        for bu_id in (src.business_unit_id, payload.to_business_unit_id):
+            _ensure_intercompany_accounts(db, bu_id)
+        db.flush()
+        recv = account_by_code(db, src.business_unit_id, "1180")
+        src_inv = account_by_code(db, src.business_unit_id, "1140")
+        pay = account_by_code(db, payload.to_business_unit_id, "2180")
+        dst_inv = account_by_code(db, payload.to_business_unit_id, "1140")
+        if not (recv and src_inv and pay and dst_inv):
+            # SM-9: the one remaining flag-only flow for the QUICK
+            # transfer. A transfer to/from a BU with no chart yet (no
+            # 1140/1180/2180) cannot post its intercompany journals, but
+            # the stock move itself is real and must not be blocked on
+            # bookkeeping provisioning — the existing test suite pins
+            # this move-with-flag behaviour. The missing journal is
+            # flagged (journal_posted=false) for follow-up once the BU
+            # is provisioned; it cannot be recovered by the journal
+            # retry endpoint, which cannot reconstruct a quick transfer
+            # from the item id alone. Every other posting failure below
+            # is fail-hard: the whole transfer rolls back.
+            missing = [c for c, a in (("1180", recv), ("1140/src", src_inv),
+                                       ("2180", pay), ("1140/dst", dst_inv)) if not a]
+            logger.warning("Quick transfer journal skipped for item %s: accounts %s missing "
+                           "(BU %s -> BU %s); stock moves, journal flagged",
+                           item_id, ",".join(missing), src.business_unit_id,
+                           payload.to_business_unit_id)
+            journal_posted = False
+        else:
+            try:
+                create_entry(db, src.business_unit_id, today_local(),
+                             f"Stock transfer to BU {payload.to_business_unit_id} — {src.name}",
+                             "stock_transfer", user.id,
+                             [{"account_id": recv.id, "debit": total_cost, "credit": 0},
+                              {"account_id": src_inv.id, "debit": 0, "credit": total_cost}],
+                             source_id=src.id, post=True)
+                create_entry(db, payload.to_business_unit_id, today_local(),
+                             f"Stock transfer from BU {src.business_unit_id} — {src.name}",
+                             "stock_transfer", user.id,
+                             [{"account_id": dst_inv.id, "debit": total_cost, "credit": 0},
+                              {"account_id": pay.id, "debit": 0, "credit": total_cost}],
+                             source_id=src.id, post=True)
+                journal_posted = True
+            except HTTPException:
+                db.rollback()
+                raise
+            except Exception as exc:
+                db.rollback()
+                raise server_error("Transfer journal could not be posted; transfer rolled back",
+                                   exc, logger, context=f"item {item_id}")
     _commit_or_409(db, f"Stock transfer for item {item_id}")
     db.refresh(dst)
     _log_audit(db, user, "TRANSFER_STOCK", f"item_id={item_id}")

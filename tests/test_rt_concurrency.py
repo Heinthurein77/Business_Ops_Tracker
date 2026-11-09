@@ -47,8 +47,8 @@ from src.routers.ops import (
     create_invoice, create_payroll, create_pos_sale, create_po,
     create_sales_customer, create_supplier, pay_payroll, pay_po,
     record_movement, record_payment, receive_po,
-    send_invoice, update_payroll_line, update_po, void_pos_sale,
-    EmployeeIn,
+    send_invoice, transfer_stock, update_payroll_line, update_po, void_pos_sale,
+    EmployeeIn, TransferIn,
 )
 from src.utils import today_local
 
@@ -873,3 +873,40 @@ class TestSm12AndSm1Helpers:
         from src.routers.ops import _escape_like
         assert _escape_like("a_b%c\\d") == "a\\_b\\%c\\\\d"
         assert _escape_like("plain") == "plain"
+
+# ------------------------------------------------------------------ SM-9: quick transfer flag-only case
+
+class TestSm9QuickTransferFlagOnly:
+    def test_quick_transfer_to_unprovisioned_bu_moves_stock_and_flags_journal(self, db):
+        # The destination BU has no chart at all (no 1140/1180/2180):
+        # the stock move itself is real and must not be blocked on
+        # bookkeeping provisioning — it commits with journal_posted=false.
+        bu1 = db.test_bu
+        bare = BusinessUnit(name="Bare", code="B3")
+        db.add(bare)
+        db.commit()
+        item = _add_item(db, bu1.id, name="Soap", stock=30, cost=500)
+        out = transfer_stock(item.id, TransferIn(to_business_unit_id=bare.id, quantity=12),
+                             user=CHAIRMAN, db=db)
+        assert out["source_stock"] == 18
+        assert out["journal_posted"] is False
+        dst = db.query(InventoryItem).filter(
+            InventoryItem.business_unit_id == bare.id, InventoryItem.name == "Soap").first()
+        assert dst is not None and float(dst.current_stock) == 12
+
+    def test_quick_transfer_into_closed_period_rolls_back(self, db):
+        # Accounts exist in both BUs here, so a posting failure is
+        # fail-hard: the whole transfer rolls back instead of moving
+        # stock with no journal.
+        bu1, bu2 = db.test_bu, db.test_bu2
+        close_period(PeriodAction(business_unit_id=bu1.id,
+                                  period=today_local().strftime("%Y-%m")),
+                     user=CHAIRMAN, db=db)
+        item = _add_item(db, bu1.id, name="Soap", stock=30, cost=500)
+        with pytest.raises(HTTPException):
+            transfer_stock(item.id, TransferIn(to_business_unit_id=bu2.id, quantity=12),
+                           user=CHAIRMAN, db=db)
+        db.rollback()
+        assert _stock_of(db, item.id) == 30
+        assert db.query(InventoryItem).filter(
+            InventoryItem.business_unit_id == bu2.id, InventoryItem.name == "Soap").first() is None
