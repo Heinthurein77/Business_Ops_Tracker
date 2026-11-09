@@ -13,7 +13,17 @@
 #      line, so history stays clean. If a secret ever does land on a
 #      command line, run `history -d <n>` immediately, or set
 #      HISTCONTROL=ignorespace and prefix the command with a space.)
-#   4. docker compose -f docker-compose.prod.yml up -d --build
+#   4. Deploy with ./scripts/deploy.sh (PM-7) — do NOT `up -d --build`
+#      directly: it recreates the app while the migration is still
+#      running, so old code serves against a new schema. The script
+#      stops the app, runs the one-shot migrate service, then starts
+#      the new code:
+#        docker compose -f docker-compose.prod.yml stop app
+#        docker compose -f docker-compose.prod.yml run --rm migrate
+#        docker compose -f docker-compose.prod.yml up -d app
+#      Expected downtime: a few minutes (image rebuild dominates,
+#      typically 1-3 min, plus ~30-60 s boot/seeding) — announce the
+#      window; do not deploy on month-end mornings.
 #
 # TLS is the DEFAULT path, not opt-in (SM-2): the Caddy service below has
 # no `--profile tls` gate, and it requires DOMAIN — `up` fails loudly with
@@ -56,6 +66,10 @@ services:
     command: ["alembic", "upgrade", "head"]
     environment:
       ENVIRONMENT: production
+      # TZ defence in depth (SM-12/PM-7): app logic uses APP_TIMEZONE,
+      # but the container clock also stamps model date defaults — keep
+      # it on Yangon time so nothing lands on the previous day.
+      TZ: Asia/Yangon
       DATABASE_URL: <redacted>
       # Database TLS (D-m8) — same values as the app service below:
       # migrations connect through the same config, so the migrate job
@@ -93,6 +107,10 @@ services:
       ENVIRONMENT: production
       PORT: 8000
       APP_TIMEZONE: Asia/Yangon
+      # TZ defence in depth (SM-12): app logic uses APP_TIMEZONE, but
+      # the container clock also stamps model date defaults — keep it
+      # on Yangon time so nothing lands on the previous day.
+      TZ: Asia/Yangon
       APP_NAME: Business Operations & CEO Tracking System
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set to the Neon connection string}
       # Database TLS (D-m8): verify the Neon server's identity, don't just

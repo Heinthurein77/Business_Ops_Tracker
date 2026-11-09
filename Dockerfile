@@ -19,7 +19,11 @@ FROM python:3.11-slim@sha256:da047cb8f9d1d98e5c070f5300ba9f7274e33b8fc0e5be5ed88
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    # TZ defence in depth (SM-12): app logic uses APP_TIMEZONE, but the
+    # container clock also stamps model date defaults — keep it on
+    # Yangon time so nothing lands on the previous day.
+    TZ=Asia/Yangon
 
 WORKDIR /app
 
