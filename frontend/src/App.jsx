@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider, useAuth, resolveHomePath } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
 import ProtectedRoute from './components/ProtectedRoute';
+import SessionExpiryBanner from './components/SessionExpiryBanner';
 
 import LoginPage from './pages/LoginPage';
 import ForcePasswordChangePage from './pages/ForcePasswordChangePage';
@@ -24,6 +25,7 @@ import BusinessUnitDetailPage from './pages/BusinessUnitDetailPage';
 import HeadOfficePage from './pages/HeadOfficePage';
 import ManageUsersPage from './pages/ManageUsersPage';
 import BusinessUnitsPage from './pages/BusinessUnitsPage';
+import JournalFailuresPage from './pages/JournalFailuresPage';
 
 function RootRedirect() {
   const { user, loading } = useAuth();
@@ -44,6 +46,7 @@ export default function App() {
     <BrowserRouter>
       <ThemeProvider>
       <AuthProvider>
+        <SessionExpiryBanner />
         <Routes>
           <Route path="/" element={<RootRedirect />} />
           <Route path="/login" element={<LoginRoute />} />
@@ -198,6 +201,14 @@ export default function App() {
             element={
               <ProtectedRoute roles={['Chairman']}>
                 <ManageUsersPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/journal-failures"
+            element={
+              <ProtectedRoute roles={['Chairman', 'HO']}>
+                <JournalFailuresPage />
               </ProtectedRoute>
             }
           />

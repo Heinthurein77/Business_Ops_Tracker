@@ -27,6 +27,7 @@ const ADMIN_NAV_GROUPS = [
     links: [
       { to: '/admin/operations-center', label: 'Operations Center' },
       { to: '/accounting', label: 'Accounting' },
+      { to: '/admin/journal-failures', label: 'Journal Failures' },
       { to: '/admin/ceo-profiles', label: 'CEO Profiles' },
       { to: '/admin/head-office', label: 'Head Office' },
       { to: '/admin/business-units', label: 'Business Units' },

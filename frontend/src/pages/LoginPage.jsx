@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth, roleHomePath } from '../context/AuthContext';
 import { api, ApiError } from '../api/client';
@@ -15,6 +15,18 @@ export default function LoginPage() {
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
   const [submitting, setSubmitting] = useState(false);
+
+  // SM-1: the global 401 handler sets this flag when a session expires
+  // (or is revoked on another device) mid-use. Say so plainly, and clear
+  // the flag once shown. Unsaved form drafts are restored after sign-in.
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem('bot-session-expired')) {
+        setInfo('Your session expired — please sign in again. Any unsaved form will be restored from your draft.');
+        sessionStorage.removeItem('bot-session-expired');
+      }
+    } catch { /* storage unavailable — plain login */ }
+  }, []);
 
   async function handleLogin(e) {
     e.preventDefault();
@@ -165,6 +177,13 @@ export default function LoginPage() {
                 >
                   Forgot Password?
                 </button>
+
+                {/* SM-1: document the all-devices logout — signing out, or
+                    changing a password, ends the session on every device
+                    at once (there is no per-device session list). */}
+                <p className="mt-6 text-center text-xs lg:text-slate-400 text-slate-500">
+                  Sessions last 8 hours. Signing out signs you out on all devices.
+                </p>
               </div>
             ) : (
               <div>
