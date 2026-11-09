@@ -34,6 +34,23 @@ def today_local() -> date:
     return datetime.now(APP_TZ).date()
 
 
+_FORMULA_TRIGGER_CHARS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _sanitize_excel_cell(value: Optional[str]) -> Optional[str]:
+    """Neutralizes formula-injection payloads (CWE-1236) in free-text fields
+    before they're written into an exported spreadsheet. These fields are
+    submitted by CEO accounts and read by Chairman/HO — a value starting with
+    "=" is written by openpyxl as an actual live formula (verified: it sets
+    the cell's data_type to "f"), so a malicious or compromised CEO account
+    could plant something like =HYPERLINK(...) that runs when a higher-privilege
+    user opens the export. Prefixing a single quote forces spreadsheet
+    applications to treat the value as literal text."""
+    if not value or not value.startswith(_FORMULA_TRIGGER_CHARS):
+        return value
+    return "'" + value
+
+
 def is_weekend(d: date) -> bool:
     return d.weekday() >= 5  # 5 = Saturday, 6 = Sunday
 

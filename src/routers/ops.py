@@ -5,6 +5,7 @@ Access model mirrors the rest of the app:
 - CEO: scoped to their own business unit
 - Chairman / HO ("admin"): all business units
 """
+import logging
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Optional
@@ -16,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from src.auth import get_current_user, require_roles
 from src.database import get_db
-from src.utils import validate_period
+from src.utils import _sanitize_excel_cell, today_local, validate_period
 from src.models import (
     ActionItem,
     AttendanceRecord,
@@ -36,6 +37,7 @@ from src.models import (
     PayrollLine,
     PayrollRun,
     PosSale,
+    Project,
     PosSaleLine,
     PurchaseOrder,
     PurchaseOrderLine,
@@ -57,14 +59,24 @@ from src.models import (
 router = APIRouter(prefix="/api/ops", tags=["ops"])
 require_admin = require_roles("Chairman", "HO")
 
+logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------- helpers
 
 def bu_scope(user: User, bu_id: Optional[int]) -> Optional[int]:
-    """Resolve which BU the caller may touch. CEOs are pinned to their own."""
+    """Resolve which BU the caller may touch. CEOs are pinned to their own,
+    and so are BU-assigned accountants (mirroring accounting.scoped_bu_id):
+    naming another BU is a 403, naming none means their own BU. Legacy
+    accountants with business_unit_id NULL keep group access, as do
+    Chairman/HO."""
     if user.role == "CEO":
         if bu_id is not None and bu_id != user.business_unit_id:
             raise HTTPException(403, "CEOs can only access their own business unit")
+        return user.business_unit_id
+    if user.role == "Accountant" and user.business_unit_id:
+        if bu_id is not None and bu_id != user.business_unit_id:
+            raise HTTPException(403, "Accountants can only access their assigned business unit")
         return user.business_unit_id
     return bu_id
 
@@ -159,6 +171,8 @@ def list_action_items(
     business_unit_id: Optional[int] = None,
     status: Optional[str] = None,
     mine: bool = False,
+    limit: int = 200,
+    offset: int = 0,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -170,7 +184,7 @@ def list_action_items(
         q = q.filter(ActionItem.status == status)
     if mine:
         q = q.filter(ActionItem.assigned_to_id == user.id)
-    items = q.order_by(ActionItem.due_date.is_(None), ActionItem.due_date, ActionItem.created_at.desc()).all()
+    items = q.order_by(ActionItem.due_date.is_(None), ActionItem.due_date, ActionItem.created_at.desc()).offset(offset).limit(limit).all()
     return {"items": [serialize_action_item(db, i) for i in items]}
 
 
@@ -291,7 +305,7 @@ def remind_missing(user: User = Depends(require_admin), db: Session = Depends(ge
 
 def run_remind_missing_reports(db: Session) -> int:
     """Job-callable: notify CEOs whose BU hasn't submitted today."""
-    today = date.today()
+    today = today_local()
     submitted_bu_ids = {
         row[0] for row in db.query(DailyFinancial.business_unit_id).filter(DailyFinancial.report_date == today).all()
     }
@@ -398,42 +412,63 @@ def record_movement(item_id: int, payload: MovementIn, user: User = Depends(get_
     if not item:
         raise HTTPException(404, "Inventory item not found")
     bu_scope(user, item.business_unit_id)
+    if payload.movement_type not in ("in", "out", "adjustment"):
+        raise HTTPException(400, "movement_type must be in/out/adjustment")
     qty = Decimal(str(payload.quantity))
+    if payload.movement_type in ("in", "out") and qty <= 0:
+        raise HTTPException(400, "quantity must be greater than 0 for in/out movements")
+    if payload.movement_type == "out" and qty > Decimal(str(item.current_stock or 0)):
+        raise HTTPException(400, f"Cannot move out {qty:g}: only {float(item.current_stock or 0):g} in stock")
+    if payload.movement_type == "adjustment":
+        if qty < 0:
+            raise HTTPException(400, "adjustment cannot set stock below 0")
+        if not (payload.reason or "").strip():
+            raise HTTPException(400, "adjustment needs a reason")
     if payload.movement_type == "in":
         item.current_stock = (item.current_stock or 0) + qty
     elif payload.movement_type == "out":
         item.current_stock = (item.current_stock or 0) - qty
-        try:
-            from src.routers.modules import consume_batches_fefo
-            consume_batches_fefo(db, item, qty)
-        except Exception:
-            pass  # batch tracking must never break a stock movement
+        # FEFO errors propagate: a batch shortfall / expired-only stock is a
+        # real inconsistency, not something to swallow (M-C2).
+        from src.routers.modules import consume_batches_fefo
+        consume_batches_fefo(db, item, qty)
     elif payload.movement_type == "adjustment":
         item.current_stock = qty
-    else:
-        raise HTTPException(400, "movement_type must be in/out/adjustment")
     item.updated_at = datetime.utcnow()
     db.add(StockMovement(item_id=item.id, movement_type=payload.movement_type,
                          quantity=qty, reason=payload.reason, recorded_by_id=user.id))
     _maybe_notify_low_stock(db, item)
-    db.commit()
-    db.refresh(item)
+    db.flush()
+    journal_posted = None
     if payload.post_cogs and payload.movement_type == "out" and (item.unit_cost or 0) > 0:
+        # COGS is a money movement: if its journal cannot post, the whole
+        # movement is rolled back rather than leaving stock moved with no
+        # journal (M-B1).
         try:
             from src.routers.accounting import account_by_code, create_entry
             inv = account_by_code(db, item.business_unit_id, "1140")
             cogs = account_by_code(db, item.business_unit_id, "5100")
-            if inv and cogs:
-                amount = qty * Decimal(str(item.unit_cost))
-                create_entry(db, item.business_unit_id, date.today(),
-                             f"COGS — {item.name} x{qty}", "inventory", user.id,
-                             [{"account_id": cogs.id, "debit": amount, "credit": 0},
-                              {"account_id": inv.id, "debit": 0, "credit": amount}],
-                             source_id=item.id, post=True)
-                db.commit()
-        except Exception:
+            if not (inv and cogs):
+                raise HTTPException(500, "COGS accounts (1140/5100) are not configured for this BU")
+            amount = qty * Decimal(str(item.unit_cost))
+            create_entry(db, item.business_unit_id, today_local(),
+                         f"COGS — {item.name} x{qty}", "inventory", user.id,
+                         [{"account_id": cogs.id, "debit": amount, "credit": 0},
+                          {"account_id": inv.id, "debit": 0, "credit": amount}],
+                         source_id=item.id, post=True)
+            journal_posted = True
+        except HTTPException:
             db.rollback()
-    return serialize_inventory_item(item)
+            raise
+        except Exception as exc:
+            db.rollback()
+            logger.warning("COGS journal failed for item %s: %s", item.id, exc)
+            raise HTTPException(500, f"COGS journal could not be posted: {exc}")
+    db.commit()
+    db.refresh(item)
+    out = serialize_inventory_item(item)
+    out["journal_posted"] = journal_posted
+    return out
 
 
 class TransferIn(BaseModel):
@@ -444,7 +479,13 @@ class TransferIn(BaseModel):
 @router.post("/inventory/{item_id}/transfer")
 def transfer_stock(item_id: int, payload: TransferIn, user: User = Depends(get_current_user),
                    db: Session = Depends(get_db)):
-    """Move stock to another BU (matched by item name; created there if new)."""
+    """Move stock to another BU, posting the same intercompany journals as
+    the formal StockTransfer flow (source Dr 1180 / Cr 1140, destination
+    Dr 1140 / Cr 2180) at moving-average cost. The destination item is
+    matched by SKU when the source item has one — never by name alone when
+    a SKU exists — and batches move with the stock."""
+    from src.models import StockBatch
+
     src = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
     if not src:
         raise HTTPException(404, "Inventory item not found")
@@ -458,9 +499,14 @@ def transfer_stock(item_id: int, payload: TransferIn, user: User = Depends(get_c
         raise HTTPException(400, "Quantity must be positive")
     if (src.current_stock or 0) < qty:
         raise HTTPException(400, "Not enough stock to transfer")
-    dst = db.query(InventoryItem).filter(
-        InventoryItem.business_unit_id == payload.to_business_unit_id,
-        InventoryItem.name == src.name, InventoryItem.is_active == True).first()  # noqa: E712
+    if src.sku:
+        dst = db.query(InventoryItem).filter(
+            InventoryItem.business_unit_id == payload.to_business_unit_id,
+            InventoryItem.sku == src.sku, InventoryItem.is_active == True).first()  # noqa: E712
+    else:
+        dst = db.query(InventoryItem).filter(
+            InventoryItem.business_unit_id == payload.to_business_unit_id,
+            InventoryItem.name == src.name, InventoryItem.is_active == True).first()  # noqa: E712
     if not dst:
         dst = InventoryItem(business_unit_id=payload.to_business_unit_id, name=src.name,
                             sku=src.sku, category=src.category, unit=src.unit,
@@ -468,17 +514,58 @@ def transfer_stock(item_id: int, payload: TransferIn, user: User = Depends(get_c
                             unit_cost=src.unit_cost)
         db.add(dst)
         db.flush()
+    cost = Decimal(str(src.unit_cost or 0))
+    total_cost = qty * cost
+    has_batches = db.query(StockBatch).filter(StockBatch.item_id == src.id).first() is not None
     src.current_stock = (src.current_stock or 0) - qty
     dst.current_stock = (dst.current_stock or 0) + qty
     src.updated_at = dst.updated_at = datetime.utcnow()
+    if has_batches:
+        from src.routers.modules import consume_batches_fefo
+        consume_batches_fefo(db, src, qty)
+        restock_batches(db, dst, qty, batch_no="TRANSFER")
     db.add(StockMovement(item_id=src.id, movement_type="out", quantity=qty,
                          reason=f"Transfer to BU {payload.to_business_unit_id}", recorded_by_id=user.id))
     db.add(StockMovement(item_id=dst.id, movement_type="in", quantity=qty,
                          reason=f"Transfer from BU {src.business_unit_id}", recorded_by_id=user.id))
     db.commit()
+    journal_posted = None
+    if total_cost > 0:
+        journal_posted = True
+        try:
+            from src.routers.accounting import (
+                _ensure_intercompany_accounts, account_by_code, create_entry,
+            )
+            for bu_id in (src.business_unit_id, payload.to_business_unit_id):
+                _ensure_intercompany_accounts(db, bu_id)
+                db.flush()
+                inv_acc = account_by_code(db, bu_id, "1140")
+                if bu_id == src.business_unit_id:
+                    recv = account_by_code(db, bu_id, "1180")
+                    if not (recv and inv_acc):
+                        raise RuntimeError(f"intercompany accounts missing in BU {bu_id}")
+                    spec = [{"account_id": recv.id, "debit": total_cost, "credit": 0},
+                            {"account_id": inv_acc.id, "debit": 0, "credit": total_cost}]
+                    desc = f"Stock transfer to BU {payload.to_business_unit_id} — {src.name}"
+                else:
+                    pay = account_by_code(db, bu_id, "2180")
+                    if not (pay and inv_acc):
+                        raise RuntimeError(f"intercompany accounts missing in BU {bu_id}")
+                    spec = [{"account_id": inv_acc.id, "debit": total_cost, "credit": 0},
+                            {"account_id": pay.id, "debit": 0, "credit": total_cost}]
+                    desc = f"Stock transfer from BU {src.business_unit_id} — {src.name}"
+                create_entry(db, bu_id, today_local(), desc, "stock_transfer",
+                             user.id, spec, source_id=src.id, post=True)
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            journal_posted = False
+            logger.warning("Transfer journal failed for item %s (BU %s -> BU %s): %s",
+                           src.id, src.business_unit_id, payload.to_business_unit_id, exc)
     db.refresh(dst)
     return {"ok": True, "destination_item": serialize_inventory_item(dst),
-            "source_stock": float(src.current_stock)}
+            "source_stock": float(src.current_stock),
+            "journal_posted": journal_posted}
 
 
 def _maybe_notify_low_stock(db: Session, item: InventoryItem) -> None:
@@ -540,7 +627,7 @@ def deactivate_inventory_item(item_id: int, user: User = Depends(get_current_use
 class ExpenseIn(BaseModel):
     business_unit_id: Optional[int] = None
     title: str = Field(min_length=1, max_length=200)
-    amount: float = Field(gt=0)
+    amount: Decimal = Field(gt=0, le=10**13)
     category: Optional[str] = None
     description: Optional[str] = None
     receipt_url: Optional[str] = None
@@ -596,6 +683,11 @@ def submit_expense(payload: ExpenseIn, user: User = Depends(get_current_user), d
     bu_id = bu_scope(user, payload.business_unit_id)
     if bu_id is None:
         raise HTTPException(400, "business_unit_id is required")
+    if payload.project_id is not None:
+        proj = db.query(Project).filter(Project.id == payload.project_id,
+                                        Project.business_unit_id == bu_id).first()
+        if not proj:
+            raise HTTPException(404, "Project not found in this BU")
     amount = Decimal(str(payload.amount))
     stage = "first" if amount > TWO_STAGE_THRESHOLD else "final"
     e = ExpenseRequest(
@@ -632,7 +724,7 @@ class ExpenseReviewIn(BaseModel):
 
 @router.post("/expenses/{expense_id}/review")
 def review_expense(expense_id: int, payload: ExpenseReviewIn, user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    e = db.query(ExpenseRequest).filter(ExpenseRequest.id == expense_id).first()
+    e = db.query(ExpenseRequest).filter(ExpenseRequest.id == expense_id).with_for_update().first()
     if not e:
         raise HTTPException(404, "Expense not found")
     if e.status != "pending":
@@ -667,11 +759,25 @@ def review_expense(expense_id: int, payload: ExpenseReviewIn, user: User = Depen
     ))
     db.commit()
     if payload.decision == "approved":
+        journal_posted = None
+        journal_error = None
         try:
+            from src.models import JournalEntry as _JE
             from src.routers.accounting import auto_post_expense
             auto_post_expense(db, e, user.id)
-        except Exception:
-            db.rollback()  # accounting must never break the approval flow
+            journal_posted = db.query(_JE).filter(
+                _JE.source == "expense", _JE.source_id == e.id,
+                _JE.status == "posted").first() is not None
+        except Exception as exc:
+            db.rollback()
+            journal_posted = False
+            journal_error = str(exc)
+            logger.warning("Expense %s auto-post failed: %s", e.id, exc)
+        out = serialize_expense(db, e)
+        out["journal_posted"] = journal_posted
+        if journal_error:
+            out["journal_error"] = journal_error
+        return out
     return serialize_expense(db, e)
 
 
@@ -711,11 +817,11 @@ async def upload_expense_receipt(expense_id: int, file: UploadFile = File(...),
 class StaffIn(BaseModel):
     business_unit_id: Optional[int] = None
     report_date: date
-    total_staff: int = 0
-    present: int = 0
-    absent: int = 0
-    new_hires: int = 0
-    resignations: int = 0
+    total_staff: int = Field(default=0, ge=0, le=1000000)
+    present: int = Field(default=0, ge=0, le=1000000)
+    absent: int = Field(default=0, ge=0, le=1000000)
+    new_hires: int = Field(default=0, ge=0, le=1000000)
+    resignations: int = Field(default=0, ge=0, le=1000000)
     notes: Optional[str] = None
 
 
@@ -741,13 +847,14 @@ def submit_staff(payload: StaffIn, user: User = Depends(get_current_user), db: S
 
 @router.get("/staff")
 def list_staff(business_unit_id: Optional[int] = None, days: int = 30,
+               limit: int = 200, offset: int = 0,
                user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     bu_id = bu_scope(user, business_unit_id)
-    since = date.today() - timedelta(days=days)
+    since = today_local() - timedelta(days=days)
     q = db.query(StaffRecord).filter(StaffRecord.report_date >= since)
     if bu_id is not None:
         q = q.filter(StaffRecord.business_unit_id == bu_id)
-    rows = q.order_by(StaffRecord.report_date.desc()).all()
+    rows = q.order_by(StaffRecord.report_date.desc()).offset(offset).limit(limit).all()
     return {"items": [
         {"id": r.id, "business_unit_id": r.business_unit_id, "report_date": r.report_date.isoformat(),
          "total_staff": r.total_staff, "present": r.present, "absent": r.absent,
@@ -761,9 +868,9 @@ def list_staff(business_unit_id: Optional[int] = None, days: int = 30,
 class CustomerIn(BaseModel):
     business_unit_id: Optional[int] = None
     report_date: date
-    footfall: Optional[int] = None
-    transactions: Optional[int] = None
-    complaints: int = 0
+    footfall: Optional[int] = Field(default=None, ge=0, le=10**9)
+    transactions: Optional[int] = Field(default=None, ge=0, le=10**9)
+    complaints: int = Field(default=0, ge=0, le=10**9)
     satisfaction_score: Optional[float] = None
     notes: Optional[str] = None
 
@@ -791,13 +898,14 @@ def submit_customers(payload: CustomerIn, user: User = Depends(get_current_user)
 
 @router.get("/customers")
 def list_customers(business_unit_id: Optional[int] = None, days: int = 30,
+                   limit: int = 200, offset: int = 0,
                    user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     bu_id = bu_scope(user, business_unit_id)
-    since = date.today() - timedelta(days=days)
+    since = today_local() - timedelta(days=days)
     q = db.query(CustomerMetric).filter(CustomerMetric.report_date >= since)
     if bu_id is not None:
         q = q.filter(CustomerMetric.business_unit_id == bu_id)
-    rows = q.order_by(CustomerMetric.report_date.desc()).all()
+    rows = q.order_by(CustomerMetric.report_date.desc()).offset(offset).limit(limit).all()
     return {"items": [
         {"id": r.id, "business_unit_id": r.business_unit_id, "report_date": r.report_date.isoformat(),
          "footfall": r.footfall, "transactions": r.transactions, "complaints": r.complaints,
@@ -813,7 +921,7 @@ def list_customers(business_unit_id: Optional[int] = None, days: int = 30,
 def forecast(business_unit_id: Optional[int] = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Month-end projection from MTD daily revenue/cash-flow run rate."""
     bu_id = bu_scope(user, business_unit_id)
-    today = date.today()
+    today = today_local()
     month_start = today.replace(day=1)
     q = db.query(DailyFinancial).filter(DailyFinancial.report_date >= month_start, DailyFinancial.report_date <= today)
     if bu_id is not None:
@@ -844,7 +952,7 @@ def forecast(business_unit_id: Optional[int] = None, user: User = Depends(get_cu
 
 def serialize_document(db: Session, d: LicenseDocument) -> dict:
     bu = db.query(BusinessUnit).filter(BusinessUnit.id == d.business_unit_id).first()
-    days_left = (d.expiry_date - date.today()).days if d.expiry_date else None
+    days_left = (d.expiry_date - today_local()).days if d.expiry_date else None
     return {
         "id": d.id,
         "business_unit_id": d.business_unit_id,
@@ -870,12 +978,13 @@ class DocumentIn(BaseModel):
 
 @router.get("/documents")
 def list_documents(business_unit_id: Optional[int] = None, expiring_soon: bool = False,
+                   limit: int = 200, offset: int = 0,
                    user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     bu_id = bu_scope(user, business_unit_id)
     q = db.query(LicenseDocument)
     if bu_id is not None:
         q = q.filter(LicenseDocument.business_unit_id == bu_id)
-    rows = q.order_by(LicenseDocument.expiry_date.asc()).all()
+    rows = q.order_by(LicenseDocument.expiry_date.asc()).offset(offset).limit(limit).all()
     items = [serialize_document(db, d) for d in rows]
     if expiring_soon:
         items = [i for i in items if i["days_left"] is not None and i["days_left"] <= 30]
@@ -919,7 +1028,7 @@ def check_document_expiry(days: int = 30, user: User = Depends(require_admin), d
 
 def run_check_document_expiry(db: Session, days: int = 30) -> dict:
     """Job-callable: notify CEOs + Chairman/HO about documents expiring soon."""
-    today = date.today()
+    today = today_local()
     horizon = today + timedelta(days=days)
     docs = db.query(LicenseDocument).filter(
         LicenseDocument.expiry_date >= today, LicenseDocument.expiry_date <= horizon).all()
@@ -960,7 +1069,7 @@ def monthly_report(month: Optional[str] = None, user: User = Depends(require_adm
     from fastapi.responses import StreamingResponse
     from sqlalchemy import func
 
-    today = date.today()
+    today = today_local()
     month = validate_period(month)
     if month:
         y, m = (int(x) for x in month.split("-"))
@@ -1113,7 +1222,7 @@ def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
             cell.fill = header_fill
             cell.font = header_font
         for r in rows:
-            ws.append(r)
+            ws.append([_sanitize_excel_cell(v) if isinstance(v, str) else v for v in r])
         for col in ws.columns:
             width = max(len(str(c.value)) if c.value is not None else 0 for c in col) + 3
             ws.column_dimensions[col[0].column_letter].width = min(max(width, 12), 42)
@@ -1166,7 +1275,7 @@ def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
                      [[d.title, d.document_type, bu_names.get(d.business_unit_id, ""),
                        d.issue_date.isoformat() if d.issue_date else "",
                        d.expiry_date.isoformat() if d.expiry_date else "",
-                       (d.expiry_date - date.today()).days if d.expiry_date else "",
+                       (d.expiry_date - today_local()).days if d.expiry_date else "",
                        d.notes or ""] for d in rows])
 
     if tab == "staff":
@@ -1212,7 +1321,7 @@ class SupplierIn(BaseModel):
 @router.get("/suppliers")
 def list_suppliers(business_unit_id: Optional[int] = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     q = db.query(Supplier).filter(Supplier.is_active == True)  # noqa: E712
-    if user.role == "CEO":
+    if user.role in ("CEO", "Accountant") and user.business_unit_id:
         q = q.filter((Supplier.business_unit_id == user.business_unit_id) | (Supplier.business_unit_id == None))  # noqa: E711
     elif business_unit_id:
         q = q.filter((Supplier.business_unit_id == business_unit_id) | (Supplier.business_unit_id == None))  # noqa: E711
@@ -1222,8 +1331,11 @@ def list_suppliers(business_unit_id: Optional[int] = None, user: User = Depends(
 
 @router.post("/suppliers")
 def create_supplier(payload: SupplierIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role == "CEO":
+    if user.role in ("CEO", "Accountant") and user.business_unit_id:
         payload.business_unit_id = user.business_unit_id
+    if payload.business_unit_id is None and user.role not in ("Chairman", "HO"):
+        raise HTTPException(403, "Only Chairman/HO can create group-shared suppliers")
+    bu_scope(user, payload.business_unit_id)
     s = Supplier(**payload.model_dump(), created_by_id=user.id)
     db.add(s)
     db.commit()
@@ -1236,7 +1348,10 @@ def delete_supplier(supplier_id: int, user: User = Depends(get_current_user), db
     s = db.query(Supplier).filter(Supplier.id == supplier_id).first()
     if not s:
         raise HTTPException(404, "Supplier not found")
-    if s.business_unit_id is not None:
+    if s.business_unit_id is None:
+        if user.role not in ("Chairman", "HO"):
+            raise HTTPException(403, "Only Chairman/HO can deactivate group-shared suppliers")
+    else:
         bu_scope(user, s.business_unit_id)
     s.is_active = False
     db.commit()
@@ -1272,8 +1387,8 @@ def serialize_po(db: Session, po: PurchaseOrder) -> dict:
 class POLineIn(BaseModel):
     item_name: str = Field(min_length=1, max_length=150)
     inventory_item_id: Optional[int] = None
-    quantity: float = Field(gt=0)
-    unit_cost: float = Field(ge=0)
+    quantity: Decimal = Field(gt=0, le=10**13)
+    unit_cost: Decimal = Field(ge=0, le=10**13)
 
 
 class POIn(BaseModel):
@@ -1281,8 +1396,8 @@ class POIn(BaseModel):
     supplier_id: int
     order_date: date
     notes: Optional[str] = None
-    currency: str = "MMK"
-    exchange_rate: Optional[float] = None  # MMK per 1 unit; defaults to latest rate
+    currency: str = Field(default="MMK", min_length=3, max_length=3)
+    exchange_rate: Optional[float] = Field(default=None, gt=0)  # MMK per 1 unit; defaults to latest rate
     project_id: Optional[int] = None
     lines: list[POLineIn] = Field(min_length=1)
 
@@ -1290,8 +1405,7 @@ class POIn(BaseModel):
 @router.get("/purchase-orders")
 def list_pos(business_unit_id: Optional[int] = None, status: Optional[str] = None,
              user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role == "CEO":
-        business_unit_id = user.business_unit_id
+    business_unit_id = bu_scope(user, business_unit_id)
     q = db.query(PurchaseOrder)
     if business_unit_id:
         q = q.filter(PurchaseOrder.business_unit_id == business_unit_id)
@@ -1307,6 +1421,20 @@ def create_po(payload: POIn, user: User = Depends(get_current_user), db: Session
     supplier = db.query(Supplier).filter(Supplier.id == payload.supplier_id, Supplier.is_active == True).first()  # noqa: E712
     if not supplier:
         raise HTTPException(404, "Supplier not found")
+    if supplier.business_unit_id is not None and supplier.business_unit_id != payload.business_unit_id:
+        raise HTTPException(400, "Supplier does not belong to this business unit")
+    if payload.project_id is not None:
+        proj = db.query(Project).filter(Project.id == payload.project_id,
+                                        Project.business_unit_id == payload.business_unit_id).first()
+        if not proj:
+            raise HTTPException(404, "Project not found in this BU")
+    for ln in payload.lines:
+        if ln.inventory_item_id is not None:
+            item = db.query(InventoryItem).filter(
+                InventoryItem.id == ln.inventory_item_id,
+                InventoryItem.business_unit_id == payload.business_unit_id).first()
+            if not item:
+                raise HTTPException(404, f"Inventory item {ln.inventory_item_id} not found in this BU")
     count = db.query(PurchaseOrder).filter(PurchaseOrder.business_unit_id == payload.business_unit_id).count()
     from src.routers.accounting import latest_rate
     fx = (Decimal(str(payload.exchange_rate)) if payload.exchange_rate
@@ -1338,20 +1466,25 @@ def create_po(payload: POIn, user: User = Depends(get_current_user), db: Session
 
 
 def _po_or_404(db: Session, po_id: int) -> PurchaseOrder:
-    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id).first()
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id).with_for_update().first()
     if not po:
         raise HTTPException(404, "Purchase order not found")
     return po
 
 
-def _post_po_journal(db: Session, po: PurchaseOrder, user_id: int, kind: str) -> None:
-    """kind=receive: Dr 1140 Inventory / Cr 2110 AP. kind=pay: Dr 2110 / Cr 1110."""
+def _post_po_journal(db: Session, po: PurchaseOrder, user_id: int, kind: str) -> bool:
+    """kind=receive: Dr 1140 Inventory / Cr 2110 AP. kind=pay: Dr 2110 / Cr 1110.
+
+    Returns True when the journal posted (or nothing needed posting for a
+    zero total). Never commits: the caller commits, so a failed journal
+    rolls the whole operation back instead of leaving stock/money moved
+    with no journal (M-B1)."""
     try:
         from src.routers.accounting import account_by_code, create_entry
         # Journals are MMK; foreign-currency POs convert at the PO rate.
         total = po_total(po) * Decimal(str(getattr(po, "exchange_rate", 1) or 1))
         if total <= 0:
-            return
+            return True
         if kind == "receive":
             dr = account_by_code(db, po.business_unit_id, "1140")
             cr = account_by_code(db, po.business_unit_id, "2110")
@@ -1360,14 +1493,19 @@ def _post_po_journal(db: Session, po: PurchaseOrder, user_id: int, kind: str) ->
             dr = account_by_code(db, po.business_unit_id, "2110")
             cr = account_by_code(db, po.business_unit_id, "1110")
             desc = f"Supplier payment {po.po_no} — {po.supplier.name if po.supplier else ''}"
-        if dr and cr:
-            create_entry(db, po.business_unit_id, date.today(), desc, "purchase",
-                         user_id, [{"account_id": dr.id, "debit": total, "credit": 0},
-                                   {"account_id": cr.id, "debit": 0, "credit": total}],
-                         source_id=po.id, post=True)
-            db.commit()
-    except Exception:
+        if not (dr and cr):
+            logger.warning("PO journal skipped for %s (%s): accounts 1140/2110/1110 missing in BU %s",
+                           po.po_no, kind, po.business_unit_id)
+            return False
+        create_entry(db, po.business_unit_id, today_local(), desc, "purchase",
+                     user_id, [{"account_id": dr.id, "debit": total, "credit": 0},
+                               {"account_id": cr.id, "debit": 0, "credit": total}],
+                     source_id=po.id, post=True)
+        return True
+    except Exception as exc:
         db.rollback()
+        logger.warning("PO journal failed for %s (%s): %s", po.po_no, kind, exc)
+        return False
 
 
 @router.post("/purchase-orders/{po_id}/order")
@@ -1445,6 +1583,13 @@ def update_po(po_id: int, payload: POUpdate, user: User = Depends(get_current_us
     if payload.lines is not None:
         if not payload.lines:
             raise HTTPException(400, "A PO needs at least one line")
+        for ln in payload.lines:
+            if ln.inventory_item_id is not None:
+                item = db.query(InventoryItem).filter(
+                    InventoryItem.id == ln.inventory_item_id,
+                    InventoryItem.business_unit_id == po.business_unit_id).first()
+                if not item:
+                    raise HTTPException(404, f"Inventory item {ln.inventory_item_id} not found in this BU")
         for old in list(po.lines):
             db.delete(old)
         db.flush()
@@ -1454,9 +1599,13 @@ def update_po(po_id: int, payload: POUpdate, user: User = Depends(get_current_us
                                      quantity=Decimal(str(ln.quantity)),
                                      unit_cost=Decimal(str(ln.unit_cost))))
         db.flush()
-    if getattr(po, "approval_stage", None) in ("rejected", "first", "final"):
-        total_mmk = po_total(po) * Decimal(str(getattr(po, "exchange_rate", 1) or 1))
-        po.approval_stage = "first" if total_mmk > TWO_STAGE_THRESHOLD else None
+    # Recompute on every draft edit, including "approved": an approver's
+    # sign-off must never survive an edit that changes the order. Refresh
+    # first: deleted lines linger in the in-memory collection after flush,
+    # so po_total() would otherwise see the pre-edit lines.
+    db.refresh(po)
+    total_mmk = po_total(po) * Decimal(str(getattr(po, "exchange_rate", 1) or 1))
+    po.approval_stage = "first" if total_mmk > TWO_STAGE_THRESHOLD else None
     db.commit()
     db.refresh(po)
     return serialize_po(db, po)
@@ -1469,11 +1618,15 @@ def receive_po(po_id: int, user: User = Depends(get_current_user), db: Session =
     bu_scope(user, po.business_unit_id)
     if po.status not in ("draft", "ordered"):
         raise HTTPException(400, f"Cannot receive a PO in status {po.status}")
+    if getattr(po, "approval_stage", None) in ("first", "final", "rejected"):
+        raise HTTPException(400, "This PO is still awaiting approval and cannot be received")
     fx = Decimal(str(getattr(po, "exchange_rate", 1) or 1))
     for ln in po.lines:
         item = None
         if ln.inventory_item_id:
             item = db.query(InventoryItem).filter(InventoryItem.id == ln.inventory_item_id).first()
+            if item is not None and item.business_unit_id != po.business_unit_id:
+                raise HTTPException(400, f"PO line item {ln.inventory_item_id} does not belong to this BU")
         if item is None:
             item = db.query(InventoryItem).filter(
                 InventoryItem.business_unit_id == po.business_unit_id,
@@ -1498,10 +1651,15 @@ def receive_po(po_id: int, user: User = Depends(get_current_user), db: Session =
         _maybe_notify_low_stock(db, item)
     po.status = "received"
     po.received_at = datetime.utcnow()
+    db.flush()
+    if not _post_po_journal(db, po, user.id, "receive"):
+        db.rollback()
+        raise HTTPException(500, f"PO {po.po_no} receive journal could not be posted; receipt rolled back")
     db.commit()
-    _post_po_journal(db, po, user.id, "receive")
     db.refresh(po)
-    return serialize_po(db, po)
+    out = serialize_po(db, po)
+    out["journal_posted"] = True
+    return out
 
 
 @router.post("/purchase-orders/{po_id}/pay")
@@ -1512,10 +1670,15 @@ def pay_po(po_id: int, user: User = Depends(get_current_user), db: Session = Dep
         raise HTTPException(400, "Only received POs can be paid")
     po.status = "paid"
     po.paid_at = datetime.utcnow()
+    db.flush()
+    if not _post_po_journal(db, po, user.id, "pay"):
+        db.rollback()
+        raise HTTPException(500, f"PO {po.po_no} payment journal could not be posted; payment rolled back")
     db.commit()
-    _post_po_journal(db, po, user.id, "pay")
     db.refresh(po)
-    return serialize_po(db, po)
+    out = serialize_po(db, po)
+    out["journal_posted"] = True
+    return out
 
 
 @router.post("/purchase-orders/{po_id}/cancel")
@@ -1552,8 +1715,7 @@ class CustomerIn(BaseModel):
 
 @router.get("/sales-customers")
 def list_sales_customers(business_unit_id: Optional[int] = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role == "CEO":
-        business_unit_id = user.business_unit_id
+    business_unit_id = bu_scope(user, business_unit_id)
     q = db.query(Customer).filter(Customer.is_active == True)  # noqa: E712
     if business_unit_id:
         q = q.filter(Customer.business_unit_id == business_unit_id)
@@ -1616,7 +1778,7 @@ def invoice_amounts(db: Session, inv: SalesInvoice) -> dict:
 def serialize_invoice(db: Session, inv: SalesInvoice) -> dict:
     a = invoice_amounts(db, inv)
     overdue = (inv.status in ("sent", "partial") and inv.due_date is not None
-               and inv.due_date < date.today() and a["balance"] > 0)
+               and inv.due_date < today_local() and a["balance"] > 0)
     return {
         "id": inv.id, "invoice_no": inv.invoice_no, "business_unit_id": inv.business_unit_id,
         "bu_name": inv.business_unit.name if inv.business_unit else None,
@@ -1645,8 +1807,8 @@ def serialize_invoice(db: Session, inv: SalesInvoice) -> dict:
 
 class InvoiceLineIn(BaseModel):
     description: str = Field(min_length=1, max_length=200)
-    quantity: float = Field(gt=0, default=1)
-    unit_price: float = Field(ge=0)
+    quantity: Decimal = Field(default=Decimal("1"), gt=0, le=10**13)
+    unit_price: Decimal = Field(ge=0, le=10**13)
     inventory_item_id: Optional[int] = None
     serial_nos: Optional[list[str]] = None  # optional serial/IMEI numbers sold
 
@@ -1656,10 +1818,10 @@ class InvoiceIn(BaseModel):
     customer_id: int
     invoice_date: date
     due_date: Optional[date] = None
-    tax_rate: float = 5
+    tax_rate: float = Field(default=5, ge=0, le=100)
     notes: Optional[str] = None
-    currency: str = "MMK"
-    exchange_rate: Optional[float] = None  # MMK per 1 unit; defaults to latest rate
+    currency: str = Field(default="MMK", min_length=3, max_length=3)
+    exchange_rate: Optional[float] = Field(default=None, gt=0)  # MMK per 1 unit; defaults to latest rate
     project_id: Optional[int] = None
     lines: list[InvoiceLineIn] = Field(min_length=1)
 
@@ -1667,8 +1829,7 @@ class InvoiceIn(BaseModel):
 @router.get("/invoices")
 def list_invoices(business_unit_id: Optional[int] = None, status: Optional[str] = None,
                   user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role == "CEO":
-        business_unit_id = user.business_unit_id
+    business_unit_id = bu_scope(user, business_unit_id)
     q = db.query(SalesInvoice)
     if business_unit_id:
         q = q.filter(SalesInvoice.business_unit_id == business_unit_id)
@@ -1711,13 +1872,20 @@ def create_invoice(payload: InvoiceIn, user: User = Depends(get_current_user), d
 
 
 def _invoice_or_404(db: Session, invoice_id: int) -> SalesInvoice:
-    inv = db.query(SalesInvoice).filter(SalesInvoice.id == invoice_id).first()
+    inv = db.query(SalesInvoice).filter(SalesInvoice.id == invoice_id).with_for_update().first()
     if not inv:
         raise HTTPException(404, "Invoice not found")
     return inv
 
 
-def _post_invoice_journal(db: Session, inv: SalesInvoice, user_id: int, kind: str, amount: Decimal = Decimal("0")) -> None:
+def _post_invoice_journal(db: Session, inv: SalesInvoice, user_id: int, kind: str,
+                          amount: Decimal = Decimal("0"),
+                          payment_date: Optional[date] = None) -> bool:
+    """Post the send or payment journal for an invoice. Returns True when
+    posted. The payment journal is dated the payment date (M-B7), never
+    today: a payment recorded in a later month than its payment_date used
+    to land in the wrong month's cash flow. Never commits — the caller
+    commits, so a failed journal rolls the operation back (M-B1)."""
     try:
         from src.routers.accounting import account_by_code, create_entry
         bu = inv.business_unit_id
@@ -1730,7 +1898,9 @@ def _post_invoice_journal(db: Session, inv: SalesInvoice, user_id: int, kind: st
             sales = account_by_code(db, bu, "4100")
             tax_acc = account_by_code(db, bu, "2130")
             if not (ar and sales):
-                return
+                logger.warning("Invoice journal skipped for %s (send): accounts 1130/4100 missing in BU %s",
+                               inv.invoice_no, bu)
+                return False
             lines = [{"account_id": ar.id, "debit": a["total"] * fx, "credit": 0},
                      {"account_id": sales.id, "debit": 0, "credit": a["subtotal"] * fx}]
             if a["tax"] > 0 and tax_acc:
@@ -1741,15 +1911,20 @@ def _post_invoice_journal(db: Session, inv: SalesInvoice, user_id: int, kind: st
             cash = account_by_code(db, bu, "1110")
             ar = account_by_code(db, bu, "1130")
             if not (cash and ar):
-                return
-            create_entry(db, bu, date.today(), f"Payment received {inv.invoice_no}",
+                logger.warning("Invoice journal skipped for %s (payment): accounts 1110/1130 missing in BU %s",
+                               inv.invoice_no, bu)
+                return False
+            create_entry(db, bu, payment_date or inv.invoice_date or today_local(),
+                         f"Payment received {inv.invoice_no}",
                          "invoice", user_id,
                          [{"account_id": cash.id, "debit": amount * fx, "credit": 0},
                           {"account_id": ar.id, "debit": 0, "credit": amount * fx}],
                          source_id=inv.id, post=True)
-        db.commit()
-    except Exception:
+        return True
+    except Exception as exc:
         db.rollback()
+        logger.warning("Invoice journal failed for %s (%s): %s", inv.invoice_no, kind, exc)
+        return False
 
 
 @router.post("/invoices/{invoice_id}/send")
@@ -1774,18 +1949,66 @@ def send_invoice(invoice_id: int, user: User = Depends(get_current_user), db: Se
                                      f"outstanding Ks {float(outstanding):,.0f}, this invoice Ks {float(this_total):,.0f}")
     # Serial-tracked lines: validate + mark the units sold with this invoice.
     _mark_line_serials_sold(db, inv.business_unit_id, inv.lines, invoice_id=inv.id)
+    # Invoice lines sell physical goods (Q2): validate stock per item
+    # (aggregated across duplicate lines), decrement, consume FEFO batches
+    # and record a StockMovement — then post COGS at moving-average cost,
+    # the same pattern POS sales already use.
+    from collections import defaultdict
+    from src.routers.modules import consume_batches_fefo
+    need: dict[int, Decimal] = defaultdict(Decimal)
+    for ln in inv.lines:
+        if ln.inventory_item_id:
+            need[ln.inventory_item_id] += Decimal(str(ln.quantity))
+    cogs_total = Decimal("0")
+    for item_id, qty in need.items():
+        item = db.query(InventoryItem).filter(InventoryItem.id == item_id).with_for_update().first()
+        if not item or item.business_unit_id != inv.business_unit_id:
+            raise HTTPException(404, f"Inventory item {item_id} not found in this BU")
+        if Decimal(str(item.current_stock or 0)) < qty:
+            raise HTTPException(400, f"Not enough stock for {item.name}: {float(item.current_stock or 0):g} available, {qty:g} needed")
+        cogs_total += qty * Decimal(str(item.unit_cost or 0))
+        item.current_stock = Decimal(str(item.current_stock or 0)) - qty
+        item.updated_at = datetime.utcnow()
+        consume_batches_fefo(db, item, qty)
+        db.add(StockMovement(item_id=item.id, movement_type="out", quantity=qty,
+                             reason=f"Invoice {inv.invoice_no} sent", recorded_by_id=user.id))
     inv.status = "sent"
     inv.sent_at = datetime.utcnow()
+    db.flush()
+    if not _post_invoice_journal(db, inv, user.id, "send"):
+        db.rollback()
+        raise HTTPException(500, f"Invoice {inv.invoice_no} journal could not be posted; invoice left as draft")
+    if cogs_total > 0:
+        try:
+            from src.routers.accounting import account_by_code, create_entry
+            inv_acc = account_by_code(db, inv.business_unit_id, "1140")
+            cogs_acc = account_by_code(db, inv.business_unit_id, "5100")
+            if not (inv_acc and cogs_acc):
+                raise HTTPException(500, "COGS accounts (1140/5100) are not configured for this BU")
+            create_entry(db, inv.business_unit_id, inv.invoice_date,
+                         f"Invoice {inv.invoice_no} — COGS", "invoice", user.id,
+                         [{"account_id": cogs_acc.id, "debit": cogs_total, "credit": 0},
+                          {"account_id": inv_acc.id, "debit": 0, "credit": cogs_total}],
+                         source_id=inv.id, post=True)
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception as exc:
+            db.rollback()
+            logger.warning("Invoice COGS journal failed for %s: %s", inv.invoice_no, exc)
+            raise HTTPException(500, f"Invoice {inv.invoice_no} COGS journal could not be posted; invoice left as draft")
     db.commit()
-    _post_invoice_journal(db, inv, user.id, "send")
     db.refresh(inv)
-    return serialize_invoice(db, inv)
+    out = serialize_invoice(db, inv)
+    out["journal_posted"] = True
+    return out
 
 
 class PaymentIn(BaseModel):
     amount: float = Field(gt=0)
     payment_date: date
-    method: str = "cash"
+    method: str = Field(default="cash", pattern="^(cash|bank|mobile)$")
+    currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
     notes: Optional[str] = None
 
 
@@ -1795,6 +2018,13 @@ def record_payment(invoice_id: int, payload: PaymentIn, user: User = Depends(get
     bu_scope(user, inv.business_unit_id)
     if inv.status not in ("sent", "partial"):
         raise HTTPException(400, f"Cannot take payment on a {inv.status} invoice")
+    # The payment amount is in the invoice's currency unless the caller
+    # says otherwise — a mismatched currency is rejected rather than
+    # applied 1:1 to the balance.
+    inv_currency = (getattr(inv, "currency", "MMK") or "MMK").upper()
+    if payload.currency is not None and payload.currency.upper() != inv_currency:
+        raise HTTPException(400, f"Payment currency {payload.currency.upper()} does not match "
+                                 f"invoice currency {inv_currency}")
     amt = Decimal(str(payload.amount))
     a = invoice_amounts(db, inv)
     if amt > a["balance"]:
@@ -1804,8 +2034,11 @@ def record_payment(invoice_id: int, payload: PaymentIn, user: User = Depends(get
     db.flush()
     a2 = invoice_amounts(db, inv)
     inv.status = "paid" if a2["balance"] <= 0 else "partial"
+    db.flush()
+    if not _post_invoice_journal(db, inv, user.id, "payment", amt, payment_date=payload.payment_date):
+        db.rollback()
+        raise HTTPException(500, f"Payment journal for invoice {inv.invoice_no} could not be posted; payment rolled back")
     db.commit()
-    _post_invoice_journal(db, inv, user.id, "payment", amt)
     try:
         from src.models import PropertyUnit as _PU
         from src.routers.modules import allocate_installments
@@ -1818,7 +2051,9 @@ def record_payment(invoice_id: int, payload: PaymentIn, user: User = Depends(get
     except Exception:
         db.rollback()
     db.refresh(inv)
-    return serialize_invoice(db, inv)
+    out = serialize_invoice(db, inv)
+    out["journal_posted"] = True
+    return out
 
 
 @router.post("/invoices/{invoice_id}/cancel")
@@ -1828,6 +2063,12 @@ def cancel_invoice(invoice_id: int, user: User = Depends(get_current_user), db: 
     if inv.status != "draft":
         raise HTTPException(400, "Only draft invoices can be cancelled")
     inv.status = "cancelled"
+    # A property unit reserved by this (draft) sale goes back on the market.
+    from src.models import PropertyUnit as _PU
+    for unit in db.query(_PU).filter(_PU.sale_invoice_id == inv.id,
+                                     _PU.status == "reserved").all():
+        unit.status = "available"
+        unit.sale_invoice_id = None
     db.commit()
     return serialize_invoice(db, inv)
 
@@ -1847,10 +2088,10 @@ def _bucket(days: int) -> str:
 @router.get("/aging")
 def aging_report(business_unit_id: Optional[int] = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """AR aging (unpaid invoices by days past due) + AP aging (received,
-    unpaid POs by days since receipt)."""
-    if user.role == "CEO":
-        business_unit_id = user.business_unit_id
-    today_d = date.today()
+    unpaid POs by days since receipt). All balances are in MMK, converted
+    at each document's exchange rate; AP is net of posted purchase returns."""
+    business_unit_id = bu_scope(user, business_unit_id)
+    today_d = today_local()
     ar_buckets = {k: Decimal("0") for k in ("current", "1-30", "31-60", "61-90", "90+")}
     ar_items = []
     q = db.query(SalesInvoice).filter(SalesInvoice.status.in_(("sent", "partial")))
@@ -1858,22 +2099,30 @@ def aging_report(business_unit_id: Optional[int] = None, user: User = Depends(ge
         q = q.filter(SalesInvoice.business_unit_id == business_unit_id)
     for inv in q.all():
         a = invoice_amounts(db, inv)
-        if a["balance"] <= 0:
+        fx = Decimal(str(getattr(inv, "exchange_rate", 1) or 1))
+        balance_mmk = a["balance"] * fx
+        if balance_mmk <= 0:
             continue
         days = (today_d - inv.due_date).days if inv.due_date else 0
         b = _bucket(days)
-        ar_buckets[b] += a["balance"]
+        ar_buckets[b] += balance_mmk
         ar_items.append({"invoice_no": inv.invoice_no, "customer": inv.customer.name if inv.customer else None,
                          "bu_name": inv.business_unit.name if inv.business_unit else None,
                          "due_date": inv.due_date.isoformat() if inv.due_date else None,
-                         "days_overdue": max(days, 0), "bucket": b, "balance": float(a["balance"])})
+                         "days_overdue": max(days, 0), "bucket": b, "balance": float(balance_mmk)})
     ap_buckets = {k: Decimal("0") for k in ("current", "1-30", "31-60", "61-90", "90+")}
     ap_items = []
     qp = db.query(PurchaseOrder).filter(PurchaseOrder.status == "received")
     if business_unit_id:
         qp = qp.filter(PurchaseOrder.business_unit_id == business_unit_id)
     for po in qp.all():
-        total = po_total(po)
+        fx = Decimal(str(getattr(po, "exchange_rate", 1) or 1))
+        ret = (db.query(func.coalesce(func.sum(PurchaseReturnLine.quantity * PurchaseReturnLine.unit_cost), 0))
+               .join(PurchaseReturn, PurchaseReturnLine.return_id == PurchaseReturn.id)
+               .filter(PurchaseReturn.po_id == po.id, PurchaseReturn.status == "posted").scalar())
+        total = (po_total(po) - Decimal(str(ret or 0))) * fx
+        if total <= 0:
+            continue
         ref = po.received_at.date() if po.received_at else po.order_date
         days = (today_d - ref).days
         b = _bucket(days)
@@ -1907,14 +2156,13 @@ class EmployeeIn(BaseModel):
     name: str = Field(min_length=1, max_length=150)
     position: Optional[str] = None
     phone: Optional[str] = None
-    base_salary: float = 0
+    base_salary: Decimal = Field(default=Decimal("0"), ge=0, le=10**13)
     joined_date: Optional[date] = None
 
 
 @router.get("/employees")
 def list_employees(business_unit_id: Optional[int] = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role == "CEO":
-        business_unit_id = user.business_unit_id
+    business_unit_id = bu_scope(user, business_unit_id)
     q = db.query(Employee).filter(Employee.is_active == True)  # noqa: E712
     if business_unit_id:
         q = q.filter(Employee.business_unit_id == business_unit_id)
@@ -1965,8 +2213,7 @@ class LeaveIn(BaseModel):
 @router.get("/leave-requests")
 def list_leave(business_unit_id: Optional[int] = None, status: Optional[str] = None,
                user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role == "CEO":
-        business_unit_id = user.business_unit_id
+    business_unit_id = bu_scope(user, business_unit_id)
     q = db.query(LeaveRequest)
     if business_unit_id:
         q = q.filter(LeaveRequest.business_unit_id == business_unit_id)
@@ -1982,8 +2229,16 @@ def create_leave(payload: LeaveIn, user: User = Depends(get_current_user), db: S
     if not emp:
         raise HTTPException(404, "Employee not found")
     bu_scope(user, emp.business_unit_id)
+    if payload.leave_type not in LEAVE_ENTITLEMENTS:
+        raise HTTPException(400, f"leave_type must be one of {sorted(LEAVE_ENTITLEMENTS)}")
     if payload.end_date < payload.start_date:
         raise HTTPException(400, "End date is before start date")
+    overlap = db.query(LeaveRequest).filter(
+        LeaveRequest.employee_id == emp.id, LeaveRequest.status == "approved",
+        LeaveRequest.start_date <= payload.end_date,
+        LeaveRequest.end_date >= payload.start_date).first()
+    if overlap:
+        raise HTTPException(400, "Leave overlaps an already-approved leave request")
     lv = LeaveRequest(business_unit_id=emp.business_unit_id, **payload.model_dump())
     db.add(lv)
     db.commit()
@@ -1997,12 +2252,20 @@ class LeaveReview(BaseModel):
 
 @router.post("/leave-requests/{leave_id}/review")
 def review_leave(leave_id: int, payload: LeaveReview, user: User = Depends(require_roles("Chairman", "HO", "CEO")), db: Session = Depends(get_db)):
-    lv = db.query(LeaveRequest).filter(LeaveRequest.id == leave_id).first()
+    lv = db.query(LeaveRequest).filter(LeaveRequest.id == leave_id).with_for_update().first()
     if not lv:
         raise HTTPException(404, "Leave request not found")
     bu_scope(user, lv.business_unit_id)
     if lv.status != "pending":
         raise HTTPException(400, f"Leave already {lv.status}")
+    if payload.decision == "approved":
+        overlap = db.query(LeaveRequest).filter(
+            LeaveRequest.employee_id == lv.employee_id, LeaveRequest.status == "approved",
+            LeaveRequest.id != lv.id,
+            LeaveRequest.start_date <= lv.end_date,
+            LeaveRequest.end_date >= lv.start_date).first()
+        if overlap:
+            raise HTTPException(400, "Leave overlaps an already-approved leave request")
     lv.status = payload.decision
     lv.reviewed_by_id = user.id
     lv.reviewed_at = datetime.utcnow()
@@ -2052,8 +2315,7 @@ class PayrollCreate(BaseModel):
 
 @router.get("/payroll-runs")
 def list_payroll(business_unit_id: Optional[int] = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role == "CEO":
-        business_unit_id = user.business_unit_id
+    business_unit_id = bu_scope(user, business_unit_id)
     q = db.query(PayrollRun)
     if business_unit_id:
         q = q.filter(PayrollRun.business_unit_id == business_unit_id)
@@ -2087,14 +2349,14 @@ def create_payroll(payload: PayrollCreate, user: User = Depends(get_current_user
 
 
 class PayrollLineUpdate(BaseModel):
-    allowances: Optional[float] = None
-    deductions: Optional[float] = None
+    allowances: Optional[float] = Field(default=None, ge=0, le=10**13)
+    deductions: Optional[float] = Field(default=None, ge=0, le=10**13)
 
 
 @router.patch("/payroll-runs/{run_id}/lines/{line_id}")
 def update_payroll_line(run_id: int, line_id: int, payload: PayrollLineUpdate,
                         user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    run = db.query(PayrollRun).filter(PayrollRun.id == run_id).first()
+    run = db.query(PayrollRun).filter(PayrollRun.id == run_id).with_for_update().first()
     if not run:
         raise HTTPException(404, "Payroll run not found")
     bu_scope(user, run.business_unit_id)
@@ -2103,10 +2365,16 @@ def update_payroll_line(run_id: int, line_id: int, payload: PayrollLineUpdate,
     line = db.query(PayrollLine).filter(PayrollLine.id == line_id, PayrollLine.run_id == run_id).first()
     if not line:
         raise HTTPException(404, "Payroll line not found")
+    new_allow = Decimal(str(payload.allowances)) if payload.allowances is not None else Decimal(str(line.allowances or 0))
+    new_ded = Decimal(str(payload.deductions)) if payload.deductions is not None else Decimal(str(line.deductions or 0))
+    gross = Decimal(str(line.base_salary or 0)) + new_allow
+    all_ded = new_ded + Decimal(str(getattr(line, "advance_deduction", 0) or 0))
+    if all_ded > gross:
+        raise HTTPException(400, f"Deductions ({all_ded}) exceed gross pay ({gross}); net pay would be negative")
     if payload.allowances is not None:
-        line.allowances = Decimal(str(payload.allowances))
+        line.allowances = new_allow
     if payload.deductions is not None:
-        line.deductions = Decimal(str(payload.deductions))
+        line.deductions = new_ded
     db.commit()
     db.refresh(run)
     return serialize_payroll(db, run)
@@ -2128,7 +2396,7 @@ def approve_payroll(run_id: int, user: User = Depends(require_roles("Chairman", 
 
 @router.post("/payroll-runs/{run_id}/pay")
 def pay_payroll(run_id: int, user: User = Depends(require_roles("Chairman", "HO")), db: Session = Depends(get_db)):
-    run = db.query(PayrollRun).filter(PayrollRun.id == run_id).first()
+    run = db.query(PayrollRun).filter(PayrollRun.id == run_id).with_for_update().first()
     if not run:
         raise HTTPException(404, "Payroll run not found")
     if run.status != "approved":
@@ -2168,40 +2436,58 @@ def pay_payroll(run_id: int, user: User = Depends(require_roles("Chairman", "HO"
         line.advance_deduction = collected
     db.flush()
     totals = serialize_payroll(db, run)
+    if Decimal(str(totals["total_net"])) < 0:
+        db.rollback()
+        raise HTTPException(400, "Payroll net pay is negative; fix the lines before paying")
+    # Build the journal first: the 2120/1240 deduction legs are required,
+    # not optional — a missing leg used to drop the whole journal while the
+    # run was still marked paid.
+    from src.routers.accounting import _ensure_advance_account, account_by_code, create_entry
+    bu = run.business_unit_id
+    sal = account_by_code(db, bu, "6200")
+    cash = account_by_code(db, bu, "1110")
+    if not (sal and cash):
+        db.rollback()
+        raise HTTPException(500, "Payroll accounts (6200/1110) are not configured for this BU")
+    y, m = run.period.split("-")
+    lines = [{"account_id": sal.id, "debit": Decimal(str(totals["total_gross"])), "credit": 0},
+             {"account_id": cash.id, "debit": 0, "credit": Decimal(str(totals["total_net"]))}]
+    if totals["total_deductions"] > 0:
+        # The advance-repayment portion credits 1240 (reducing the
+        # receivable); the rest credits 2120 as before.
+        adv_total = Decimal(str(totals.get("total_advance_deductions") or 0))
+        other_ded = Decimal(str(totals["total_deductions"])) - adv_total
+        if other_ded > 0:
+            acc = account_by_code(db, bu, "2120")
+            if not acc:
+                db.rollback()
+                raise HTTPException(500, "Payroll deduction account 2120 is not configured for this BU")
+            lines.append({"account_id": acc.id, "debit": 0, "credit": other_ded})
+        if adv_total > 0:
+            _ensure_advance_account(db, bu)
+            adv_acc = account_by_code(db, bu, "1240")
+            if not adv_acc:
+                db.rollback()
+                raise HTTPException(500, "Staff advance account 1240 is not configured for this BU")
+            lines.append({"account_id": adv_acc.id, "debit": 0, "credit": adv_total})
     run.status = "paid"
     run.paid_at = datetime.utcnow()
-    db.commit()
+    db.flush()
     try:
-        from src.routers.accounting import account_by_code, create_entry
-        bu = run.business_unit_id
-        sal = account_by_code(db, bu, "6200")
-        cash = account_by_code(db, bu, "1110")
-        if sal and cash:
-            y, m = run.period.split("-")
-            lines = [{"account_id": sal.id, "debit": Decimal(str(totals["total_gross"])), "credit": 0},
-                     {"account_id": cash.id, "debit": 0, "credit": Decimal(str(totals["total_net"]))}]
-            if totals["total_deductions"] > 0:
-                # The advance-repayment portion credits 1240 (reducing the
-                # receivable); the rest credits 2120 as before.
-                adv_total = Decimal(str(totals.get("total_advance_deductions") or 0))
-                other_ded = Decimal(str(totals["total_deductions"])) - adv_total
-                if other_ded > 0:
-                    acc = account_by_code(db, bu, "2120")
-                    if acc:
-                        lines.append({"account_id": acc.id, "debit": 0, "credit": other_ded})
-                if adv_total > 0:
-                    from src.routers.accounting import _ensure_advance_account
-                    _ensure_advance_account(db, bu)
-                    adv_acc = account_by_code(db, bu, "1240")
-                    if adv_acc:
-                        lines.append({"account_id": adv_acc.id, "debit": 0, "credit": adv_total})
-            create_entry(db, bu, date(int(y), int(m), 1), f"Payroll {run.period} — {run.business_unit.name if run.business_unit else ''}",
-                         "payroll", user.id, lines, source_id=run.id, post=True)
-            db.commit()
-    except Exception:
+        create_entry(db, bu, date(int(y), int(m), 1), f"Payroll {run.period} — {run.business_unit.name if run.business_unit else ''}",
+                     "payroll", user.id, lines, source_id=run.id, post=True)
+    except HTTPException:
         db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.warning("Payroll journal failed for run %s: %s", run.id, exc)
+        raise HTTPException(500, f"Payroll journal could not be posted; run left as approved: {exc}")
+    db.commit()
     db.refresh(run)
-    return serialize_payroll(db, run)
+    out = serialize_payroll(db, run)
+    out["journal_posted"] = True
+    return out
 
 
 # ------------------------------------------------------- D10/D11: payslip & customer statement
@@ -2235,15 +2521,21 @@ def payslip_pdf(run_id: int, line_id: int, user: User = Depends(require_admin),
     pdf.cell(0, 6, _pdf_safe(f"{bu.name if bu else ''} — {run.period}"), new_x="LMARGIN", new_y="NEXT", align="C")
     pdf.ln(4)
     pdf.set_font("helvetica", "", 10)
+    gross = float(line.base_salary or 0) + float(line.allowances or 0)
+    manual_ded = float(line.deductions or 0)
+    adv_ded = float(getattr(line, "advance_deduction", 0) or 0)
+    all_ded = manual_ded + adv_ded
     rows = [
         ("Employee", emp.name), ("Position", emp.position or "-"),
         ("Period", run.period),
         ("", ""),
-        ("Base salary", f"Ks {float(line.base_salary):,.0f}"),
-        ("Allowances", f"Ks {float(line.allowances):,.0f}"),
-        ("Gross pay", f"Ks {float(line.base_salary) + float(line.allowances):,.0f}"),
-        ("Deductions", f"Ks {float(line.deductions):,.0f}"),
-        ("NET PAY", f"Ks {float(line.base_salary) + float(line.allowances) - float(line.deductions):,.0f}"),
+        ("Base salary", f"Ks {float(line.base_salary or 0):,.0f}"),
+        ("Allowances", f"Ks {float(line.allowances or 0):,.0f}"),
+        ("Gross pay", f"Ks {gross:,.0f}"),
+        ("Deductions", f"Ks {manual_ded:,.0f}"),
+        ("Advance repayment", f"Ks {adv_ded:,.0f}"),
+        ("Total deductions", f"Ks {all_ded:,.0f}"),
+        ("NET PAY", f"Ks {gross - all_ded:,.0f}"),
     ]
     for label, value in rows:
         pdf.set_font("helvetica", "B" if label == "NET PAY" else "", 10)
@@ -2255,7 +2547,7 @@ def payslip_pdf(run_id: int, line_id: int, user: User = Depends(require_admin),
 
 
 @router.get("/sales-customers/{customer_id}/statement")
-def customer_statement(customer_id: int, format: str = "pdf",
+def customer_statement(customer_id: int, format: str = "pdf", limit: int = 500,
                        user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     from io import BytesIO
 
@@ -2264,38 +2556,40 @@ def customer_statement(customer_id: int, format: str = "pdf",
     cust = db.query(Customer).filter(Customer.id == customer_id).first()
     if not cust:
         raise HTTPException(404, "Customer not found")
-    if user.role == "CEO" and cust.business_unit_id != user.business_unit_id:
+    if user.role in ("CEO", "Accountant") and user.business_unit_id and cust.business_unit_id != user.business_unit_id:
         raise HTTPException(403, "Not your customer")
     bu = db.query(BusinessUnit).filter(BusinessUnit.id == cust.business_unit_id).first()
     invs = db.query(SalesInvoice).filter(SalesInvoice.customer_id == customer_id).order_by(
-        SalesInvoice.invoice_date, SalesInvoice.id).all()
+        SalesInvoice.invoice_date, SalesInvoice.id).limit(limit).all()
     rows = []
     total_billed = Decimal("0")
     total_paid = Decimal("0")
+    total_returns = Decimal("0")
     for inv in invs:
         a = invoice_amounts(db, inv)
         total_billed += a["total"]
         total_paid += a["paid"]
+        total_returns += a.get("returns") or Decimal("0")
         overdue = (inv.status in ("sent", "partial") and inv.due_date is not None
-                   and inv.due_date < date.today() and a["balance"] > 0)
+                   and inv.due_date < today_local() and a["balance"] > 0)
         rows.append({
             "date": inv.invoice_date.isoformat(), "invoice_no": inv.invoice_no,
             "status": "overdue" if overdue else inv.status, "total": float(a["total"]), "paid": float(a["paid"]),
             "balance": float(a["balance"]),
             "currency": getattr(inv, "currency", "MMK") or "MMK",
         })
-    balance = total_billed - total_paid
+    balance = total_billed - total_paid - total_returns
     if format == "xlsx":
         from openpyxl import Workbook
         wb = Workbook()
         ws = wb.active
         ws.title = "Statement"
-        ws.append([f"Statement of Account — {cust.name}"])
-        ws.append([bu.name if bu else ""])
+        ws.append([_sanitize_excel_cell(f"Statement of Account — {cust.name}")])
+        ws.append([_sanitize_excel_cell(bu.name) if bu else ""])
         ws.append([])
         ws.append(["Date", "Invoice", "Status", "Total", "Paid", "Balance", "Currency"])
         for r in rows:
-            ws.append([r["date"], r["invoice_no"], r["status"], r["total"], r["paid"], r["balance"], r["currency"]])
+            ws.append([r["date"], _sanitize_excel_cell(r["invoice_no"]), r["status"], r["total"], r["paid"], r["balance"], r["currency"]])
         ws.append([])
         ws.append(["", "", "TOTALS", float(total_billed), float(total_paid), float(balance), ""])
         buf = BytesIO()
@@ -2310,7 +2604,7 @@ def customer_statement(customer_id: int, format: str = "pdf",
     pdf.cell(0, 9, "STATEMENT OF ACCOUNT", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("helvetica", "", 10)
     pdf.cell(0, 6, _pdf_safe(f"{cust.name} — {bu.name if bu else ''}"), new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 6, _pdf_safe(f"As of {date.today().isoformat()}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, _pdf_safe(f"As of {today_local().isoformat()}"), new_x="LMARGIN", new_y="NEXT")
     pdf.ln(3)
     pdf.set_font("helvetica", "B", 9)
     widths = [24, 30, 22, 34, 34, 34, 12]
@@ -2364,8 +2658,8 @@ def serialize_pos_sale(db: Session, sale: PosSale) -> dict:
 
 class PosLineIn(BaseModel):
     inventory_item_id: int
-    quantity: float = Field(gt=0)
-    unit_price: float = Field(ge=0)
+    quantity: Decimal = Field(gt=0, le=10**13)
+    unit_price: Decimal = Field(ge=0, le=10**13)
     serial_nos: Optional[list[str]] = None
 
 
@@ -2374,43 +2668,54 @@ class PosSaleIn(BaseModel):
     customer_id: Optional[int] = None
     customer_name: Optional[str] = None
     payment_method: str = "cash"  # cash/bank
-    tax_rate: float = 0
+    tax_rate: float = Field(default=0, ge=0, le=100)
     sale_date: Optional[date] = None
     lines: list[PosLineIn] = Field(min_length=1)
 
 
-def _post_pos_journals(db: Session, sale: PosSale, user_id: int) -> None:
+def _post_pos_journals(db: Session, sale: PosSale, user_id: int) -> bool:
     """Sale: Dr 1110/1120 (by payment method) / Cr 4100 net / Cr 2130 tax.
-    COGS: Dr 5100 / Cr 1140 at moving-average cost. Best-effort, like the
-    PO/invoice journal helpers — a missing CoA never blocks a sale."""
+    COGS: Dr 5100 / Cr 1140 at moving-average cost. Returns True when both
+    journals posted. A failure is logged with the sale id and surfaced to
+    the caller as journal_posted=false — the sale itself is already
+    committed, so it is flagged rather than silently lost (M-B1)."""
     try:
         from src.routers.accounting import account_by_code, create_entry
         a = _pos_amounts(sale)
         bu = sale.business_unit_id
-        when = sale.sale_date or date.today()
+        when = sale.sale_date or today_local()
         if a["total"] > 0:
             cash = account_by_code(db, bu, "1120" if sale.payment_method == "bank" else "1110")
             sales_acc = account_by_code(db, bu, "4100")
             tax_acc = account_by_code(db, bu, "2130")
-            if cash and sales_acc:
-                lines = [{"account_id": cash.id, "debit": a["total"], "credit": 0},
-                         {"account_id": sales_acc.id, "debit": 0, "credit": a["subtotal"]}]
-                if a["tax"] > 0 and tax_acc:
-                    lines.append({"account_id": tax_acc.id, "debit": 0, "credit": a["tax"]})
-                create_entry(db, bu, when, f"POS sale #{sale.id}", "pos_sale",
-                             user_id, lines, source_id=sale.id, post=True)
+            if not (cash and sales_acc):
+                logger.warning("POS journal skipped for sale %s: accounts 1110/1120/4100 missing in BU %s",
+                               sale.id, bu)
+                return False
+            lines = [{"account_id": cash.id, "debit": a["total"], "credit": 0},
+                     {"account_id": sales_acc.id, "debit": 0, "credit": a["subtotal"]}]
+            if a["tax"] > 0 and tax_acc:
+                lines.append({"account_id": tax_acc.id, "debit": 0, "credit": a["tax"]})
+            create_entry(db, bu, when, f"POS sale #{sale.id}", "pos_sale",
+                         user_id, lines, source_id=sale.id, post=True)
         if a["cogs"] > 0:
             inv_acc = account_by_code(db, bu, "1140")
             cogs_acc = account_by_code(db, bu, "5100")
-            if inv_acc and cogs_acc:
-                create_entry(db, bu, when, f"POS sale #{sale.id} — COGS", "pos_sale",
-                             user_id,
-                             [{"account_id": cogs_acc.id, "debit": a["cogs"], "credit": 0},
-                              {"account_id": inv_acc.id, "debit": 0, "credit": a["cogs"]}],
-                             source_id=sale.id, post=True)
+            if not (inv_acc and cogs_acc):
+                logger.warning("POS COGS journal skipped for sale %s: accounts 1140/5100 missing in BU %s",
+                               sale.id, bu)
+                return False
+            create_entry(db, bu, when, f"POS sale #{sale.id} — COGS", "pos_sale",
+                         user_id,
+                         [{"account_id": cogs_acc.id, "debit": a["cogs"], "credit": 0},
+                          {"account_id": inv_acc.id, "debit": 0, "credit": a["cogs"]}],
+                         source_id=sale.id, post=True)
         db.commit()
-    except Exception:
+        return True
+    except Exception as exc:
         db.rollback()
+        logger.warning("POS journal failed for sale %s: %s", sale.id, exc)
+        return False
 
 
 @router.post("/pos-sales")
@@ -2427,23 +2732,29 @@ def create_pos_sale(payload: PosSaleIn, user: User = Depends(get_current_user), 
         business_unit_id=bu_id, customer_id=payload.customer_id,
         customer_name=payload.customer_name, payment_method=payload.payment_method,
         tax_rate=Decimal(str(payload.tax_rate)), status="completed",
-        sale_date=payload.sale_date or date.today(), sold_by_id=user.id,
+        sale_date=payload.sale_date or today_local(), sold_by_id=user.id,
     )
     db.add(sale)
     db.flush()
-    # Validate stock for every line before moving anything.
-    items = {}
+    # Validate stock before moving anything, aggregating duplicate lines
+    # for the same item first (two lines of 6 against a stock of 10 must
+    # not both pass).
+    from collections import defaultdict
+    from src.routers.modules import consume_batches_fefo
+    wanted: dict[int, Decimal] = defaultdict(Decimal)
     for ln in payload.lines:
+        wanted[ln.inventory_item_id] += Decimal(str(ln.quantity))
+    items = {}
+    for item_id, qty in wanted.items():
         item = db.query(InventoryItem).filter(
-            InventoryItem.id == ln.inventory_item_id,
+            InventoryItem.id == item_id,
             InventoryItem.business_unit_id == bu_id,
-            InventoryItem.is_active == True).first()  # noqa: E712
+            InventoryItem.is_active == True).with_for_update().first()  # noqa: E712
         if not item:
-            raise HTTPException(404, f"Inventory item {ln.inventory_item_id} not found in this BU")
-        qty = Decimal(str(ln.quantity))
+            raise HTTPException(404, f"Inventory item {item_id} not found in this BU")
         if Decimal(str(item.current_stock or 0)) < qty:
             raise HTTPException(400, f"Not enough stock for {item.name}: {float(item.current_stock or 0):g} available")
-        items[ln.inventory_item_id] = item
+        items[item_id] = item
     for ln in payload.lines:
         item = items[ln.inventory_item_id]
         qty = Decimal(str(ln.quantity))
@@ -2457,15 +2768,18 @@ def create_pos_sale(payload: PosSaleIn, user: User = Depends(get_current_user), 
         item.updated_at = datetime.utcnow()
         db.add(StockMovement(item_id=item.id, movement_type="out", quantity=qty,
                              reason=f"POS sale #{sale.id}", recorded_by_id=user.id))
-        if getattr(item, "requires_expiry", False):
-            from src.routers.modules import consume_batches_fefo
-            consume_batches_fefo(db, item, qty)
+    # FEFO once per item, for the aggregated quantity, for every item that
+    # has batches (not only requires_expiry ones).
+    for item_id, qty in wanted.items():
+        consume_batches_fefo(db, items[item_id], qty)
     db.flush()
     _mark_line_serials_sold(db, bu_id, sale.lines, pos_sale_id=sale.id)
     db.commit()
-    _post_pos_journals(db, sale, user.id)
+    journal_posted = _post_pos_journals(db, sale, user.id)
     db.refresh(sale)
-    return serialize_pos_sale(db, sale)
+    out = serialize_pos_sale(db, sale)
+    out["journal_posted"] = journal_posted
+    return out
 
 
 @router.get("/pos-sales")
@@ -2491,7 +2805,7 @@ def pos_daily_summary(business_unit_id: Optional[int] = None,
     """Today's (or `on` date's) POS totals: by payment method, COGS and
     gross profit. Voided sales are excluded."""
     bu_id = bu_scope(user, business_unit_id)
-    day = on or date.today()
+    day = on or today_local()
     q = db.query(PosSale).filter(PosSale.sale_date == day, PosSale.status == "completed")
     if bu_id is not None:
         q = q.filter(PosSale.business_unit_id == bu_id)
@@ -2589,10 +2903,10 @@ class QuotationIn(BaseModel):
     customer_id: int
     quote_date: date
     valid_until: Optional[date] = None
-    tax_rate: float = 5
+    tax_rate: float = Field(default=5, ge=0, le=100)
     notes: Optional[str] = None
-    currency: str = "MMK"
-    exchange_rate: Optional[float] = None
+    currency: str = Field(default="MMK", min_length=3, max_length=3)
+    exchange_rate: Optional[float] = Field(default=None, gt=0)
     project_id: Optional[int] = None
     lines: list[InvoiceLineIn] = Field(min_length=1)
 
@@ -2608,8 +2922,7 @@ def _fill_quotation_lines(db: Session, q: Quotation, lines) -> None:
 @router.get("/quotations")
 def list_quotations(business_unit_id: Optional[int] = None, status: Optional[str] = None,
                     user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role == "CEO":
-        business_unit_id = user.business_unit_id
+    business_unit_id = bu_scope(user, business_unit_id)
     q = db.query(Quotation)
     if business_unit_id:
         q = q.filter(Quotation.business_unit_id == business_unit_id)
@@ -2692,7 +3005,7 @@ class QuotationStatusIn(BaseModel):
 @router.post("/quotations/{quotation_id}/status")
 def set_quotation_status(quotation_id: int, payload: QuotationStatusIn,
                          user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    q = db.query(Quotation).filter(Quotation.id == quotation_id).first()
+    q = db.query(Quotation).filter(Quotation.id == quotation_id).with_for_update().first()
     if not q:
         raise HTTPException(404, "Quotation not found")
     bu_scope(user, q.business_unit_id)
@@ -2710,17 +3023,17 @@ def set_quotation_status(quotation_id: int, payload: QuotationStatusIn,
 def convert_quotation(quotation_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Create a draft SalesInvoice from this quotation. No journal is
     posted — that happens when the invoice is sent, as usual."""
-    q = db.query(Quotation).filter(Quotation.id == quotation_id).first()
+    q = db.query(Quotation).filter(Quotation.id == quotation_id).with_for_update().first()
     if not q:
         raise HTTPException(404, "Quotation not found")
     bu_scope(user, q.business_unit_id)
-    if q.status in ("rejected", "converted"):
-        raise HTTPException(400, f"Cannot convert a {q.status} quotation")
+    if q.status != "accepted":
+        raise HTTPException(400, f"Only accepted quotations can be converted (this one is {q.status})")
     count = db.query(SalesInvoice).filter(SalesInvoice.business_unit_id == q.business_unit_id).count()
     inv = SalesInvoice(
         business_unit_id=q.business_unit_id, customer_id=q.customer_id,
         invoice_no=f"INV-{q.business_unit_id}-{count + 1:04d}", status="draft",
-        invoice_date=date.today(), due_date=q.valid_until,
+        invoice_date=today_local(), due_date=q.valid_until,
         tax_rate=q.tax_rate, notes=q.notes, created_by_id=user.id,
         currency=q.currency, exchange_rate=q.exchange_rate, project_id=q.project_id,
     )
@@ -2777,8 +3090,10 @@ class SalesReturnIn(BaseModel):
     lines: list[SalesReturnLineIn] = Field(min_length=1)
 
 
-def _post_sales_return_journal(db: Session, r: SalesReturn, user_id: int) -> None:
-    """Dr 4100 net / Dr 2130 tax / Cr 1130 gross (MMK at the invoice rate)."""
+def _post_sales_return_journal(db: Session, r: SalesReturn, user_id: int) -> bool:
+    """Dr 4100 net / Dr 2130 tax / Cr 1130 gross (MMK at the invoice rate).
+    Returns True when posted; failures are logged with the return id and
+    surfaced to the caller as journal_posted=false (M-B1)."""
     try:
         from src.routers.accounting import account_by_code, create_entry
         inv = r.invoice
@@ -2789,17 +3104,22 @@ def _post_sales_return_journal(db: Session, r: SalesReturn, user_id: int) -> Non
         tax_acc = account_by_code(db, r.business_unit_id, "2130")
         ar = account_by_code(db, r.business_unit_id, "1130")
         if not (sales_acc and ar):
-            return
+            logger.warning("Sales return journal skipped for %s: accounts 4100/1130 missing in BU %s",
+                           r.return_no, r.business_unit_id)
+            return False
         lines = [{"account_id": sales_acc.id, "debit": net * fx, "credit": 0}]
         if tax > 0 and tax_acc:
             lines.append({"account_id": tax_acc.id, "debit": tax * fx, "credit": 0})
         lines.append({"account_id": ar.id, "debit": 0, "credit": (net + tax) * fx})
-        create_entry(db, r.business_unit_id, r.return_date or date.today(),
+        create_entry(db, r.business_unit_id, r.return_date or today_local(),
                      f"Sales return {r.return_no} — {inv.invoice_no}", "sales_return",
                      user_id, lines, source_id=r.id, post=True)
         db.commit()
-    except Exception:
+        return True
+    except Exception as exc:
         db.rollback()
+        logger.warning("Sales return journal failed for %s: %s", r.return_no, exc)
+        return False
 
 
 @router.post("/sales-returns")
@@ -2820,7 +3140,7 @@ def create_sales_return(payload: SalesReturnIn, user: User = Depends(get_current
     count = db.query(SalesReturn).filter(SalesReturn.business_unit_id == inv.business_unit_id).count()
     r = SalesReturn(business_unit_id=inv.business_unit_id, invoice_id=inv.id,
                     return_no=f"SR-{inv.business_unit_id}-{count + 1:04d}", status="posted",
-                    return_date=payload.return_date or date.today(),
+                    return_date=payload.return_date or today_local(),
                     reason=payload.reason, created_by_id=user.id)
     db.add(r)
     db.flush()
@@ -2837,14 +3157,21 @@ def create_sales_return(payload: SalesReturnIn, user: User = Depends(get_current
                 db.add(StockMovement(item_id=item.id, movement_type="in", quantity=qty,
                                      reason=f"Sales return {r.return_no} ({inv.invoice_no})",
                                      recorded_by_id=user.id))
+                from src.models import StockBatch as _SB
+                if db.query(_SB).filter(_SB.item_id == item.id).first() is not None:
+                    restock_batches(db, item, qty, batch_no="RETURN")
         for sn in (ln.serial_nos or []):
             s = db.query(ItemSerial).filter(
                 ItemSerial.business_unit_id == inv.business_unit_id,
                 ItemSerial.serial_no == sn).first()
             if s and s.sales_invoice_id == inv.id:
-                s.status = "returned"
+                # Back to stock so the unit can be re-sold (M-C8).
+                s.status = "in_stock"
+                s.sales_invoice_id = None
+                s.pos_sale_id = None
+                s.sold_at = None
     db.commit()
-    _post_sales_return_journal(db, r, user.id)
+    journal_posted = _post_sales_return_journal(db, r, user.id)
     # Recompute the invoice status from the reduced balance.
     a = invoice_amounts(db, inv)
     if inv.status in ("sent", "partial", "paid"):
@@ -2853,8 +3180,15 @@ def create_sales_return(payload: SalesReturnIn, user: User = Depends(get_current
         elif a["paid"] > 0:
             inv.status = "partial"
         db.commit()
+    try:
+        from src.routers.modules import allocate_installments
+        allocate_installments(db, inv.id)
+    except Exception:
+        db.rollback()
     db.refresh(r)
-    return serialize_sales_return(db, r)
+    out = serialize_sales_return(db, r)
+    out["journal_posted"] = journal_posted
+    return out
 
 
 @router.get("/sales-returns")
@@ -2929,7 +3263,7 @@ def create_purchase_return(payload: PurchaseReturnIn, user: User = Depends(get_c
     count = db.query(PurchaseReturn).filter(PurchaseReturn.business_unit_id == po.business_unit_id).count()
     r = PurchaseReturn(business_unit_id=po.business_unit_id, po_id=po.id,
                        return_no=f"PR-{po.business_unit_id}-{count + 1:04d}", status="posted",
-                       return_date=payload.return_date or date.today(),
+                       return_date=payload.return_date or today_local(),
                        reason=payload.reason, created_by_id=user.id)
     db.add(r)
     db.flush()
@@ -2949,22 +3283,32 @@ def create_purchase_return(payload: PurchaseReturnIn, user: User = Depends(get_c
                                  reason=f"Purchase return {r.return_no} ({po.po_no})",
                                  recorded_by_id=user.id))
     db.commit()
-    try:
-        from src.routers.accounting import account_by_code, create_entry
-        ap = account_by_code(db, po.business_unit_id, "2110")
-        inv_acc = account_by_code(db, po.business_unit_id, "1140")
-        if ap and inv_acc and total_cost > 0:
-            create_entry(db, po.business_unit_id, r.return_date or date.today(),
-                         f"Purchase return {r.return_no} — {po.po_no}", "purchase_return",
-                         user.id,
-                         [{"account_id": ap.id, "debit": total_cost, "credit": 0},
-                          {"account_id": inv_acc.id, "debit": 0, "credit": total_cost}],
-                         source_id=r.id, post=True)
-            db.commit()
-    except Exception:
-        db.rollback()
+    journal_posted = True
+    if total_cost > 0:
+        journal_posted = False
+        try:
+            from src.routers.accounting import account_by_code, create_entry
+            ap = account_by_code(db, po.business_unit_id, "2110")
+            inv_acc = account_by_code(db, po.business_unit_id, "1140")
+            if not (ap and inv_acc):
+                logger.warning("Purchase return journal skipped for %s: accounts 2110/1140 missing in BU %s",
+                               r.return_no, po.business_unit_id)
+            else:
+                create_entry(db, po.business_unit_id, r.return_date or today_local(),
+                             f"Purchase return {r.return_no} — {po.po_no}", "purchase_return",
+                             user.id,
+                             [{"account_id": ap.id, "debit": total_cost, "credit": 0},
+                              {"account_id": inv_acc.id, "debit": 0, "credit": total_cost}],
+                             source_id=r.id, post=True)
+                db.commit()
+                journal_posted = True
+        except Exception as exc:
+            db.rollback()
+            logger.warning("Purchase return journal failed for %s: %s", r.return_no, exc)
     db.refresh(r)
-    return serialize_purchase_return(db, r)
+    out = serialize_purchase_return(db, r)
+    out["journal_posted"] = journal_posted
+    return out
 
 
 @router.get("/purchase-returns")
@@ -3072,7 +3416,7 @@ def delivery_note_pdf(invoice_id: int, user: User = Depends(get_current_user), d
     pdf.set_font("helvetica", "B", 13)
     pdf.cell(W, 8, "DELIVERY NOTE", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("helvetica", "", 10)
-    pdf.cell(W, 6, _pdf_safe(f"DN No: {dn_no}    Invoice: {inv.invoice_no}    Date: {date.today().isoformat()}"),
+    pdf.cell(W, 6, _pdf_safe(f"DN No: {dn_no}    Invoice: {inv.invoice_no}    Date: {today_local().isoformat()}"),
              new_x="LMARGIN", new_y="NEXT")
     pdf.cell(W, 6, _pdf_safe(f"Deliver To: {cust.name if cust else ''}"), new_x="LMARGIN", new_y="NEXT")
     if cust and cust.address:
@@ -3132,6 +3476,11 @@ def add_serials(item_id: int, payload: SerialAddIn, user: User = Depends(get_cur
     if not item:
         raise HTTPException(404, "Inventory item not found")
     bu_scope(user, item.business_unit_id)
+    if payload.purchase_order_id is not None:
+        po = db.query(PurchaseOrder).filter(PurchaseOrder.id == payload.purchase_order_id,
+                                            PurchaseOrder.business_unit_id == item.business_unit_id).first()
+        if not po:
+            raise HTTPException(404, "Purchase order not found in this BU")
     cleaned = [str(s).strip() for s in payload.serial_nos if str(s).strip()]
     if not cleaned:
         raise HTTPException(400, "No serial numbers given")
@@ -3175,7 +3524,7 @@ def list_serials(item_id: int, status: Optional[str] = None,
 def lookup_serial(serial_no: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Find a serial / IMEI across all items and BUs."""
     q = db.query(ItemSerial).filter(ItemSerial.serial_no == serial_no.strip())
-    if user.role == "CEO":
+    if user.role in ("CEO", "Accountant") and user.business_unit_id:
         q = q.filter(ItemSerial.business_unit_id == user.business_unit_id)
     rows = q.all()
     return {"items": [serialize_serial(db, s) for s in rows], "count": len(rows)}
@@ -3222,8 +3571,8 @@ def serialize_advance(db: Session, adv: StaffAdvance) -> dict:
 
 class AdvanceIn(BaseModel):
     employee_id: int
-    amount: float = Field(gt=0)
-    monthly_deduction: float = Field(gt=0)
+    amount: Decimal = Field(gt=0, le=10**13)
+    monthly_deduction: Decimal = Field(gt=0, le=10**13)
     advance_date: Optional[date] = None
     reason: Optional[str] = None
 
@@ -3254,7 +3603,7 @@ def create_advance(payload: AdvanceIn, user: User = Depends(get_current_user), d
         employee_id=emp.id, business_unit_id=emp.business_unit_id,
         amount=Decimal(str(payload.amount)), remaining_amount=Decimal(str(payload.amount)),
         monthly_deduction=Decimal(str(payload.monthly_deduction)),
-        advance_date=payload.advance_date or date.today(), reason=payload.reason,
+        advance_date=payload.advance_date or today_local(), reason=payload.reason,
         status="pending", requested_by_id=user.id,
     )
     db.add(adv)
@@ -3266,8 +3615,11 @@ def create_advance(payload: AdvanceIn, user: User = Depends(get_current_user), d
 @router.post("/staff-advances/{advance_id}/approve")
 def approve_advance(advance_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Approve + disburse: Dr 1240 Staff Advances / Cr 1110 Cash in the
-    employee's BU (account 1240 is created on demand for older BUs)."""
-    adv = db.query(StaffAdvance).filter(StaffAdvance.id == advance_id).first()
+    employee's BU (account 1240 is created on demand for older BUs). One
+    failure policy for every journal error: the approval does NOT stand
+    without its journal — the advance stays pending and the error is
+    raised, so no approval ever exists with no journal behind it."""
+    adv = db.query(StaffAdvance).filter(StaffAdvance.id == advance_id).with_for_update().first()
     if not adv:
         raise HTTPException(404, "Staff advance not found")
     if adv.status != "pending":
@@ -3282,27 +3634,28 @@ def approve_advance(advance_id: int, user: User = Depends(require_admin), db: Se
         _ensure_advance_account(db, adv.business_unit_id)
         adv_acc = account_by_code(db, adv.business_unit_id, "1240")
         cash = account_by_code(db, adv.business_unit_id, "1110")
-        if adv_acc and cash:
-            e = create_entry(db, adv.business_unit_id, date.today(),
-                             f"Staff advance — {adv.employee.name if adv.employee else ''}",
-                             "staff_advance", user.id,
-                             [{"account_id": adv_acc.id, "debit": adv.amount, "credit": 0},
-                              {"account_id": cash.id, "debit": 0, "credit": adv.amount}],
-                             source_id=adv.id, post=True)
-            db.flush()
-            adv.journal_entry_id = e.id
+        if not (adv_acc and cash):
+            raise HTTPException(500, "Staff advance accounts (1240/1110) are not configured for this BU")
+        e = create_entry(db, adv.business_unit_id, today_local(),
+                         f"Staff advance — {adv.employee.name if adv.employee else ''}",
+                         "staff_advance", user.id,
+                         [{"account_id": adv_acc.id, "debit": adv.amount, "credit": 0},
+                          {"account_id": cash.id, "debit": 0, "credit": adv.amount}],
+                         source_id=adv.id, post=True)
+        db.flush()
+        adv.journal_entry_id = e.id
     except HTTPException:
         db.rollback()
         raise
-    except Exception:
-        db.rollback()  # no CoA yet — approval stands, journal skipped (payroll pattern)
-        adv = db.query(StaffAdvance).filter(StaffAdvance.id == advance_id).first()
-        adv.status = "approved"
-        adv.approved_by_id = user.id
-        adv.approved_at = datetime.utcnow()
+    except Exception as exc:
+        db.rollback()
+        logger.warning("Staff advance journal failed for advance %s: %s", advance_id, exc)
+        raise HTTPException(500, f"Staff advance journal could not be posted; advance left as pending: {exc}")
     db.commit()
     db.refresh(adv)
-    return serialize_advance(db, adv)
+    out = serialize_advance(db, adv)
+    out["journal_posted"] = True
+    return out
 
 
 @router.post("/staff-advances/{advance_id}/reject")
@@ -3393,7 +3746,7 @@ def list_attendance(business_unit_id: Optional[int] = None, month: Optional[str]
     if month:
         y, m = (int(x) for x in month.split("-"))
     else:
-        today = date.today()
+        today = today_local()
         y, m = today.year, today.month
     import calendar as _cal
     start = date(y, m, 1)
@@ -3422,7 +3775,7 @@ def leave_balances(business_unit_id: Optional[int] = None, year: Optional[int] =
     """Computed leave balances: entitlement − approved days used in the
     year (requests overlapping the year count their overlapping days)."""
     bu_id = bu_scope(user, business_unit_id)
-    yr = year or date.today().year
+    yr = year or today_local().year
     jan1, dec31 = date(yr, 1, 1), date(yr, 12, 31)
     q = db.query(Employee).filter(Employee.is_active == True)  # noqa: E712
     if bu_id is not None:

@@ -159,7 +159,7 @@ def test_principal_report(db):
     sup = Supplier(name="L'Oreal Principal")
     db.add(sup)
     db.commit()
-    cream = item(db, "Face cream", brand="L'Oreal", principal_id=sup.id)
+    cream = item(db, "Face cream", stock=10, brand="L'Oreal", principal_id=sup.id)
     cust = create_sales_customer(CustomerIn(business_unit_id=db.test_bu.id, name="Shop"),
                                  user=ADMIN, db=db)
     inv = create_invoice(InvoiceIn(

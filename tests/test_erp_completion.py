@@ -181,6 +181,14 @@ def test_quotation_convert_creates_draft_invoice_no_journal(db):
     ), user=CHAIRMAN, db=db)
     assert q["total"] == 10500 and q["status"] == "draft"
     assert db.query(JournalEntry).count() == 0  # quotations never post
+    # M-C6: only an accepted quotation converts — a draft must be refused.
+    from src.routers.ops import QuotationStatusIn, set_quotation_status
+    with pytest.raises(HTTPException) as exc:
+        convert_quotation(q["id"], user=CHAIRMAN, db=db)
+    assert exc.value.status_code == 400
+    db.rollback()
+    set_quotation_status(q["id"], QuotationStatusIn(status="sent"), user=CHAIRMAN, db=db)
+    set_quotation_status(q["id"], QuotationStatusIn(status="accepted"), user=CHAIRMAN, db=db)
     inv = convert_quotation(q["id"], user=CHAIRMAN, db=db)
     assert inv["status"] == "draft" and inv["total"] == 10500
     assert inv["customer_id"] == cust["id"] and len(inv["lines"]) == 1
@@ -207,7 +215,7 @@ def _sent_invoice(db, bu_id, cust_id, qty=10, price=1000, item_id=None):
 def test_sales_return_reduces_balance_restocks_and_guards_qty(db):
     bu = db.test_bu
     cust = _customer(db, bu.id)
-    item = add_item(db, bu.id, stock=0, cost=600)
+    item = add_item(db, bu.id, stock=10, cost=600)
     inv = _sent_invoice(db, bu.id, cust["id"], item_id=item.id)
     line_id = inv["lines"][0]["id"]
     r = create_sales_return(SalesReturnIn(
