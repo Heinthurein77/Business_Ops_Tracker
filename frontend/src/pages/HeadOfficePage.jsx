@@ -1,6 +1,8 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
+import LastUpdated from '../components/LastUpdated';
+import { clearDraft, loadDraft, saveDraft } from '../utils/drafts';
 import StepsCounter from '../components/StepsCounter';
 import YesNoToggle from '../components/YesNoToggle';
 import PercentProgress from '../components/PercentProgress';
@@ -102,6 +104,15 @@ export default function HeadOfficePage() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  // SC-1: the report saved but its journal did not post — a persistent
+  // warning with a retry, never the success banner.
+  const [journalWarning, setJournalWarning] = useState('');
+  // SM-5: when the dashboard data was last refreshed.
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  // SM-1: drafts are only saved after the first load, so the empty
+  // initial form never wipes a saved draft.
+  const loadedRef = useRef(false);
   const [reviewIndex, setReviewIndex] = useState(0);
   const [targetEditing, setTargetEditing] = useState(false);
   const [targetForm, setTargetForm] = useState(emptyTargetForm);
@@ -109,6 +120,7 @@ export default function HeadOfficePage() {
   const [targetError, setTargetError] = useState('');
 
   async function load() {
+    setRefreshing(true);
     setTargetForm(emptyTargetForm);
     setTargetEditing(false);
     setTargetError('');
@@ -142,13 +154,33 @@ export default function HeadOfficePage() {
         golf_flag: payload.social?.golf_flag ?? false,
         social_other_notes: payload.social?.other_notes ?? '',
       });
+      // SM-1: restore an unsaved draft (e.g. after a session expiry)
+      // when today's report has not been filed yet. Date-stamped, so
+      // yesterday's draft never leaks into today; the attachment file
+      // cannot be restored from storage and must be re-attached.
+      const today = new Date().toISOString().slice(0, 10);
+      const draft = loadDraft('ho-daily-report');
+      if (draft && draft._report_date === today) {
+        setForm((current) => (current.revenue === '' && current.cash_flow === '' ? { ...emptyForm, ...draft } : current));
+      }
+      loadedRef.current = true;
     } else {
       setData(await api.headOfficeReport());
     }
+    setUpdatedAt(new Date());
+    setRefreshing(false);
   }
 
+  // SM-1: persist the in-progress report as HO types, so a session
+  // expiry mid-fill loses nothing.
   useEffect(() => {
-    load().catch((err) => setError(err instanceof ApiError ? err.message : 'Failed to load dashboard'));
+    if (loadedRef.current && isHo) {
+      saveDraft('ho-daily-report', { ...form, _report_date: new Date().toISOString().slice(0, 10) });
+    }
+  }, [form, isHo]);
+
+  useEffect(() => {
+    load().catch((err) => { setRefreshing(false); setError(err instanceof ApiError ? err.message : 'Failed to load dashboard'); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isHo]);
 
@@ -230,7 +262,7 @@ export default function HeadOfficePage() {
   }
 
   async function handleSubmit(e) {
-    e.preventDefault();
+    if (e) e.preventDefault();
     setError('');
 
     if (form.revenue === '' || form.cash_flow === '' || form.receivable === '' || form.payable === '') {
@@ -267,13 +299,22 @@ export default function HeadOfficePage() {
 
     setSubmitting(true);
     try {
-      await api.submitHoReport(formData);
-      setSuccess(true);
+      const res = await api.submitHoReport(formData);
+      // SC-1: the report is saved but its journal did not post — do NOT
+      // show the success banner. Keep the form as-is for a retry.
+      if (res && res.auto_post_failed) {
+        setJournalWarning(`Report saved, but the journal did NOT post${res.auto_post_error ? ` — ${res.auto_post_error}` : ''}. Your numbers are filed; re-post the journal from Journal Failures, or resubmit the report.`);
+      } else {
+        setJournalWarning('');
+        setSuccess(true);
+        clearDraft('ho-daily-report');
+      }
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Failed to submit report');
     } finally {
       setSubmitting(false);
+      setRefreshing(false);
     }
   }
 
@@ -354,6 +395,8 @@ export default function HeadOfficePage() {
             ) : (
               <p className="text-xs text-amber-600 dark:text-amber-400">Not submitted yet today</p>
             )}
+            {/* SM-5: visible freshness + manual refresh for this dashboard. */}
+            <LastUpdated updatedAt={updatedAt} onRefresh={() => load().catch((err) => { setRefreshing(false); setError(err instanceof ApiError ? err.message : 'Failed to load dashboard'); })} refreshing={refreshing} />
           </div>
         ) : (
           // Same greeting top-bar treatment as Executive Dashboard, so
@@ -409,6 +452,13 @@ export default function HeadOfficePage() {
               <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
             </svg>
             <span>Your daily report for {reportDateDisplay} has been submitted successfully.</span>
+          </div>
+        )}
+        {isHo && journalWarning && (
+          <div className={`${GLASS} px-5 py-4 text-sm text-amber-800 dark:text-amber-300 flex items-center gap-3 flex-wrap`}>
+            <span className="flex-1">{journalWarning}</span>
+            <button onClick={() => handleSubmit()} disabled={submitting} className="shrink-0 text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50">Resubmit report</button>
+            <button onClick={() => setJournalWarning('')} className="shrink-0 text-xs font-bold text-amber-700 dark:text-amber-400 hover:underline">Dismiss</button>
           </div>
         )}
         {error && (

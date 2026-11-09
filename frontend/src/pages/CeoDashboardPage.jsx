@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import Chart from 'react-apexcharts';
 import { api, ApiError } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import CeoProfileCard from '../components/CeoProfileCard';
+import LastUpdated from '../components/LastUpdated';
+import { clearDraft, loadDraft, saveDraft } from '../utils/drafts';
 import StepsCounter from '../components/StepsCounter';
 import YesNoToggle from '../components/YesNoToggle';
 import PercentProgress from '../components/PercentProgress';
@@ -120,6 +122,15 @@ export default function CeoDashboardPage() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  // SC-1: the report saved but its journal did not post — a persistent
+  // warning with a retry, never the success banner.
+  const [journalWarning, setJournalWarning] = useState('');
+  // SM-5: when the dashboard data was last refreshed.
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  // SM-1: drafts are only saved after the first load, so the empty
+  // initial form never wipes a saved draft.
+  const loadedRef = useRef(false);
   const [targetForm, setTargetForm] = useState(emptyTargetForm);
   const [targetSaving, setTargetSaving] = useState(false);
   const [targetError, setTargetError] = useState('');
@@ -128,6 +139,7 @@ export default function CeoDashboardPage() {
   const [noteError, setNoteError] = useState('');
 
   async function load() {
+    setRefreshing(true);
     const payload = await api.ceoDashboard('', editDate);
     setData(payload);
     setTargetForm(emptyTargetForm);
@@ -168,10 +180,28 @@ export default function CeoDashboardPage() {
       golf_flag: payload.form_social?.golf_flag ?? false,
       social_other_notes: payload.form_social?.other_notes ?? '',
     });
+    // SM-1: restore an unsaved draft (e.g. after a session expiry) when
+    // this day's report has not been filed yet — the server form is
+    // empty. The draft is date-stamped, so yesterday's draft never
+    // leaks into today. The attachment file cannot be restored from
+    // storage; it must be re-attached.
+    const draft = loadDraft('ceo-daily-report');
+    if (draft && draft._report_date === payload.form_date) {
+      setForm((current) => (current.revenue === '' && current.cash_flow === '' ? { ...emptyForm, ...draft } : current));
+    }
+    loadedRef.current = true;
+    setUpdatedAt(new Date());
+    setRefreshing(false);
   }
 
+  // SM-1: persist the in-progress report as the CEO types, so a session
+  // expiry mid-fill loses nothing.
   useEffect(() => {
-    load().catch((err) => setError(err instanceof ApiError ? err.message : 'Failed to load dashboard'));
+    if (loadedRef.current) saveDraft('ceo-daily-report', { ...form, _report_date: data?.form_date || '' });
+  }, [form, data]);
+
+  useEffect(() => {
+    load().catch((err) => { setRefreshing(false); setError(err instanceof ApiError ? err.message : 'Failed to load dashboard'); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -222,7 +252,7 @@ export default function CeoDashboardPage() {
   }
 
   async function handleSubmit(e) {
-    e.preventDefault();
+    if (e) e.preventDefault();
     setError('');
 
     if (form.revenue === '' || form.cash_flow === '' || form.receivable === '' || form.payable === '') {
@@ -273,13 +303,22 @@ export default function CeoDashboardPage() {
 
     setSubmitting(true);
     try {
-      await api.submitReport(formData);
-      setSuccess(true);
+      const res = await api.submitReport(formData);
+      // SC-1: the report is saved but its journal did not post — do NOT
+      // show the success banner. Keep the form as-is for a retry.
+      if (res && res.auto_post_failed) {
+        setJournalWarning(`Report saved, but the journal did NOT post${res.auto_post_error ? ` — ${res.auto_post_error}` : ''}. Your numbers are filed; ask Head Office to re-post the journal, or resubmit the report.`);
+      } else {
+        setJournalWarning('');
+        setSuccess(true);
+        clearDraft('ceo-daily-report');
+      }
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Failed to submit report');
     } finally {
       setSubmitting(false);
+      setRefreshing(false);
     }
   }
 
@@ -319,15 +358,19 @@ export default function CeoDashboardPage() {
       <main className="flex-1 min-w-0 px-4 sm:px-6 py-6 sm:py-8 pb-24">
         <div className="mb-6 flex items-center justify-between flex-wrap gap-2">
           <p className="text-base font-bold tracking-tight text-slate-900 dark:text-slate-100">{data.report_date_display}</p>
-          {data.form_submitted_at ? (
-            <p className="text-xs font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-full">
-              {data.form_is_today
-                ? `Submitted today at ${data.form_submitted_at.split(', ')[1]}`
-                : `Report saved for ${data.form_date_display}`}
-            </p>
-          ) : (
-            <p className="text-xs font-medium text-slate-500 dark:text-slate-400 bg-slate-500/10 px-2.5 py-1 rounded-full">Financials mandatory</p>
-          )}
+          <div className="flex items-center gap-3 flex-wrap">
+            {/* SM-5: visible freshness + manual refresh for this dashboard. */}
+            <LastUpdated updatedAt={updatedAt} onRefresh={() => load().catch((err) => { setRefreshing(false); setError(err instanceof ApiError ? err.message : 'Failed to load dashboard'); })} refreshing={refreshing} />
+            {data.form_submitted_at ? (
+              <p className="text-xs font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-full">
+                {data.form_is_today
+                  ? `Submitted today at ${data.form_submitted_at.split(', ')[1]}`
+                  : `Report saved for ${data.form_date_display}`}
+              </p>
+            ) : (
+              <p className="text-xs font-medium text-slate-500 dark:text-slate-400 bg-slate-500/10 px-2.5 py-1 rounded-full">Financials mandatory</p>
+            )}
+          </div>
         </div>
         {!data.form_is_today && (
           <div className="mb-6 rounded-xl bg-brand-500/10 border border-brand-500/20 px-5 py-4 text-sm text-slate-700 flex items-center gap-3 flex-wrap sm:flex-nowrap">
@@ -373,6 +416,13 @@ export default function CeoDashboardPage() {
               <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
             </svg>
             <span>Your daily report for {data.form_date_display} has been submitted successfully.</span>
+          </div>
+        )}
+        {journalWarning && (
+          <div className="mb-6 rounded-xl bg-amber-500/10 border border-amber-500/30 px-5 py-4 text-sm text-amber-800 dark:text-amber-300 flex items-center gap-3 flex-wrap">
+            <span className="flex-1">{journalWarning}</span>
+            <button onClick={() => handleSubmit()} disabled={submitting} className="shrink-0 text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50">Resubmit report</button>
+            <button onClick={() => setJournalWarning('')} className="shrink-0 text-xs font-bold text-amber-700 dark:text-amber-400 hover:underline">Dismiss</button>
           </div>
         )}
         {error && (
