@@ -16,13 +16,21 @@
 # each run and log_scan (09:00) alerts the Chairman when a row is stale.
 # The logs below must still show a fresh line after each scheduled time.
 #
+# Pm-1 overlap guard: every line below runs under `flock -n` on its own
+# lock file, so a second instance never starts while one is still
+# running (a slow run is skipped, not duplicated). flock exits 99 only
+# on lock conflict (--conflict-exit-code 99, util-linux >= 2.36); any
+# other non-zero exit is the job's own failure and is preserved so cron
+# still reports it. The skip is logged with a timestamp. New cron lines
+# (e.g. the reconciliation job) must follow the same pattern.
+#
 # Times are server time (Asia/Yangon on the VPS).
 
 # --- scheduled_alerts: missing-report reminders + document/batch expiry
 # alerts. Daily 08:30. Idempotent (one notification per CEO per run,
 # one alert per document per 7 days) — safe to re-run by hand.
 # Log: ~/bot-alerts.log
-30 8 * * * cd ~/business-ops-tracker && docker compose -f docker-compose.prod.yml exec -T app python -m src.jobs.scheduled_alerts >> ~/bot-alerts.log 2>&1
+30 8 * * * flock -E 99 -n ~/bot-alerts.lock -c 'cd ~/business-ops-tracker && docker compose -f docker-compose.prod.yml exec -T app python -m src.jobs.scheduled_alerts' >> ~/bot-alerts.log 2>&1; rc=$?; if [ $rc -eq 99 ]; then echo "$(date) scheduled_alerts skipped: already running" >> ~/bot-alerts.log; exit 0; else exit $rc; fi
 
 # --- audit_retention: delete sign-in/out rows older than 90 days, clear
 # IPs older than 30 days; financial/account rows are KEPT as tamper
@@ -35,7 +43,7 @@
 # Runs inside the app container, which already has
 # MIGRATION_DATABASE_URL from the compose environment.
 # Log: ~/bot-audit-retention.log
-0 3 * * 0 cd ~/business-ops-tracker && docker compose -f docker-compose.prod.yml exec -T app python -m src.scripts.audit_retention >> ~/bot-audit-retention.log 2>&1
+0 3 * * 0 flock -E 99 -n ~/bot-audit-retention.lock -c 'cd ~/business-ops-tracker && docker compose -f docker-compose.prod.yml exec -T app python -m src.scripts.audit_retention' >> ~/bot-audit-retention.log 2>&1; rc=$?; if [ $rc -eq 99 ]; then echo "$(date) audit_retention skipped: already running" >> ~/bot-audit-retention.log; exit 0; else exit $rc; fi
 
 # --- log_scan: daily count of ERROR / journal-failure / lockout lines in
 # the last 24 h of app logs + dead-man check on the JobHeartbeat table
@@ -45,11 +53,11 @@
 # This is the minimum-viable monitoring until Sentry/a real alerting path
 # exists.
 # Log: ~/bot-logscan.log
-0 9 * * * cd ~/business-ops-tracker && docker compose -f docker-compose.prod.yml logs --since 24h app 2>/dev/null | docker compose -f docker-compose.prod.yml exec -T app python -m src.jobs.log_scan >> ~/bot-logscan.log 2>&1
+0 9 * * * flock -E 99 -n ~/bot-logscan.lock -c 'cd ~/business-ops-tracker && docker compose -f docker-compose.prod.yml logs --since 24h app 2>/dev/null | docker compose -f docker-compose.prod.yml exec -T app python -m src.jobs.log_scan' >> ~/bot-logscan.log 2>&1; rc=$?; if [ $rc -eq 99 ]; then echo "$(date) log_scan skipped: already running" >> ~/bot-logscan.log; exit 0; else exit $rc; fi
 
 # --- backup: weekly pg_dump to separate storage (R-4). Weekly, Sunday
 # 03:30. BACKUP_DIR must be off the app disk eventually (copy the dumps
 # elsewhere); the script keeps 28 days of dumps. Runs on the host (not
 # in the container) because it shells out to pg_dump / docker.
 # Log: ~/bot-backup.log
-30 3 * * 0 cd ~/business-ops-tracker && BACKUP_DIR=~/bot-backups ./scripts/backup.sh >> ~/bot-backup.log 2>&1
+30 3 * * 0 flock -E 99 -n ~/bot-backup.lock -c 'cd ~/business-ops-tracker && BACKUP_DIR=~/bot-backups ./scripts/backup.sh' >> ~/bot-backup.log 2>&1; rc=$?; if [ $rc -eq 99 ]; then echo "$(date) backup skipped: already running" >> ~/bot-backup.log; exit 0; else exit $rc; fi

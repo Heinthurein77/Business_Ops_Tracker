@@ -15,6 +15,10 @@ Run it on a schedule (weekly is plenty), as the schema-owner role: the runtime
 role deliberately cannot UPDATE or DELETE audit_logs (see deploy/db_roles.sql),
 so this connects with MIGRATION_DATABASE_URL (falling back to DATABASE_URL when
 no separate owner role is configured).
+
+Pm-2: each run upserts a `job_heartbeats` row for `audit_retention`, so
+the log-scan dead-man check (which watches weekly jobs with an 8-day
+grace) notices if this job silently dies. A dry run writes no heartbeat.
 """
 import argparse
 import sys
@@ -26,6 +30,29 @@ from src.config import settings
 from src.utils import utcnow
 
 SHORT_LIVED_ACTIONS = ("LOGIN_SUCCESS", "LOGIN_FAILED", "LOGOUT")
+
+
+def _record_heartbeat(engine) -> None:
+    """Pm-2: upsert this run into job_heartbeats (R-6 dead-man check).
+
+    Same upsert shape scheduled_alerts uses, but over this script's own
+    owner-role engine (no ORM session here). Best effort by design: a
+    heartbeat failure must never mask the retention run's own result.
+    The INSERT ... ON CONFLICT form works on both Postgres and SQLite.
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                sa.text(
+                    "INSERT INTO job_heartbeats (job_name, last_run_at, last_status) "
+                    "VALUES (:job, :now, :status) "
+                    "ON CONFLICT (job_name) DO UPDATE SET "
+                    "last_run_at = EXCLUDED.last_run_at, last_status = EXCLUDED.last_status"
+                ),
+                {"job": "audit_retention", "now": utcnow(), "status": "ok"},
+            )
+    except Exception as exc:  # noqa: BLE001 - heartbeat must not fail the job
+        print(f"audit_retention: heartbeat update failed ({exc})", file=sys.stderr)
 
 
 def run(login_days: int, ip_days: int, dry_run: bool) -> tuple[int, int]:
@@ -62,7 +89,9 @@ def run(login_days: int, ip_days: int, dry_run: bool) -> tuple[int, int]:
             cleared = conn.execute(
                 sa.text(f"UPDATE audit_logs SET ip_address = NULL WHERE {clear_where}"), clear_params
             ).rowcount
-            return int(to_delete), int(cleared or 0)
+            deleted, cleared = int(to_delete), int(cleared or 0)
+        _record_heartbeat(engine)
+        return deleted, cleared
     finally:
         engine.dispose()
 

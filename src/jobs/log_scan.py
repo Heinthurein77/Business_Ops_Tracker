@@ -32,15 +32,23 @@ from datetime import datetime, timedelta
 from typing import Iterable
 
 from src.database import SessionLocal
-from src.models import JobHeartbeat, Notification, User
+from src.models import (
+    AuditLog, InvoicePayment, JobHeartbeat, Notification, PayrollRun,
+    PurchaseOrder, SalesInvoice, StaffAdvance, User,
+)
 from src.utils import utcnow
 
 # A job whose heartbeat is older than this is presumed dead.
 STALE_AFTER_HOURS = 36
-# Jobs expected to write a heartbeat every run. audit_retention is NOT
-# listed: it is a weekly script that never upserts a heartbeat, so
-# expecting one would alert every day.
+# Jobs expected to write a heartbeat every run. audit_retention is a
+# weekly job, so it is watched separately (WEEKLY_JOBS) with a weekly
+# grace instead of the 36 h daily budget — see JOB_MAX_AGE_HOURS.
 EXPECTED_JOBS = ("scheduled_alerts", "log_scan")
+# Weekly jobs and their dead-man grace: audit_retention runs Sundays,
+# so it gets 8 days (weekly + 1 day) instead of the 36 h daily budget.
+JOB_MAX_AGE_HOURS = {"scheduled_alerts": STALE_AFTER_HOURS, "log_scan": STALE_AFTER_HOURS,
+                     "audit_retention": 8 * 24}
+WEEKLY_JOBS = ("audit_retention",)
 
 _ERROR_RE = re.compile(r"\bERROR\b")
 _TIMESTAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})")
@@ -72,6 +80,29 @@ def count_signals(lines: Iterable[str]) -> dict:
     return counts
 
 
+def count_pool_signals(lines: Iterable[str]) -> dict:
+    """Cm-5: pool-wait / lock-timeout signals in log lines. Pure.
+
+    Kept separate from count_signals() (whose exact dict shape is
+    pinned by tests): pool pressure is the SM-11/PM-5/Cm-5 cluster, and
+    the first month-end burst should be visible in the daily scan, not
+    just as generic 503s. "database unavailable" is the 503 detail
+    get_db raises on pool exhaustion (and on a genuinely dead DB);
+    either way it belongs in this bucket.
+    """
+    counts = {"pool_waits": 0, "lock_timeouts": 0}
+    for line in lines:
+        lowered = line.lower()
+        if ("queuepool" in lowered or "pool timeout" in lowered
+                or "database unavailable" in lowered):
+            counts["pool_waits"] += 1
+        if ("lock timeout" in lowered or "could not obtain lock" in lowered
+                or "deadlock detected" in lowered or "40p01" in lowered
+                or "55p03" in lowered):
+            counts["lock_timeouts"] += 1
+    return counts
+
+
 def _parse_timestamp(line: str):
     """Leading ``YYYY-MM-DD HH:MM:SS`` (the app's log format), or None."""
     match = _TIMESTAMP_RE.match(line)
@@ -96,32 +127,91 @@ def lines_in_window(lines: Iterable[str], since: datetime) -> list[str]:
     return kept
 
 
-def stale_jobs(heartbeats, now=None, max_age_hours: int = STALE_AFTER_HOURS) -> list[str]:
+def stale_jobs(heartbeats, now=None, max_age_hours: int = STALE_AFTER_HOURS,
+               expected=EXPECTED_JOBS, never_ran_is_stale: bool = True) -> list[str]:
     """Names of expected jobs whose heartbeat is stale. Pure.
 
     ``heartbeats`` is an iterable of (job_name, last_run_at) with
     last_run_at None when the job never wrote a row. A job that never
     ran is stale: a dead-man check that only watches rows that exist
-    cannot see a cron that was never installed.
+    cannot see a cron that was never installed. Per-job grace comes
+    from JOB_MAX_AGE_HOURS (weekly jobs get longer); max_age_hours is
+    the fallback for jobs not listed there. never_ran_is_stale=False is
+    for weekly jobs: between install and the first weekly run there is
+    legitimately no row yet, so only a stale existing row alerts.
     """
     now = now or utcnow()
     seen = {}
     for job_name, last_run_at in heartbeats:
         seen[job_name] = last_run_at
     stale = []
-    for job_name in EXPECTED_JOBS:
+    for job_name in expected:
         last = seen.get(job_name)
-        if last is None or (now - last) > timedelta(hours=max_age_hours):
+        age = JOB_MAX_AGE_HOURS.get(job_name, max_age_hours)
+        if last is None:
+            if never_ran_is_stale:
+                stale.append(job_name)
+        elif (now - last) > timedelta(hours=age):
             stale.append(job_name)
     return stale
+
+
+# SM-14: money operations that must each leave one audit row, with the
+# business-side timestamp that proves the operation happened. The
+# optional 4th element is a status the business row must be in to count
+# (approved_at is also stamped by reject_advance — it means "decided
+# at" — so only approved rows count as expected APPROVE_ADVANCE rows).
+AUDIT_GAP_CHECKS = (
+    ("RECEIVE_PO", PurchaseOrder, PurchaseOrder.received_at, None),
+    ("PAY_PO", PurchaseOrder, PurchaseOrder.paid_at, None),
+    ("SEND_INVOICE", SalesInvoice, SalesInvoice.sent_at, None),
+    ("RECORD_PAYMENT", InvoicePayment, InvoicePayment.created_at, None),
+    ("PAY_PAYROLL", PayrollRun, PayrollRun.paid_at, None),
+    ("APPROVE_ADVANCE", StaffAdvance, StaffAdvance.approved_at, "approved"),
+)
+
+
+def check_audit_gaps(db, since: datetime) -> list[str]:
+    """SM-14: expected vs written audit rows for money operations.
+
+    For each money action, the business rows timestamped in the window
+    are the expected audit rows; the AuditLog rows with that action in
+    the same window are what was actually written. A deficit means an
+    audit write was dropped (e.g. pool exhaustion swallowing log_audit
+    — SM-11/SM-14) and the trail no longer covers the money that moved.
+    Returns human-readable gap lines (empty when everything matches).
+    Boundary note: the business timestamp and the audit timestamp are
+    written milliseconds apart, so an operation landing exactly on the
+    window edge can count on one side only — a gap of 1 is noise, a
+    larger deficit is a real signal.
+    """
+    gaps = []
+    for action, model, ts_attr, status in AUDIT_GAP_CHECKS:
+        q = db.query(model).filter(ts_attr >= since)
+        if status is not None:
+            q = q.filter(model.status == status)
+        expected = q.count()
+        written = db.query(AuditLog).filter(
+            AuditLog.action == action, AuditLog.timestamp >= since).count()
+        if expected > written:
+            gaps.append(f"audit gap: {action} expected {expected}, wrote {written}")
+    return gaps
 
 
 # ------------------------------------------------------------------ DB bits
 
 def check_heartbeats(db, now=None) -> list[str]:
-    """Stale-job names from the database's heartbeat table."""
+    """Stale-job names from the database's heartbeat table.
+
+    Daily jobs use the 36 h budget and alert when they never ran;
+    weekly jobs (audit_retention) use their own grace and only alert
+    on a stale existing row — between install and the first weekly
+    run there is legitimately no row yet.
+    """
     rows = db.query(JobHeartbeat).all()
-    return stale_jobs([(row.job_name, row.last_run_at) for row in rows], now=now)
+    pairs = [(row.job_name, row.last_run_at) for row in rows]
+    return (stale_jobs(pairs, now=now)
+            + stale_jobs(pairs, now=now, expected=WEEKLY_JOBS, never_ran_is_stale=False))
 
 
 def _record_heartbeat(db, job_name: str, status: str) -> None:
@@ -172,17 +262,22 @@ def main(argv=None) -> int:
         return 1
 
     since = utcnow() - timedelta(hours=args.hours)
-    counts = count_signals(lines_in_window(raw_lines, since))
+    window_lines = lines_in_window(raw_lines, since)
+    counts = count_signals(window_lines)
+    pool_counts = count_pool_signals(window_lines)
 
-    # Dead-man check + own heartbeat. A DB failure here must not kill the
-    # scan: the log counts are still worth reporting, and the fallback
-    # (stderr + non-zero exit) is the alert path.
+    # Dead-man check + own heartbeat + audit-gap check. A DB failure
+    # here must not kill the scan: the log counts are still worth
+    # reporting, and the fallback (stderr + non-zero exit) is the alert
+    # path.
     stale: list[str] = []
+    gaps: list[str] = []
     db_available = False
     db = None
     try:
         db = SessionLocal()
         stale = check_heartbeats(db)
+        gaps = check_audit_gaps(db, since)
         _record_heartbeat(db, "log_scan", "ok")
         db_available = True
     except Exception as exc:  # noqa: BLE001 - DB is optional for the scan
@@ -202,12 +297,19 @@ def main(argv=None) -> int:
         problems.append(f"{counts['journal_failed']} journal-failure line(s)")
     if counts["lockouts"]:
         problems.append(f"{counts['lockouts']} lockout line(s)")
+    if pool_counts["pool_waits"]:
+        problems.append(f"{pool_counts['pool_waits']} pool-wait line(s)")
+    if pool_counts["lock_timeouts"]:
+        problems.append(f"{pool_counts['lock_timeouts']} lock-timeout line(s)")
     if stale:
         problems.append(f"stale job heartbeat(s): {', '.join(stale)} (>{STALE_AFTER_HOURS}h or never ran)")
+    problems.extend(gaps)
 
     summary = (
         f"log_scan: {counts['total']} line(s) in window, {counts['errors']} ERROR, "
         f"{counts['journal_failed']} journal-failed, {counts['lockouts']} lockout; "
+        f"pool_waits: {pool_counts['pool_waits']}, lock_timeouts: {pool_counts['lock_timeouts']}; "
+        f"audit gaps: {'; '.join(gaps) if gaps else 'none'}; "
         f"stale heartbeats: {', '.join(stale) if stale else 'none'}"
     )
     print(summary)
