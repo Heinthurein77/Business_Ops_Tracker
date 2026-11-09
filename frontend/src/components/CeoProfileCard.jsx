@@ -1,4 +1,4 @@
-import { safeUrl } from '../utils/safeUrl';
+import { viewUploadUrl } from '../utils/safeUrl';
 
 function initials(name) {
   if (!name) return '?';
@@ -40,8 +40,8 @@ export default function CeoProfileCard({ ceoProfile, subtitle, glassClass }) {
     <section className={`${glassClass} overflow-hidden`}>
       <div className="px-5 sm:px-6 py-5 flex flex-col lg:flex-row lg:items-center gap-5">
         <div className="flex items-center gap-4 min-w-0 lg:flex-1">
-          {safeUrl(ceoProfile.profile_pic_url) ? (
-            <img src={safeUrl(ceoProfile.profile_pic_url)} alt="" className="w-16 h-16 rounded-xl object-cover border-2 border-white dark:border-slate-700 shadow-sm ring-1 ring-slate-200 dark:ring-slate-700 flex-shrink-0" />
+          {viewUploadUrl(ceoProfile.profile_pic_url) ? (
+            <img src={viewUploadUrl(ceoProfile.profile_pic_url)} alt="" className="w-16 h-16 rounded-xl object-cover border-2 border-white dark:border-slate-700 shadow-sm ring-1 ring-slate-200 dark:ring-slate-700 flex-shrink-0" />
           ) : (
             <div className="w-16 h-16 rounded-xl bg-gradient-to-br from-brand-500 to-indigo-500 flex items-center justify-center flex-shrink-0 shadow-sm">
               <span className="text-lg font-bold text-white tracking-wide">{initials(ceoProfile.full_name)}</span>

@@ -20,7 +20,7 @@ from src.models import (
     HeadOfficeSocialLog,
     User,
 )
-from src.r2_storage import upload_fileobj
+from src.r2_storage import upload_attachment_or_503
 from src.schemas import MonthlyTargetRequest
 from src.upload_validation import content_matches_extension
 from src.utils import (
@@ -398,7 +398,9 @@ def submit_report(
         if not content_matches_extension(extension, attachment.file):
             raise HTTPException(status_code=400, detail="File content does not match its file type")
 
-        document_url = upload_fileobj(attachment.file, attachment.filename)
+        # D-4: an attachment that cannot be stored fails the submit (503)
+        # instead of saving the report as if the evidence were attached.
+        document_url = upload_attachment_or_503(attachment.file, attachment.filename)
 
     financial = (
         db.query(HeadOfficeDailyFinancial)

@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from src.auth import get_current_user
 from src.database import get_db
-from src.utils import today_local, validate_period
+from src.utils import log_audit, today_local, validate_period
 from src.models import (
     BomComponent, BusinessUnit, Customer, ExpenseRequest, Installment,
     InventoryItem, LeaseContract, ManufacturingBom, ProductionOrder,
@@ -32,6 +32,31 @@ router = APIRouter(prefix="/api/modules", tags=["modules"])
 ZERO = Decimal("0")
 
 logger = logging.getLogger(__name__)
+
+def _log_audit(db, user, action, details=""):
+    """Local wrapper around src.utils.log_audit (R-3 audit trail).
+
+    Two normalisations, both deliberate: (1) callers in the test suite pass
+    duck-typed user objects (SimpleNamespace with id/role but no
+    .username), which log_audit reads directly — the actor is re-shaped
+    into the (id, username) pair log_audit needs instead of crashing the
+    request; (2) an audit-write failure must never fail a business
+    operation that already committed, so it is logged and swallowed (the
+    D-8 direction: audit is evidence, not part of the money transaction).
+    """
+    from types import SimpleNamespace
+
+    actor = user
+    if user is not None and not hasattr(user, "username"):
+        actor = SimpleNamespace(
+            id=getattr(user, "id", None),
+            username=f"user-{getattr(user, 'id', '?')}",
+        )
+    try:
+        log_audit(db, actor, action, details)
+    except Exception as exc:  # noqa: BLE001 - audit must not break the op
+        logger.warning("audit write failed for %s: %s", action, exc)
+
 
 
 def fmt(v) -> float:
@@ -97,6 +122,7 @@ def receive_batch(item_id: int, payload: BatchIn, user: User = Depends(get_curre
                          reason=f"Batch {b.batch_no} received", recorded_by_id=user.id))
     db.commit()
     db.refresh(b)
+    _log_audit(db, user, "RECEIVE_BATCH", f"item_id={item_id}")
     return serialize_batch(b)
 
 
@@ -206,6 +232,7 @@ def create_project(payload: ProjectIn, user: User = Depends(get_current_user), d
     db.add(p)
     db.commit()
     db.refresh(p)
+    _log_audit(db, user, "CREATE_PROJECT", f"id={p.id}")
     return serialize_project(db, p)
 
 
@@ -220,6 +247,7 @@ def set_project_status(project_id: int, status: str, user: User = Depends(get_cu
         raise HTTPException(400, "status must be active/completed/cancelled")
     p.status = status
     db.commit()
+    _log_audit(db, user, "SET_PROJECT_STATUS", f"project_id={project_id}")
     return serialize_project(db, p)
 
 
@@ -334,6 +362,7 @@ def create_shipment(payload: ShipmentIn, user: User = Depends(get_current_user),
     db.add(s)
     db.commit()
     db.refresh(s)
+    _log_audit(db, user, "CREATE_SHIPMENT", f"id={s.id}")
     return serialize_shipment(s)
 
 
@@ -348,6 +377,7 @@ def set_shipment_status(shipment_id: int, status: str, user: User = Depends(get_
         raise HTTPException(400, "Invalid shipment status")
     s.status = status
     db.commit()
+    _log_audit(db, user, "SET_SHIPMENT_STATUS", f"shipment_id={shipment_id}")
     return serialize_shipment(s)
 
 
@@ -415,6 +445,7 @@ def create_bom(payload: BomIn, user: User = Depends(get_current_user), db: Sessi
                             quantity_per_unit=c.quantity_per_unit))
     db.commit()
     db.refresh(bom)
+    _log_audit(db, user, "CREATE_BOM", f"id={bom.id}")
     return serialize_bom(db, bom)
 
 
@@ -463,6 +494,7 @@ def create_production(payload: ProductionIn, user: User = Depends(get_current_us
     db.add(o)
     db.commit()
     db.refresh(o)
+    _log_audit(db, user, "CREATE_PRODUCTION", f"id={o.id}")
     return serialize_production(o)
 
 
@@ -540,6 +572,7 @@ def complete_production(order_id: int, user: User = Depends(get_current_user),
     db.refresh(o)
     out = serialize_production(o)
     out["journal_posted"] = journal_posted
+    _log_audit(db, user, "COMPLETE_PRODUCTION", f"order_id={order_id}")
     return out
 
 
@@ -584,6 +617,7 @@ def create_unit(payload: UnitIn, user: User = Depends(get_current_user), db: Ses
     db.add(u)
     db.commit()
     db.refresh(u)
+    _log_audit(db, user, "CREATE_UNIT", f"id={u.id}")
     return serialize_unit(u)
 
 
@@ -654,6 +688,7 @@ def sell_unit(unit_id: int, payload: SellUnitIn, user: User = Depends(get_curren
         if planned != Decimal(str(inv["total"])):
             db.rollback()
             raise HTTPException(500, f"Installment plan sums to {planned}, not the invoice total {inv['total']}")
+    _log_audit(db, user, "SELL_UNIT", f"unit_id={unit_id}")
     return {"unit": serialize_unit(u), "invoice_id": inv["id"], "invoice_no": inv["invoice_no"],
             "total": inv["total"], "installments": plan}
 
@@ -752,6 +787,7 @@ def create_lease(payload: LeaseIn, user: User = Depends(get_current_user), db: S
     unit.status = "rented"
     db.commit()
     db.refresh(l)
+    _log_audit(db, user, "CREATE_LEASE", f"id={l.id}")
     return serialize_lease(l)
 
 
@@ -779,6 +815,7 @@ def bill_lease(lease_id: int, period: Optional[str] = None, user: User = Depends
     ), user=user, db=db)
     l.last_billed_period = period
     db.commit()
+    _log_audit(db, user, "BILL_LEASE", f"lease_id={lease_id}")
     return {"invoice_id": inv["id"], "invoice_no": inv["invoice_no"], "period": period}
 
 
@@ -974,6 +1011,7 @@ def create_stock_transfer(payload: StockTransferIn, user: User = Depends(get_cur
                                  quantity=Decimal(str(ln.quantity))))
     db.commit()
     db.refresh(t)
+    _log_audit(db, user, "CREATE_STOCK_TRANSFER", f"id={t.id}")
     return serialize_transfer(db, t)
 
 
@@ -1042,6 +1080,7 @@ def send_stock_transfer(transfer_id: int, user: User = Depends(get_current_user)
     db.refresh(t)
     out = serialize_transfer(db, t)
     out["journal_posted"] = journal_posted
+    _log_audit(db, user, "SEND_STOCK_TRANSFER", f"transfer_id={transfer_id}")
     return out
 
 
@@ -1114,6 +1153,7 @@ def receive_stock_transfer(transfer_id: int, user: User = Depends(get_current_us
     db.refresh(t)
     out = serialize_transfer(db, t)
     out["journal_posted"] = journal_posted
+    _log_audit(db, user, "RECEIVE_STOCK_TRANSFER", f"transfer_id={transfer_id}")
     return out
 
 
@@ -1130,6 +1170,7 @@ def cancel_stock_transfer(transfer_id: int, user: User = Depends(get_current_use
         t.status = "cancelled"
         db.commit()
         db.refresh(t)
+        _log_audit(db, user, "CANCEL_STOCK_TRANSFER", f"transfer_id={transfer_id}")
         return serialize_transfer(db, t)
     if t.status != "in_transit":
         raise HTTPException(400, f"Cannot cancel a transfer in status {t.status}")
@@ -1153,4 +1194,5 @@ def cancel_stock_transfer(transfer_id: int, user: User = Depends(get_current_use
     t.status = "cancelled"
     db.commit()
     db.refresh(t)
+    _log_audit(db, user, "CANCEL_STOCK_TRANSFER", f"transfer_id={transfer_id}")
     return serialize_transfer(db, t)

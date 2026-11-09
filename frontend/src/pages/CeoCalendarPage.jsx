@@ -5,7 +5,7 @@ import ActivityMonthCalendar from '../components/ActivityMonthCalendar';
 import Footer from '../components/Footer';
 import { money } from '../utils/quadrantMetrics';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
-import { safeUrl } from '../utils/safeUrl';
+import { viewUploadUrl } from '../utils/safeUrl';
 
 function DetailField({ label, value }) {
   return (
@@ -109,9 +109,9 @@ function DayDetail({ day, ceoName }) {
                     {(day.exercise_cycle_percent ?? day.cycle_percent) != null ? `${day.exercise_cycle_percent ?? day.cycle_percent}%` : '—'}
                   </span>
                 </div>
-                {safeUrl(day.document_url) && (
+                {viewUploadUrl(day.document_url) && (
                   <a
-                    href={safeUrl(day.document_url)}
+                    href={viewUploadUrl(day.document_url)}
                     target="_blank"
                     rel="noreferrer"
                     className="inline-flex items-center gap-1.5 text-xs font-semibold text-brand-600 hover:text-brand-700 pt-1"

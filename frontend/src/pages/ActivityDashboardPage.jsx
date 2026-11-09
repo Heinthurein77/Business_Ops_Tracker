@@ -4,7 +4,7 @@ import { api, ApiError } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
-import { safeUrl } from '../utils/safeUrl';
+import { viewUploadUrl } from '../utils/safeUrl';
 
 const STATUS_CARD_CLASS = {
   green: 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 border-l-4 border-l-emerald-500',
@@ -170,8 +170,8 @@ function ActivityCard({ a, onResolved }) {
         <FitnessChips a={a} />
       </dl>
       {a.needs_help && <ResolveHelpForm logId={a.id} onResolved={onResolved} />}
-      {safeUrl(a.document_url) && (
-        <a href={safeUrl(a.document_url)} target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-brand-600 dark:text-brand-400 hover:text-brand-700 dark:hover:text-brand-300">
+      {viewUploadUrl(a.document_url) && (
+        <a href={viewUploadUrl(a.document_url)} target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-brand-600 dark:text-brand-400 hover:text-brand-700 dark:hover:text-brand-300">
           View attachment
         </a>
       )}
@@ -524,8 +524,8 @@ export default function ActivityDashboardPage() {
                               <ResolvedBlock a={a} />
                             </div>
                           )}
-                          {safeUrl(a.document_url) && (
-                            <a href={safeUrl(a.document_url)} target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-brand-600 dark:text-brand-400 hover:text-brand-700 dark:hover:text-brand-300">
+                          {viewUploadUrl(a.document_url) && (
+                            <a href={viewUploadUrl(a.document_url)} target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-brand-600 dark:text-brand-400 hover:text-brand-700 dark:hover:text-brand-300">
                               View attachment
                             </a>
                           )}

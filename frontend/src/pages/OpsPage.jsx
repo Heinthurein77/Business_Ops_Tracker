@@ -1,3 +1,4 @@
+import { viewUploadUrl } from '../utils/safeUrl';
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
@@ -1334,8 +1335,8 @@ export default function OpsPage() {
                   <div className="flex items-center gap-2">
                     <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[e.status]}`}>{e.status}</span>
                     {e.status === 'pending' && e.stage_label && <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300">{e.stage_label}</span>}
-                    {e.receipt_url
-                      ? <a href={e.receipt_url} target="_blank" rel="noreferrer" className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">Receipt</a>
+                    {viewUploadUrl(e.receipt_url)
+                      ? <a href={viewUploadUrl(e.receipt_url)} target="_blank" rel="noreferrer" className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">Receipt</a>
                       : <label className="text-xs font-semibold text-slate-400 hover:text-brand-600 cursor-pointer hover:underline">+ Receipt<input type="file" accept="image/*,.pdf" className="hidden" onChange={async (ev) => { const f = ev.target.files?.[0]; if (f) { try { await api.opsUploadReceipt(e.id, f); load(); } catch (err) { setError(err.message); } } }} /></label>}
                     {e.status === 'pending' && <>
                       <button onClick={() => review(e, 'approved')} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Approve</button>

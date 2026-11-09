@@ -6,7 +6,7 @@ import ActivityMonthCalendar from '../components/ActivityMonthCalendar';
 import Footer from '../components/Footer';
 import { formatVariance, money } from '../utils/quadrantMetrics';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
-import { safeUrl } from '../utils/safeUrl';
+import { viewUploadUrl } from '../utils/safeUrl';
 
 const STATUS_BADGE_CLASS = {
   red: 'bg-red-500/10 border-red-500/20',
@@ -308,8 +308,8 @@ export default function CeoHistoryPage() {
                         <p className="text-slate-700 line-clamp-2">{currentReview.other_notes}</p>
                       </div>
                     )}
-                    {safeUrl(currentReview.document_url) && (
-                      <a href={safeUrl(currentReview.document_url)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-xs font-semibold text-brand-600 hover:text-brand-700 pt-1">
+                    {viewUploadUrl(currentReview.document_url) && (
+                      <a href={viewUploadUrl(currentReview.document_url)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-xs font-semibold text-brand-600 hover:text-brand-700 pt-1">
                         View attachment
                       </a>
                     )}

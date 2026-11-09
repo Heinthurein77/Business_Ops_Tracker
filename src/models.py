@@ -156,6 +156,11 @@ class DailyFinancial(Base):
     other_amount = Column(Numeric(16, 2), nullable=True)
     # Free-text catch-all for anything not covered by the fields above —
     # mirrors ActivityLog/HealthStatus/SocialLog's own other_notes column.
+    # D-14(b): anomaly flag — set at CEO daily submit when the day's revenue
+    # deviates >50% from the BU's trailing 14-day average, for HO review.
+    # Stored (not computed at read time) so the flag survives resubmission
+    # edits and is visible to every review view that reads the row.
+    revenue_anomaly = Column(Boolean, default=False, nullable=False)
     other_notes = Column(Text, nullable=True)
     submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

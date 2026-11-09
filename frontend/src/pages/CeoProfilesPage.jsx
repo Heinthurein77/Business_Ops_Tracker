@@ -3,7 +3,7 @@ import { api } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
-import { safeUrl } from '../utils/safeUrl';
+import { viewUploadUrl } from '../utils/safeUrl';
 
 export default function CeoProfilesPage() {
   const [data, setData] = useState(null);
@@ -95,8 +95,8 @@ export default function CeoProfilesPage() {
                   <tr key={p.user_id} className="hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors">
                     <td className="px-6 py-3.5">
                       <div className="flex items-center gap-2.5">
-                        {safeUrl(p.profile_pic_url) ? (
-                          <img src={safeUrl(p.profile_pic_url)} alt="" className="w-8 h-8 rounded-full object-cover border border-slate-200 dark:border-slate-700 flex-shrink-0" />
+                        {viewUploadUrl(p.profile_pic_url) ? (
+                          <img src={viewUploadUrl(p.profile_pic_url)} alt="" className="w-8 h-8 rounded-full object-cover border border-slate-200 dark:border-slate-700 flex-shrink-0" />
                         ) : (
                           <div className="w-8 h-8 rounded-full bg-brand-50 dark:bg-brand-500/10 border border-slate-200 dark:border-slate-700 flex items-center justify-center text-[10px] font-bold text-brand-500 dark:text-brand-400 flex-shrink-0">
                             {p.managed_business_ids[0]?.slice(-2) || '—'}

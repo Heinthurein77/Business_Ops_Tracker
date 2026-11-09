@@ -15,3 +15,32 @@ export function safeUrl(url) {
     return null;
   }
 }
+
+/** D-5: a stored attachment URL is only a key reference — never render it
+ * directly (it is a bearer link: a 7-day presigned URL, or permanently
+ * public when a public base URL is set). Extract the storage key and route
+ * through the session-gated view endpoint, which checks BU ownership and
+ * 302-redirects to a fresh 15-minute presigned URL. Returns null for
+ * anything that does not look like a stored attachment URL. */
+export function viewUploadUrl(storedUrl) {
+  const key = extractUploadKey(storedUrl);
+  if (!key) return null;
+  return `/api/ops/uploads/view?key=${encodeURIComponent(key)}`;
+}
+
+function extractUploadKey(storedUrl) {
+  if (!storedUrl || typeof storedUrl !== 'string') return null;
+  if (storedUrl.startsWith('/uploads/')) {
+    const key = storedUrl.slice('/uploads/'.length);
+    return key && !key.includes('..') ? key : null;
+  }
+  let path;
+  try {
+    path = new URL(storedUrl, window.location.origin).pathname;
+  } catch {
+    return null;
+  }
+  const key = decodeURIComponent(path).replace(/^\/+/, '');
+  // R2 keys are always "<folder>/<uuid>.<ext>".
+  return key.includes('/') && !key.includes('..') ? key : null;
+}

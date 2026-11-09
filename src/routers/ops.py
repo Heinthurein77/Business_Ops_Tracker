@@ -18,16 +18,19 @@ from sqlalchemy.orm import Session
 
 from src.auth import get_current_user, require_roles
 from src.database import get_db
-from src.utils import _sanitize_excel_cell, today_local, validate_period
+from src.utils import _sanitize_excel_cell, log_audit, today_local, validate_period
 from src.models import (
     ActionItem,
+    ActivityLog,
     AttendanceRecord,
     BusinessUnit,
+    CeoProfile,
     Customer,
     CustomerMetric,
     DailyFinancial,
     Employee,
     ExpenseRequest,
+    HeadOfficeActivityLog,
     InventoryItem,
     InvoicePayment,
     ItemSerial,
@@ -61,6 +64,31 @@ router = APIRouter(prefix="/api/ops", tags=["ops"])
 require_admin = require_roles("Chairman", "HO")
 
 logger = logging.getLogger(__name__)
+
+def _log_audit(db, user, action, details=""):
+    """Local wrapper around src.utils.log_audit (R-3 audit trail).
+
+    Two normalisations, both deliberate: (1) callers in the test suite pass
+    duck-typed user objects (SimpleNamespace with id/role but no
+    .username), which log_audit reads directly — the actor is re-shaped
+    into the (id, username) pair log_audit needs instead of crashing the
+    request; (2) an audit-write failure must never fail a business
+    operation that already committed, so it is logged and swallowed (the
+    D-8 direction: audit is evidence, not part of the money transaction).
+    """
+    from types import SimpleNamespace
+
+    actor = user
+    if user is not None and not hasattr(user, "username"):
+        actor = SimpleNamespace(
+            id=getattr(user, "id", None),
+            username=f"user-{getattr(user, 'id', '?')}",
+        )
+    try:
+        log_audit(db, actor, action, details)
+    except Exception as exc:  # noqa: BLE001 - audit must not break the op
+        logger.warning("audit write failed for %s: %s", action, exc)
+
 
 
 # ---------------------------------------------------------------- helpers
@@ -213,6 +241,7 @@ def create_action_item(payload: ActionItemIn, user: User = Depends(get_current_u
             message=item.title, link="/admin",
         ))
         db.commit()
+    _log_audit(db, user, "CREATE_ACTION_ITEM", f"id={item.id}")
     return serialize_action_item(db, item)
 
 
@@ -245,6 +274,7 @@ def update_action_item(item_id: int, payload: ActionItemUpdate, user: User = Dep
         item.due_date = payload.due_date
     db.commit()
     db.refresh(item)
+    _log_audit(db, user, "UPDATE_ACTION_ITEM", f"item_id={item_id}")
     return serialize_action_item(db, item)
 
 
@@ -256,6 +286,7 @@ def delete_action_item(item_id: int, user: User = Depends(get_current_user), db:
     bu_scope(user, item.business_unit_id)
     db.delete(item)
     db.commit()
+    _log_audit(db, user, "DELETE_ACTION_ITEM", f"item_id={item_id}")
     return {"ok": True}
 
 
@@ -301,6 +332,7 @@ def mark_all_read(user: User = Depends(get_current_user), db: Session = Depends(
 @router.post("/notifications/remind-missing")
 def remind_missing(user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Notify CEOs whose BU has not submitted today's DailyFinancial."""
+    _log_audit(db, user, "REMIND_MISSING", "")
     return {"notified": run_remind_missing_reports(db)}
 
 
@@ -395,6 +427,7 @@ def create_inventory_item(payload: InventoryItemIn, user: User = Depends(get_cur
     db.add(item)
     db.commit()
     db.refresh(item)
+    _log_audit(db, user, "CREATE_INVENTORY_ITEM", f"id={item.id}")
     return serialize_inventory_item(item)
 
 
@@ -469,6 +502,7 @@ def record_movement(item_id: int, payload: MovementIn, user: User = Depends(get_
     db.refresh(item)
     out = serialize_inventory_item(item)
     out["journal_posted"] = journal_posted
+    _log_audit(db, user, "RECORD_MOVEMENT", f"item_id={item_id}")
     return out
 
 
@@ -564,6 +598,7 @@ def transfer_stock(item_id: int, payload: TransferIn, user: User = Depends(get_c
             logger.warning("Transfer journal failed for item %s (BU %s -> BU %s): %s",
                            src.id, src.business_unit_id, payload.to_business_unit_id, exc)
     db.refresh(dst)
+    _log_audit(db, user, "TRANSFER_STOCK", f"item_id={item_id}")
     return {"ok": True, "destination_item": serialize_inventory_item(dst),
             "source_stock": float(src.current_stock),
             "journal_posted": journal_posted}
@@ -620,6 +655,7 @@ def deactivate_inventory_item(item_id: int, user: User = Depends(get_current_use
     bu_scope(user, item.business_unit_id)
     item.is_active = False
     db.commit()
+    _log_audit(db, user, "DEACTIVATE_INVENTORY_ITEM", f"item_id={item_id}")
     return {"ok": True}
 
 
@@ -715,6 +751,7 @@ def submit_expense(payload: ExpenseIn, user: User = Depends(get_current_user), d
             message=f"{e.title} — Ks {float(e.amount):,.0f}", link="/admin/expenses",
         ))
     db.commit()
+    _log_audit(db, user, "SUBMIT_EXPENSE", f"id={e.id}")
     return serialize_expense(db, e)
 
 
@@ -747,6 +784,7 @@ def review_expense(expense_id: int, payload: ExpenseReviewIn, user: User = Depen
                     message=f"{e.title} — Ks {float(e.amount):,.0f} (HO approved)", link="/admin/expenses",
                 ))
             db.commit()
+            _log_audit(db, user, "REVIEW_EXPENSE", f"expense_id={expense_id}")
             return serialize_expense(db, e)
         # rejected at stage 1 falls through to the normal rejection below
     e.status = payload.decision
@@ -778,15 +816,70 @@ def review_expense(expense_id: int, payload: ExpenseReviewIn, user: User = Depen
         out["journal_posted"] = journal_posted
         if journal_error:
             out["journal_error"] = journal_error
+        _log_audit(db, user, "REVIEW_EXPENSE", f"expense_id={expense_id}")
         return out
+    _log_audit(db, user, "REVIEW_EXPENSE", f"expense_id={expense_id}")
     return serialize_expense(db, e)
+
+
+@router.get("/uploads/view")
+def view_upload(key: str = Query(...), user: User = Depends(get_current_user),
+                db: Session = Depends(get_db)):
+    """D-5: session-gated attachment viewing. Stored URL columns are only a
+    key reference — the browser never follows them directly. This endpoint
+    checks the caller may see the owning record (own BU for CEO/Accountant,
+    own photo for a CEO, anything for Chairman/HO) and then 302-redirects
+    to a fresh 15-minute presigned URL (or to the session-gated local
+    /uploads route when R2 is not configured)."""
+    import re
+
+    from fastapi.responses import RedirectResponse
+
+    from src.r2_storage import is_configured as r2_is_configured
+    from src.r2_storage import presigned_url_for_key
+
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", key or "") or ".." in key or "/" not in key:
+        raise HTTPException(400, "Invalid attachment key")
+    owner_bu_id = None
+    is_profile_photo = key.startswith("profile-photos/")
+    if is_profile_photo:
+        profile = db.query(CeoProfile).filter(CeoProfile.profile_pic_url.like(f"%{key}%")).first()
+        if profile is None:
+            raise HTTPException(404, "Attachment not found")
+        if user.role not in ("Chairman", "HO") and profile.user_id != user.id:
+            raise HTTPException(403, "Not your profile photo")
+    else:
+        expense = db.query(ExpenseRequest).filter(ExpenseRequest.receipt_url.like(f"%{key}%")).first()
+        if expense is not None:
+            owner_bu_id = expense.business_unit_id
+        else:
+            activity = db.query(ActivityLog).filter(ActivityLog.document_url.like(f"%{key}%")).first()
+            if activity is not None:
+                owner_bu_id = activity.business_unit_id
+            else:
+                ho_activity = db.query(HeadOfficeActivityLog).filter(
+                    HeadOfficeActivityLog.document_url.like(f"%{key}%")).first()
+                if ho_activity is not None:
+                    if user.role not in ("Chairman", "HO"):
+                        raise HTTPException(403, "Only Chairman/HO can view head-office attachments")
+                else:
+                    raise HTTPException(404, "Attachment not found")
+        if owner_bu_id is not None and user.role in ("CEO", "Accountant") and user.business_unit_id:
+            if owner_bu_id != user.business_unit_id:
+                raise HTTPException(403, "Attachment belongs to another business unit")
+    if not r2_is_configured():
+        return RedirectResponse(url=f"/uploads/{key}", status_code=302)
+    url = presigned_url_for_key(key)
+    if not url:
+        raise HTTPException(503, "File storage is not available")
+    return RedirectResponse(url=url, status_code=302)
 
 
 @router.post("/expenses/{expense_id}/receipt")
 async def upload_expense_receipt(expense_id: int, file: UploadFile = File(...),
                                  user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Attach a receipt photo/file to an expense (R2 when configured)."""
-    from src.r2_storage import upload_fileobj
+    from src.r2_storage import upload_attachment_or_503
     from src.upload_validation import content_matches_extension
 
     e = db.query(ExpenseRequest).filter(ExpenseRequest.id == expense_id).first()
@@ -805,11 +898,12 @@ async def upload_expense_receipt(expense_id: int, file: UploadFile = File(...),
     if not content_matches_extension(ext, bio):
         raise HTTPException(400, "File content does not match its extension")
     bio.seek(0)
-    url = upload_fileobj(bio, file.filename, folder="expense-receipts")
-    if not url:
-        raise HTTPException(503, "File storage is not available")
+    # D-4: a failed receipt upload fails the request (503) — never save the
+    # expense as if the receipt were attached.
+    url = upload_attachment_or_503(bio, file.filename, folder="expense-receipts")
     e.receipt_url = url
     db.commit()
+    _log_audit(db, user, "UPLOAD_EXPENSE_RECEIPT", f"expense_id={expense_id}")
     return serialize_expense(db, e)
 
 
@@ -843,6 +937,7 @@ def submit_staff(payload: StaffIn, user: User = Depends(get_current_user), db: S
     row.notes = payload.notes
     row.submitted_by_id = user.id
     db.commit()
+    _log_audit(db, user, "SUBMIT_STAFF", f"id={row.id}")
     return {"ok": True, "id": row.id}
 
 
@@ -894,6 +989,7 @@ def submit_customers(payload: CustomerIn, user: User = Depends(get_current_user)
     row.notes = payload.notes
     row.submitted_by_id = user.id
     db.commit()
+    _log_audit(db, user, "SUBMIT_CUSTOMERS", f"id={row.id}")
     return {"ok": True, "id": row.id}
 
 
@@ -1006,6 +1102,7 @@ def create_document(payload: DocumentIn, user: User = Depends(get_current_user),
     db.add(d)
     db.commit()
     db.refresh(d)
+    _log_audit(db, user, "CREATE_DOCUMENT", f"id={d.id}")
     return serialize_document(db, d)
 
 
@@ -1017,6 +1114,7 @@ def delete_document(document_id: int, user: User = Depends(get_current_user), db
     bu_scope(user, d.business_unit_id)
     db.delete(d)
     db.commit()
+    _log_audit(db, user, "DELETE_DOCUMENT", f"document_id={document_id}")
     return {"ok": True}
 
 
@@ -1024,6 +1122,7 @@ def delete_document(document_id: int, user: User = Depends(get_current_user), db
 def check_document_expiry(days: int = 30, user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Notify each BU's CEO + all Chairman/HO about documents expiring within
     `days`. Throttled per document to one alert per 7 days."""
+    _log_audit(db, user, "CHECK_DOCUMENT_EXPIRY", f"days={days}")
     return run_check_document_expiry(db, days)
 
 
@@ -1341,6 +1440,7 @@ def create_supplier(payload: SupplierIn, user: User = Depends(get_current_user),
     db.add(s)
     db.commit()
     db.refresh(s)
+    _log_audit(db, user, "CREATE_SUPPLIER", f"id={s.id}")
     return serialize_supplier(s)
 
 
@@ -1356,6 +1456,7 @@ def delete_supplier(supplier_id: int, user: User = Depends(get_current_user), db
         bu_scope(user, s.business_unit_id)
     s.is_active = False
     db.commit()
+    _log_audit(db, user, "DELETE_SUPPLIER", f"supplier_id={supplier_id}")
     return {"ok": True}
 
 
@@ -1469,6 +1570,7 @@ def create_po(payload: POIn, user: User = Depends(get_current_user), db: Session
                                  unit_cost=Decimal(str(ln.unit_cost))))
     db.commit()
     db.refresh(po)
+    _log_audit(db, user, "CREATE_PO", f"id={po.id}")
     return serialize_po(db, po)
 
 
@@ -1528,6 +1630,7 @@ def order_po(po_id: int, user: User = Depends(get_current_user), db: Session = D
         raise HTTPException(400, "This PO's approval was rejected — edit and resubmit it first")
     po.status = "ordered"
     db.commit()
+    _log_audit(db, user, "ORDER_PO", f"po_id={po_id}")
     return serialize_po(db, po)
 
 
@@ -1551,6 +1654,7 @@ def approve_po(po_id: int, user: User = Depends(require_admin), db: Session = De
         raise HTTPException(400, "This PO is not awaiting approval")
     db.commit()
     db.refresh(po)
+    _log_audit(db, user, "APPROVE_PO", f"po_id={po_id}")
     return serialize_po(db, po)
 
 
@@ -1569,6 +1673,7 @@ def reject_po_approval(po_id: int, user: User = Depends(require_admin), db: Sess
     po.approval_stage = "rejected"
     db.commit()
     db.refresh(po)
+    _log_audit(db, user, "REJECT_PO_APPROVAL", f"po_id={po_id}")
     return serialize_po(db, po)
 
 
@@ -1615,6 +1720,7 @@ def update_po(po_id: int, payload: POUpdate, user: User = Depends(get_current_us
     po.approval_stage = "first" if total_mmk > TWO_STAGE_THRESHOLD else None
     db.commit()
     db.refresh(po)
+    _log_audit(db, user, "UPDATE_PO", f"po_id={po_id}")
     return serialize_po(db, po)
 
 
@@ -1666,6 +1772,7 @@ def receive_po(po_id: int, user: User = Depends(get_current_user), db: Session =
     db.refresh(po)
     out = serialize_po(db, po)
     out["journal_posted"] = True
+    _log_audit(db, user, "RECEIVE_PO", f"po_id={po_id}")
     return out
 
 
@@ -1685,6 +1792,7 @@ def pay_po(po_id: int, user: User = Depends(get_current_user), db: Session = Dep
     db.refresh(po)
     out = serialize_po(db, po)
     out["journal_posted"] = True
+    _log_audit(db, user, "PAY_PO", f"po_id={po_id}")
     return out
 
 
@@ -1696,6 +1804,7 @@ def cancel_po(po_id: int, user: User = Depends(get_current_user), db: Session = 
         raise HTTPException(400, f"Cannot cancel a {po.status} PO")
     po.status = "cancelled"
     db.commit()
+    _log_audit(db, user, "CANCEL_PO", f"po_id={po_id}")
     return serialize_po(db, po)
 
 
@@ -1736,6 +1845,7 @@ def create_sales_customer(payload: CustomerIn, user: User = Depends(get_current_
     db.add(c)
     db.commit()
     db.refresh(c)
+    _log_audit(db, user, "CREATE_SALES_CUSTOMER", f"id={c.id}")
     return serialize_customer(c)
 
 
@@ -1747,6 +1857,7 @@ def delete_sales_customer(customer_id: int, user: User = Depends(get_current_use
     bu_scope(user, c.business_unit_id)
     c.is_active = False
     db.commit()
+    _log_audit(db, user, "DELETE_SALES_CUSTOMER", f"customer_id={customer_id}")
     return {"ok": True}
 
 
@@ -1881,6 +1992,7 @@ def create_invoice(payload: InvoiceIn, user: User = Depends(get_current_user), d
                                 serial_nos=_json.dumps(ln.serial_nos) if ln.serial_nos else None))
     db.commit()
     db.refresh(inv)
+    _log_audit(db, user, "CREATE_INVOICE", f"id={inv.id}")
     return serialize_invoice(db, inv)
 
 
@@ -2014,6 +2126,7 @@ def send_invoice(invoice_id: int, user: User = Depends(get_current_user), db: Se
     db.refresh(inv)
     out = serialize_invoice(db, inv)
     out["journal_posted"] = True
+    _log_audit(db, user, "SEND_INVOICE", f"invoice_id={invoice_id}")
     return out
 
 
@@ -2069,6 +2182,7 @@ def record_payment(invoice_id: int, payload: PaymentIn, user: User = Depends(get
     db.refresh(inv)
     out = serialize_invoice(db, inv)
     out["journal_posted"] = True
+    _log_audit(db, user, "RECORD_PAYMENT", f"invoice_id={invoice_id}")
     return out
 
 
@@ -2086,6 +2200,7 @@ def cancel_invoice(invoice_id: int, user: User = Depends(get_current_user), db: 
         unit.status = "available"
         unit.sale_invoice_id = None
     db.commit()
+    _log_audit(db, user, "CANCEL_INVOICE", f"invoice_id={invoice_id}")
     return serialize_invoice(db, inv)
 
 
@@ -2192,6 +2307,7 @@ def create_employee(payload: EmployeeIn, user: User = Depends(get_current_user),
     db.add(e)
     db.commit()
     db.refresh(e)
+    _log_audit(db, user, "CREATE_EMPLOYEE", f"id={e.id}")
     return serialize_employee(e)
 
 
@@ -2203,6 +2319,7 @@ def delete_employee(employee_id: int, user: User = Depends(get_current_user), db
     bu_scope(user, e.business_unit_id)
     e.is_active = False
     db.commit()
+    _log_audit(db, user, "DELETE_EMPLOYEE", f"employee_id={employee_id}")
     return {"ok": True}
 
 
@@ -2259,6 +2376,7 @@ def create_leave(payload: LeaveIn, user: User = Depends(get_current_user), db: S
     db.add(lv)
     db.commit()
     db.refresh(lv)
+    _log_audit(db, user, "CREATE_LEAVE", f"id={lv.id}")
     return serialize_leave(db, lv)
 
 
@@ -2286,6 +2404,7 @@ def review_leave(leave_id: int, payload: LeaveReview, user: User = Depends(requi
     lv.reviewed_by_id = user.id
     lv.reviewed_at = datetime.utcnow()
     db.commit()
+    _log_audit(db, user, "REVIEW_LEAVE", f"leave_id={leave_id}")
     return serialize_leave(db, lv)
 
 
@@ -2361,6 +2480,7 @@ def create_payroll(payload: PayrollCreate, user: User = Depends(get_current_user
         db.add(PayrollLine(run_id=run.id, employee_id=emp.id, base_salary=emp.base_salary))
     db.commit()
     db.refresh(run)
+    _log_audit(db, user, "CREATE_PAYROLL", f"id={run.id}")
     return serialize_payroll(db, run)
 
 
@@ -2393,6 +2513,7 @@ def update_payroll_line(run_id: int, line_id: int, payload: PayrollLineUpdate,
         line.deductions = new_ded
     db.commit()
     db.refresh(run)
+    _log_audit(db, user, "UPDATE_PAYROLL_LINE", f"run_id={run_id}")
     return serialize_payroll(db, run)
 
 
@@ -2407,6 +2528,7 @@ def approve_payroll(run_id: int, user: User = Depends(require_roles("Chairman", 
     run.approved_by_id = user.id
     db.commit()
     db.refresh(run)
+    _log_audit(db, user, "APPROVE_PAYROLL", f"run_id={run_id}")
     return serialize_payroll(db, run)
 
 
@@ -2503,6 +2625,7 @@ def pay_payroll(run_id: int, user: User = Depends(require_roles("Chairman", "HO"
     db.refresh(run)
     out = serialize_payroll(db, run)
     out["journal_posted"] = True
+    _log_audit(db, user, "PAY_PAYROLL", f"run_id={run_id}")
     return out
 
 
@@ -2795,6 +2918,7 @@ def create_pos_sale(payload: PosSaleIn, user: User = Depends(get_current_user), 
     db.refresh(sale)
     out = serialize_pos_sale(db, sale)
     out["journal_posted"] = journal_posted
+    _log_audit(db, user, "CREATE_POS_SALE", f"id={sale.id}")
     return out
 
 
@@ -2881,6 +3005,7 @@ def void_pos_sale(sale_id: int, user: User = Depends(get_current_user), db: Sess
     sale.voided_at = datetime.utcnow()
     db.commit()
     db.refresh(sale)
+    _log_audit(db, user, "VOID_POS_SALE", f"sale_id={sale_id}")
     return serialize_pos_sale(db, sale)
 
 
@@ -2977,6 +3102,7 @@ def create_quotation(payload: QuotationIn, user: User = Depends(get_current_user
     _fill_quotation_lines(db, q, payload.lines)
     db.commit()
     db.refresh(q)
+    _log_audit(db, user, "CREATE_QUOTATION", f"id={q.id}")
     return serialize_quotation(db, q)
 
 
@@ -3017,6 +3143,7 @@ def update_quotation(quotation_id: int, payload: QuotationUpdate,
         _fill_quotation_lines(db, q, payload.lines)
     db.commit()
     db.refresh(q)
+    _log_audit(db, user, "UPDATE_QUOTATION", f"quotation_id={quotation_id}")
     return serialize_quotation(db, q)
 
 
@@ -3038,6 +3165,7 @@ def set_quotation_status(quotation_id: int, payload: QuotationStatusIn,
     q.status = payload.status
     db.commit()
     db.refresh(q)
+    _log_audit(db, user, "SET_QUOTATION_STATUS", f"quotation_id={quotation_id}")
     return serialize_quotation(db, q)
 
 
@@ -3075,6 +3203,7 @@ def convert_quotation(quotation_id: int, user: User = Depends(get_current_user),
     q.converted_invoice_id = inv.id
     db.commit()
     db.refresh(inv)
+    _log_audit(db, user, "CONVERT_QUOTATION", f"quotation_id={quotation_id}")
     return serialize_invoice(db, inv)
 
 
@@ -3222,6 +3351,7 @@ def create_sales_return(payload: SalesReturnIn, user: User = Depends(get_current
     db.refresh(r)
     out = serialize_sales_return(db, r)
     out["journal_posted"] = journal_posted
+    _log_audit(db, user, "CREATE_SALES_RETURN", f"id={r.id}")
     return out
 
 
@@ -3348,6 +3478,7 @@ def create_purchase_return(payload: PurchaseReturnIn, user: User = Depends(get_c
     db.refresh(r)
     out = serialize_purchase_return(db, r)
     out["journal_posted"] = journal_posted
+    _log_audit(db, user, "CREATE_PURCHASE_RETURN", f"id={r.id}")
     return out
 
 
@@ -3543,6 +3674,7 @@ def add_serials(item_id: int, payload: SerialAddIn, user: User = Depends(get_cur
     db.commit()
     for row in rows:
         db.refresh(row)
+    _log_audit(db, user, "ADD_SERIALS", f"item_id={item_id}")
     return {"items": [serialize_serial(db, r) for r in rows], "count": len(rows)}
 
 
@@ -3588,6 +3720,7 @@ def set_serial_status(serial_id: int, payload: SerialStatusIn,
         s.sold_at = None
     db.commit()
     db.refresh(s)
+    _log_audit(db, user, "SET_SERIAL_STATUS", f"serial_id={serial_id}")
     return serialize_serial(db, s)
 
 
@@ -3649,6 +3782,7 @@ def create_advance(payload: AdvanceIn, user: User = Depends(get_current_user), d
     db.add(adv)
     db.commit()
     db.refresh(adv)
+    _log_audit(db, user, "CREATE_ADVANCE", f"id={adv.id}")
     return serialize_advance(db, adv)
 
 
@@ -3695,6 +3829,7 @@ def approve_advance(advance_id: int, user: User = Depends(require_admin), db: Se
     db.refresh(adv)
     out = serialize_advance(db, adv)
     out["journal_posted"] = True
+    _log_audit(db, user, "APPROVE_ADVANCE", f"advance_id={advance_id}")
     return out
 
 
@@ -3710,6 +3845,7 @@ def reject_advance(advance_id: int, user: User = Depends(require_admin), db: Ses
     adv.approved_at = datetime.utcnow()
     db.commit()
     db.refresh(adv)
+    _log_audit(db, user, "REJECT_ADVANCE", f"advance_id={advance_id}")
     return serialize_advance(db, adv)
 
 
@@ -3774,6 +3910,7 @@ def upsert_attendance(payload: AttendanceBulkIn, user: User = Depends(get_curren
     db.commit()
     for row in saved:
         db.refresh(row)
+    _log_audit(db, user, "UPSERT_ATTENDANCE", f"records={len(payload.records)}")
     return {"saved": len(saved), "items": [serialize_attendance(db, r) for r in saved]}
 
 

@@ -1,3 +1,4 @@
+import logging
 import threading
 import time
 from collections import defaultdict, deque
@@ -13,9 +14,9 @@ from sqlalchemy.orm import Session
 
 from src.auth import require_roles, resolve_redirect_path
 from src.database import get_db
-from src.models import ActivityLog, BusinessUnit, CeoProfile, DailyFinancial, FinancialNote, HealthStatus, MonthlyTarget, SocialLog, User
+from src.models import ActivityLog, BusinessUnit, CeoProfile, DailyFinancial, FinancialNote, HealthStatus, MonthlyTarget, Notification, SocialLog, User
 from src.r2_storage import is_configured as r2_is_configured
-from src.r2_storage import upload_fileobj
+from src.r2_storage import upload_attachment_or_503, upload_fileobj
 from src.schemas import CeoProfileRequest, FinancialNoteRequest, MonthlyTargetRequest
 from src.upload_validation import content_matches_extension
 from src.utils import (
@@ -68,6 +69,8 @@ _report_submit_lock = threading.Lock()
 
 MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 ALLOWED_ATTACHMENT_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "gif", "webp", "doc", "docx", "xls", "xlsx", "csv", "txt"}
+
+logger = logging.getLogger(__name__)
 
 MAX_PROFILE_PHOTO_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
 ALLOWED_PROFILE_PHOTO_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
@@ -297,7 +300,14 @@ def ceo_dashboard(
     )
 
     business_unit = db.query(BusinessUnit).filter(BusinessUnit.id == user.business_unit_id).first()
-    ceo_profile_row = db.query(CeoProfile).filter(CeoProfile.user_id == user.id).first()
+    try:
+        ceo_profile_row = db.query(CeoProfile).filter(CeoProfile.user_id == user.id).first()
+    except RuntimeError:
+        # D-6: a profile row encrypted under a lost/rotated-out key must not
+        # 500 the dashboard — show no profile instead (GET /api/ceo/profile
+        # reports the individual fields as "unavailable").
+        db.rollback()
+        ceo_profile_row = None
 
     recent_financials = (
         db.query(DailyFinancial)
@@ -379,6 +389,7 @@ def ceo_dashboard(
     def _financial_payload(f):
         return {
             "revenue": float(f.revenue),
+            "revenue_anomaly": bool(getattr(f, "revenue_anomaly", False)),
             "expenses": float(f.expenses),
             "net_profit": float(f.net_profit),
             "cash_in_hand": float(f.cash_in_hand),
@@ -656,20 +667,47 @@ def set_monthly_target(
 def get_profile(user: User = Depends(require_roles("CEO")), db: Session = Depends(get_db)):
     """Fetches the CEO's own mandatory profile — pre-fills the Profile Setup
     form with whatever's already on file (blank fields on first visit)."""
-    profile = db.query(CeoProfile).filter(CeoProfile.user_id == user.id).first()
+    from sqlalchemy.orm import load_only
+
+    decrypt_failed = False
+    try:
+        profile = db.query(CeoProfile).filter(CeoProfile.user_id == user.id).first()
+    except RuntimeError:
+        # D-6: a row encrypted under a lost/rotated-out key must not 500 the
+        # whole page. The encrypted columns are unreadable, so re-read only
+        # the plaintext columns and report the encrypted ones as unavailable.
+        decrypt_failed = True
+        db.rollback()
+        profile = (
+            db.query(CeoProfile)
+            .options(load_only(CeoProfile.id, CeoProfile.user_id, CeoProfile.executive_title,
+                               CeoProfile.business_details, CeoProfile.profile_pic_url))
+            .filter(CeoProfile.user_id == user.id)
+            .first()
+        )
     bu = db.query(BusinessUnit).filter(BusinessUnit.id == user.business_unit_id).first()
 
+    unavailable = "unavailable"
     return {
         "is_profile_completed": user.is_profile_completed,
         "full_name": user.full_name,
         "executive_title": profile.executive_title if profile else "Chief Executive Officer",
-        "phone_number": profile.phone_number if profile else None,
-        "email": profile.email if profile else None,
-        "date_of_birth": profile.date_of_birth.isoformat() if profile and profile.date_of_birth else None,
-        "age": calculate_age(profile.date_of_birth) if profile and profile.date_of_birth else None,
-        "address": profile.address if profile else None,
+        "phone_number": unavailable if decrypt_failed else (profile.phone_number if profile else None),
+        "email": unavailable if decrypt_failed else (profile.email if profile else None),
+        "date_of_birth": (
+            None
+            if decrypt_failed or not profile or not profile.date_of_birth
+            else profile.date_of_birth.isoformat()
+        ),
+        "age": (
+            None
+            if decrypt_failed or not profile or not profile.date_of_birth
+            else calculate_age(profile.date_of_birth)
+        ),
+        "address": unavailable if decrypt_failed else (profile.address if profile else None),
         "business_details": profile.business_details if profile else None,
         "profile_pic_url": profile.profile_pic_url if profile else None,
+        "profile_fields_unavailable": decrypt_failed,
         # This app is strictly one CEO per business unit, so this is always a
         # single-element array — kept as an array (rather than one bu_id
         # field) to match how the Admin Dashboard wants to render/filter it.
@@ -1058,7 +1096,9 @@ def submit_report(
         if not content_matches_extension(extension, attachment.file):
             raise HTTPException(status_code=400, detail="File content does not match its file type")
 
-        document_url = upload_fileobj(attachment.file, attachment.filename)
+        # D-4: an attachment that cannot be stored fails the submit (503)
+        # instead of saving the report as if the evidence were attached.
+        document_url = upload_attachment_or_503(attachment.file, attachment.filename)
 
     financial = (
         db.query(DailyFinancial)
@@ -1310,6 +1350,46 @@ def submit_report(
             changes += compute_field_changes(previous_health, current_health)
         if previous_social is not None:
             changes += compute_field_changes(previous_social, current_social)
+
+    # D-14(b): anomaly flag on the auto-posted figure — today's revenue vs
+    # the BU's trailing 14-day average (today excluded). A >50% deviation
+    # flags the row for HO review and notifies HO users; the flag is stored
+    # on the row so it survives resubmissions and is visible to every
+    # review view that reads the row.
+    revenue_anomaly = False
+    anomaly_avg = None
+    try:
+        window_start = report_date - timedelta(days=14)
+        prior_amounts = [
+            float(r[0] or 0)
+            for r in db.query(DailyFinancial.revenue).filter(
+                DailyFinancial.business_unit_id == user.business_unit_id,
+                DailyFinancial.report_date >= window_start,
+                DailyFinancial.report_date < report_date,
+            ).all()
+        ]
+        if prior_amounts:
+            anomaly_avg = sum(prior_amounts) / len(prior_amounts)
+            if anomaly_avg > 0 and abs(float(revenue_val or 0) - anomaly_avg) / anomaly_avg > 0.5:
+                revenue_anomaly = True
+    except Exception as exc:
+        # Never break a submission over the anomaly check itself.
+        logger.warning("revenue anomaly check failed for BU %s: %s", user.business_unit_id, exc)
+    financial.revenue_anomaly = revenue_anomaly
+    if revenue_anomaly:
+        bu = db.query(BusinessUnit).filter(BusinessUnit.id == user.business_unit_id).first()
+        bu_label = bu.name if bu else f"BU {user.business_unit_id}"
+        deviation = (float(revenue_val or 0) - anomaly_avg) / anomaly_avg * 100
+        for ho_user in db.query(User).filter(User.role == "HO", User.is_active == True).all():  # noqa: E712
+            db.add(Notification(
+                user_id=ho_user.id, type="alert",
+                title=f"Revenue anomaly: {bu_label}",
+                message=(
+                    f"Revenue Ks {float(revenue_val or 0):,.0f} on {report_date.isoformat()} "
+                    f"vs 14-day average Ks {anomaly_avg:,.0f} ({deviation:+.0f}%) — please review."
+                ),
+                link=f"/admin/business-unit/{user.business_unit_id}",
+            ))
 
     audit_detail = build_resubmit_audit_detail(report_date, changes)
     log_audit(db, user, "DAILY_REPORT_SUBMITTED", audit_detail, request)

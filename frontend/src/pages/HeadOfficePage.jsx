@@ -19,7 +19,7 @@ import {
   QUADRANT_STATUS_LABEL,
 } from '../utils/quadrantMetrics';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
-import { safeUrl } from '../utils/safeUrl';
+import { viewUploadUrl } from '../utils/safeUrl';
 import { validateAttachment } from '../utils/attachmentValidation';
 
 const inputClass =
@@ -844,9 +844,9 @@ export default function HeadOfficePage() {
                   Supporting Document <span className="text-slate-400 font-normal">(optional)</span>
                 </label>
                 <input type="file" onChange={handleAttachmentChange} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-brand-500/10 file:text-brand-600 hover:file:bg-brand-500/20" />
-                {safeUrl(data.activity?.document_url) && (
+                {viewUploadUrl(data.activity?.document_url) && (
                   <p className="mt-2 text-xs text-slate-500">
-                    Current file: <a href={safeUrl(data.activity.document_url)} target="_blank" rel="noreferrer" className="text-brand-600 dark:text-brand-400 hover:underline">View attachment</a>
+                    Current file: <a href={viewUploadUrl(data.activity.document_url)} target="_blank" rel="noreferrer" className="text-brand-600 dark:text-brand-400 hover:underline">View attachment</a>
                   </p>
                 )}
               </div>
@@ -1078,8 +1078,8 @@ export default function HeadOfficePage() {
                           <p className="text-slate-700 dark:text-slate-300 line-clamp-2">{currentReview.other_notes}</p>
                         </div>
                       )}
-                      {safeUrl(currentReview.document_url) && (
-                        <a href={safeUrl(currentReview.document_url)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-xs font-semibold text-brand-600 dark:text-brand-400 hover:text-brand-700 dark:hover:text-brand-300 pt-1">
+                      {viewUploadUrl(currentReview.document_url) && (
+                        <a href={viewUploadUrl(currentReview.document_url)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-xs font-semibold text-brand-600 dark:text-brand-400 hover:text-brand-700 dark:hover:text-brand-300 pt-1">
                           View attachment
                         </a>
                       )}
@@ -1299,8 +1299,8 @@ function HistoryRow({ a }) {
               <div><p className="text-slate-500 font-semibold uppercase tracking-wide text-[10px] mb-1">Key Decisions Made</p><p className="text-slate-700 dark:text-slate-300">{a.key_decisions || '—'}</p></div>
               <div><p className="text-slate-500 font-semibold uppercase tracking-wide text-[10px] mb-1">Next Day Schedule</p><p className="text-slate-700 dark:text-slate-300">{a.next_day_schedule || '—'}</p></div>
             </div>
-            {safeUrl(a.document_url) && (
-              <a href={safeUrl(a.document_url)} target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-brand-600 dark:text-brand-400 hover:text-brand-700 dark:hover:text-brand-300">
+            {viewUploadUrl(a.document_url) && (
+              <a href={viewUploadUrl(a.document_url)} target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-brand-600 dark:text-brand-400 hover:text-brand-700 dark:hover:text-brand-300">
                 View attachment
               </a>
             )}

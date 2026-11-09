@@ -38,6 +38,31 @@ require_admin = require_roles("Chairman", "HO")
 
 ZERO = Decimal("0")
 
+def _log_audit(db, user, action, details=""):
+    """Local wrapper around src.utils.log_audit (R-3 audit trail).
+
+    Two normalisations, both deliberate: (1) callers in the test suite pass
+    duck-typed user objects (SimpleNamespace with id/role but no
+    .username), which log_audit reads directly — the actor is re-shaped
+    into the (id, username) pair log_audit needs instead of crashing the
+    request; (2) an audit-write failure must never fail a business
+    operation that already committed, so it is logged and swallowed (the
+    D-8 direction: audit is evidence, not part of the money transaction).
+    """
+    from types import SimpleNamespace
+
+    actor = user
+    if user is not None and not hasattr(user, "username"):
+        actor = SimpleNamespace(
+            id=getattr(user, "id", None),
+            username=f"user-{getattr(user, 'id', '?')}",
+        )
+    try:
+        log_audit(db, actor, action, details)
+    except Exception as exc:  # noqa: BLE001 - audit must not break the op
+        logger.warning("audit write failed for %s: %s", action, exc)
+
+
 
 # ---------------------------------------------------------------- helpers
 
@@ -389,6 +414,7 @@ def provision_bu(bu_id: int, template: str = "retail",
             if codes == template_codes:
                 bu.nature = template
                 db.commit()
+        _log_audit(db, user, "PROVISION_BU", f"bu_id={bu_id}")
         return {"ok": True, "created": 0, "message": "BU already has a chart of accounts"}
     id_by_code: dict[str, int] = {}
     created = 0
@@ -410,6 +436,7 @@ def provision_bu(bu_id: int, template: str = "retail",
             db.add(PostingRule(business_unit_id=None, source_field=field,
                                debit_account_code=dr, credit_account_code=cr))
     db.commit()
+    _log_audit(db, user, "PROVISION_BU", f"bu_id={bu_id}")
     return {"ok": True, "created": created}
 
 
@@ -460,6 +487,7 @@ def create_account(payload: AccountIn, user: User = Depends(require_accounting),
     db.add(acc)
     db.commit()
     db.refresh(acc)
+    _log_audit(db, user, "CREATE_ACCOUNT", f"id={acc.id}")
     return serialize_account(acc)
 
 
@@ -493,6 +521,7 @@ def update_account(account_id: int, payload: AccountUpdate,
         acc.is_active = payload.is_active
     db.commit()
     db.refresh(acc)
+    _log_audit(db, user, "UPDATE_ACCOUNT", f"account_id={account_id}")
     return serialize_account(acc)
 
 
@@ -531,6 +560,7 @@ def create_journal(payload: JournalIn, user: User = Depends(require_accounting),
         e.approval_status = "pending"
     db.commit()
     db.refresh(e)
+    _log_audit(db, user, "CREATE_JOURNAL", f"id={e.id}")
     return serialize_entry(db, e)
 
 
@@ -594,6 +624,7 @@ def post_journal(entry_id: int, user: User = Depends(require_accounting),
     e.posted_at = datetime.utcnow()
     db.commit()
     db.refresh(e)
+    _log_audit(db, user, "POST_JOURNAL", f"entry_id={entry_id}")
     return serialize_entry(db, e)
 
 
@@ -612,6 +643,7 @@ def approve_journal(entry_id: int, user: User = Depends(require_admin),
     e.approval_status = "approved"
     db.commit()
     db.refresh(e)
+    _log_audit(db, user, "APPROVE_JOURNAL", f"entry_id={entry_id}")
     return serialize_entry(db, e)
 
 
@@ -628,6 +660,7 @@ def reject_journal_approval(entry_id: int, user: User = Depends(require_admin),
     e.approval_status = "rejected"
     db.commit()
     db.refresh(e)
+    _log_audit(db, user, "REJECT_JOURNAL_APPROVAL", f"entry_id={entry_id}")
     return serialize_entry(db, e)
 
 
@@ -645,6 +678,7 @@ def reverse_journal(entry_id: int, user: User = Depends(require_accounting),
     rev = _reverse_entry(db, e, user.id)
     db.commit()
     db.refresh(rev)
+    _log_audit(db, user, "REVERSE_JOURNAL", f"entry_id={entry_id}")
     return serialize_entry(db, rev)
 
 
@@ -659,6 +693,7 @@ def delete_journal(entry_id: int, user: User = Depends(require_accounting),
         raise HTTPException(400, "Posted entries cannot be deleted — reverse instead")
     db.delete(e)
     db.commit()
+    _log_audit(db, user, "DELETE_JOURNAL", f"entry_id={entry_id}")
     return {"ok": True}
 
 
@@ -1021,6 +1056,7 @@ def reopen_period(payload: PeriodAction, user: User = Depends(require_admin),
         row.closed_by_id = None
         row.closed_at = None
         db.commit()
+    _log_audit(db, user, "REOPEN_PERIOD", f"business_unit_id={payload.business_unit_id} period={payload.period}")
     return {"ok": True, "period": payload.period, "status": "open"}
 
 
@@ -1106,6 +1142,7 @@ def upsert_posting_rule(payload: PostingRuleIn, user: User = Depends(require_acc
     row.debit_account_code = debit
     row.credit_account_code = credit
     db.commit()
+    _log_audit(db, user, "UPSERT_POSTING_RULE", f"business_unit_id={payload.business_unit_id} field={payload.source_field}")
     return {"ok": True}
 
 
@@ -1185,6 +1222,7 @@ async def opening_balance(business_unit_id: int, as_of: date,
                      user.id, lines, post=True)
     db.commit()
     db.refresh(e)
+    _log_audit(db, user, "OPENING_BALANCE", f"business_unit_id={business_unit_id}")
     return serialize_entry(db, e)
 
 
@@ -1238,6 +1276,7 @@ def create_fixed_asset(payload: FixedAssetIn, user: User = Depends(require_accou
     db.add(a)
     db.commit()
     db.refresh(a)
+    _log_audit(db, user, "CREATE_FIXED_ASSET", f"id={a.id}")
     return serialize_asset(a)
 
 
@@ -1250,6 +1289,7 @@ def dispose_fixed_asset(asset_id: int, user: User = Depends(require_accounting),
     check_bu_access(user, a.business_unit_id)
     a.status = "disposed"
     db.commit()
+    _log_audit(db, user, "DISPOSE_FIXED_ASSET", f"asset_id={asset_id}")
     return serialize_asset(a)
 
 
@@ -1302,6 +1342,7 @@ def run_depreciation(payload: DepreciateIn, user: User = Depends(require_account
             a.last_depreciated_period = payload.period
         db.commit()
         journal_posted = True
+    _log_audit(db, user, "RUN_DEPRECIATION", f"business_unit_id={payload.business_unit_id} period={payload.period}")
     return {"ok": True, "assets_depreciated": len(planned), "total": fmt(total),
             "journal_posted": journal_posted}
 
@@ -1346,6 +1387,7 @@ def create_bank_account(payload: BankAccountIn, user: User = Depends(require_acc
     db.add(b)
     db.commit()
     db.refresh(b)
+    _log_audit(db, user, "CREATE_BANK_ACCOUNT", f"id={b.id}")
     return serialize_bank_account(db, b)
 
 
@@ -1385,6 +1427,7 @@ def add_bank_txn(bank_id: int, payload: BankTxnIn, user: User = Depends(require_
     db.add(t)
     db.commit()
     db.refresh(t)
+    _log_audit(db, user, "ADD_BANK_TXN", f"bank_id={bank_id}")
     return {"id": t.id, "ok": True}
 
 
@@ -1403,6 +1446,7 @@ def set_reconciled(txn_id: int, payload: ReconcileIn, user: User = Depends(requi
         check_bu_access(user, bank.business_unit_id)
     t.is_reconciled = payload.is_reconciled
     db.commit()
+    _log_audit(db, user, "SET_RECONCILED", f"txn_id={txn_id}")
     return {"ok": True}
 
 
@@ -1764,6 +1808,7 @@ def upsert_budget(payload: BudgetIn, user: User = Depends(require_accounting),
         db.add(row)
     row.amount = Decimal(str(payload.amount))
     db.commit()
+    _log_audit(db, user, "UPSERT_BUDGET", f"business_unit_id={payload.business_unit_id} period={payload.period} account={payload.account_code}")
     return {"ok": True, "id": row.id}
 
 
@@ -1776,6 +1821,7 @@ def delete_budget(budget_id: int, user: User = Depends(require_accounting),
     check_bu_access(user, row.business_unit_id)
     db.delete(row)
     db.commit()
+    _log_audit(db, user, "DELETE_BUDGET", f"budget_id={budget_id}")
     return {"ok": True}
 
 
@@ -1809,6 +1855,7 @@ def create_exchange_rate(payload: ExchangeRateIn, user: User = Depends(require_a
                      rate=Decimal(str(payload.rate)), created_by_id=user.id)
     db.add(r)
     db.commit()
+    _log_audit(db, user, "CREATE_EXCHANGE_RATE", f"id={r.id}")
     return {"ok": True, "id": r.id}
 
 
@@ -1937,6 +1984,7 @@ def create_intercompany(payload: IntercompanyIn, user: User = Depends(require_ac
     # One commit for the transaction + both journals together.
     db.commit()
     db.refresh(t)
+    _log_audit(db, user, "CREATE_INTERCOMPANY", f"id={t.id}")
     return serialize_intercompany(t)
 
 
@@ -1970,6 +2018,7 @@ def settle_intercompany(txn_id: int, user: User = Depends(require_accounting),
     t.status = "settled"
     t.settled_at = datetime.utcnow()
     db.commit()
+    _log_audit(db, user, "SETTLE_INTERCOMPANY", f"txn_id={txn_id}")
     return serialize_intercompany(t)
 
 
@@ -2135,6 +2184,7 @@ def year_close(payload: YearCloseIn, user: User = Depends(require_roles("Chairma
         prow.closed_by_id = user.id
         prow.closed_at = datetime.utcnow()
     db.commit()
+    _log_audit(db, user, "YEAR_CLOSE", f"business_unit_id={payload.business_unit_id} year={payload.year}")
     return {"year": payload.year, "entry_no": entry.entry_no,
             "total_income": fmt(total_income), "total_expenses": fmt(total_expense),
             "net_profit": fmt(net_profit)}

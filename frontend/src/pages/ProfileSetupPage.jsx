@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useAuth, resolveHomePath, roleHomePath } from '../context/AuthContext';
 import { ApiError, api } from '../api/client';
 import DatePicker from '../components/DatePicker';
-import { safeUrl } from '../utils/safeUrl';
+import { viewUploadUrl } from '../utils/safeUrl';
 
 const TODAY_ISO = new Date().toISOString().slice(0, 10);
 
@@ -203,8 +203,8 @@ export default function ProfileSetupPage() {
               {!editing && profile ? (
                 <div className="space-y-6">
                   <div className="flex items-center gap-4">
-                    {safeUrl(profile.profile_pic_url) ? (
-                      <img src={safeUrl(profile.profile_pic_url)} alt="" className="w-20 h-20 rounded-full object-cover border border-slate-700 flex-shrink-0" />
+                    {viewUploadUrl(profile.profile_pic_url) ? (
+                      <img src={viewUploadUrl(profile.profile_pic_url)} alt="" className="w-20 h-20 rounded-full object-cover border border-slate-700 flex-shrink-0" />
                     ) : (
                       <div className="w-20 h-20 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center flex-shrink-0">
                         <svg xmlns="http://www.w3.org/2000/svg" className="w-8 h-8 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
@@ -352,9 +352,9 @@ export default function ProfileSetupPage() {
                       Profile Photo <span className="text-slate-500 font-normal">(optional)</span>
                     </label>
                     <div className="flex items-center gap-4">
-                      {photoPreview || safeUrl(existingPhotoUrl) ? (
+                      {photoPreview || viewUploadUrl(existingPhotoUrl) ? (
                         <img
-                          src={photoPreview || safeUrl(existingPhotoUrl)}
+                          src={photoPreview || viewUploadUrl(existingPhotoUrl)}
                           alt="Profile preview"
                           className="w-16 h-16 rounded-full object-cover border border-slate-700 flex-shrink-0"
                         />

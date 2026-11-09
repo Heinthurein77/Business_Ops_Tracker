@@ -22,7 +22,7 @@ import {
   QUADRANT_STATUS_LABEL,
 } from '../utils/quadrantMetrics';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
-import { safeUrl } from '../utils/safeUrl';
+import { viewUploadUrl } from '../utils/safeUrl';
 import { validateAttachment } from '../utils/attachmentValidation';
 
 const emptyTargetForm = {
@@ -970,10 +970,10 @@ export default function CeoDashboardPage() {
                 onChange={handleAttachmentChange}
                 className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-brand-500/10 file:text-brand-600 hover:file:bg-brand-500/20"
               />
-              {safeUrl(data.activity?.document_url) && (
+              {viewUploadUrl(data.activity?.document_url) && (
                 <p className="mt-2 text-xs text-slate-500">
                   Current file:{' '}
-                  <a href={safeUrl(data.activity.document_url)} target="_blank" rel="noreferrer" className="text-brand-600 hover:text-brand-700 underline">
+                  <a href={viewUploadUrl(data.activity.document_url)} target="_blank" rel="noreferrer" className="text-brand-600 hover:text-brand-700 underline">
                     View attachment
                   </a>
                 </p>
