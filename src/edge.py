@@ -506,7 +506,10 @@ class EdgeMiddleware:
                 while recent_429s and recent_429s[0] <= cutoff:
                     recent_429s.popleft()
                 recent_429s.append(now)
-                warned_at = self._write_429_warned_at.get(key, 0.0)
+                # "Never warned" must not suppress the first warning: time.monotonic()
+                # is uptime-based, so a default of 0.0 would silence the first
+                # sustained burst for a whole window after every fresh start.
+                warned_at = self._write_429_warned_at.get(key, float("-inf"))
                 if (
                     len(recent_429s) >= self._WRITE_429_SUSTAINED_COUNT
                     and now - warned_at >= self._write_window

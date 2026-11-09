@@ -418,6 +418,23 @@ class TestWriteBudget:
             assert status == 429
         assert "Sustained write rate limiting for user:chairman" in caplog.text
 
+    def test_sustained_429s_log_immediately_on_a_fresh_process(self, caplog):
+        # Regression: warned_at defaulted to 0.0, and time.monotonic() is
+        # uptime-based, so on a freshly started process the first sustained
+        # burst was silently suppressed for a whole window (the suite went
+        # red when run within 5 minutes of boot). Freezing the clock near
+        # boot must still log.
+        app = self._middleware()
+        caplog.set_level(logging.WARNING, logger="business_ops_tracker.error")
+        headers = self._cookie("chairman")
+        with mock.patch("time.monotonic", return_value=10.0):
+            for _ in range(3):
+                asgi_request(app, "POST", "/api/ops/expenses", headers=headers)
+            for _ in range(3):
+                status, _, _ = asgi_request(app, "POST", "/api/ops/expenses", headers=headers)
+                assert status == 429
+        assert "Sustained write rate limiting for user:chairman" in caplog.text
+
 
 # -------------------------------------------------------------------- D-12
 
