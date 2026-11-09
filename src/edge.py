@@ -22,9 +22,9 @@ import time
 from collections import deque
 from urllib.parse import urlsplit
 
-import jwt
 from starlette.requests import Request
 
+from src.auth import decode_access_token
 from src.client_ip import get_client_ip
 from src.config import settings
 
@@ -218,6 +218,15 @@ class EdgeMiddleware:
         self._export_window = settings.EDGE_EXPORT_RATE_WINDOW
         self._export_hits: dict[str, deque] = {}
 
+        # Write-path budget state (D-10, see _write_budget_retry): a
+        # generous per-user/per-minute budget on mutating /api/* calls.
+        self._write_limit = settings.EDGE_WRITE_RATE_LIMIT
+        self._write_window = settings.EDGE_WRITE_RATE_WINDOW
+        self._write_hits: dict[str, deque] = {}
+        # Timestamps of 429s per caller, for the sustained-429 warning.
+        self._write_429_hits: dict[str, deque] = {}
+        self._write_429_warned_at: dict[str, float] = {}
+
     # ------------------------------------------------------------------ ASGI
 
     async def __call__(self, scope, receive, send) -> None:
@@ -239,7 +248,7 @@ class EdgeMiddleware:
         unread = receive if method in _UNSAFE_METHODS else None
 
         # 1. Host allowlist (the container HEALTHCHECK hits 127.0.0.1).
-        if self._enforce_hosts and path != "/healthz":
+        if self._enforce_hosts and path not in ("/healthz", "/readyz"):
             host = _request_host(headers.get(b"host", b"").decode("latin-1"))
             if not _host_allowed(host, self._exact_hosts, self._wildcard_suffixes, self._allow_any_host):
                 await self._reject(send, path, 400, "Invalid host header", unread)
@@ -275,6 +284,23 @@ class EdgeMiddleware:
                     path,
                     429,
                     "Too many report or export requests — please slow down",
+                    unread,
+                    extra_headers=[(b"retry-after", str(retry).encode("ascii"))],
+                )
+                return
+
+        # 4b. Write-path rate budget (D-10) — every mutating /api/* call.
+        # Generous (120/min per user) so it only stops scripted abuse, never
+        # a human. Checked after the origin/body steps so rejected requests
+        # don't consume budget.
+        if method in _UNSAFE_METHODS and path.startswith("/api/"):
+            retry = self._write_budget_retry(scope, headers)
+            if retry is not None:
+                await self._reject(
+                    send,
+                    path,
+                    429,
+                    "Too many write requests — please slow down",
                     unread,
                     extra_headers=[(b"retry-after", str(retry).encode("ascii"))],
                 )
@@ -366,20 +392,15 @@ class EdgeMiddleware:
         own = _origin_of(f"{scheme}://{host_header}")
         return own is not None and own == origin
 
-    def _export_budget_retry(self, scope, headers: dict[bytes, bytes]) -> int | None:
-        """Records one hit against the caller's export budget; returns the
-        Retry-After seconds when over budget, else None.
-
-        Sliding window held in process: the deploy is a single container,
-        so per-process state is exact (if that ever changes, move this to
-        the database like the auth throttles in src/throttle.py). Keyed by
-        the session username when the cookie carries a verifiable token —
-        decoded with the same pinned algorithm and required claims the
-        auth layer demands — else by client IP, resolved by the very same
-        helper the throttles use so the two never disagree about who
-        called. A forged cookie therefore only ever budgets the caller's
-        own IP bucket, never someone else's."""
-        key = None
+    def _caller_key(self, scope, headers: dict[bytes, bytes]) -> str:
+        """Who is calling, for the per-caller edge budgets. Keyed by the
+        session username when the cookie carries a token that verifies —
+        decoded with the same function (and the same pinned algorithm and
+        required claims) the auth layer uses — else by client IP, resolved
+        by the very same helper the throttles use so the two never disagree
+        about who called. A forged cookie therefore only ever budgets the
+        caller's own IP bucket, never someone else's. The key is an
+        identifier for budgeting only, never authentication."""
         token = None
         for part in headers.get(b"cookie", b"").decode("latin-1").split(";"):
             name, _, value = part.strip().partition("=")
@@ -387,19 +408,19 @@ class EdgeMiddleware:
                 token = value
                 break
         if token:
-            try:
-                payload = jwt.decode(
-                    token,
-                    settings.JWT_SECRET_KEY,
-                    algorithms=[settings.JWT_ALGORITHM],
-                    options={"require": ["exp", "sub", "tv"]},
-                )
-                if isinstance(payload.get("sub"), str):
-                    key = f"user:{payload['sub']}"
-            except jwt.InvalidTokenError:
-                key = None
-        if key is None:
-            key = f"ip:{get_client_ip(Request(scope)) or 'unknown'}"
+            payload = decode_access_token(token)
+            if payload and isinstance(payload.get("sub"), str):
+                return f"user:{payload['sub']}"
+        return f"ip:{get_client_ip(Request(scope)) or 'unknown'}"
+
+    def _export_budget_retry(self, scope, headers: dict[bytes, bytes]) -> int | None:
+        """Records one hit against the caller's export budget; returns the
+        Retry-After seconds when over budget, else None.
+
+        Sliding window held in process: the deploy is a single container,
+        so per-process state is exact (if that ever changes, move this to
+        the database like the auth throttles in src/throttle.py)."""
+        key = self._caller_key(scope, headers)
 
         now = time.monotonic()
         hits = self._export_hits.setdefault(key, deque())
@@ -418,10 +439,51 @@ class EdgeMiddleware:
         self._export_hits.setdefault(key, hits)
         return None
 
+    # How many 429s from one authenticated caller inside the write window
+    # count as "sustained" and earn a log line (D-10). A single burst that
+    # trips the budget once is not, on its own, worth an alert.
+    _WRITE_429_SUSTAINED_COUNT = 3
+
+    def _write_budget_retry(self, scope, headers: dict[bytes, bytes]) -> int | None:
+        """Same sliding-window mechanism as the export budget, for mutating
+        /api/* calls (D-10). Returns Retry-After seconds when over budget,
+        else None. Sustained 429s from an authenticated user are logged
+        (at most one warning per caller per window) so a compromised
+        account hammering the write path is visible in the logs."""
+        key = self._caller_key(scope, headers)
+
+        now = time.monotonic()
+        hits = self._write_hits.setdefault(key, deque())
+        cutoff = now - self._write_window
+        while hits and hits[0] <= cutoff:
+            hits.popleft()
+        if not hits:
+            self._write_hits.pop(key, None)
+        if len(hits) >= self._write_limit:
+            if key.startswith("user:"):
+                recent_429s = self._write_429_hits.setdefault(key, deque())
+                while recent_429s and recent_429s[0] <= cutoff:
+                    recent_429s.popleft()
+                recent_429s.append(now)
+                warned_at = self._write_429_warned_at.get(key, 0.0)
+                if (
+                    len(recent_429s) >= self._WRITE_429_SUSTAINED_COUNT
+                    and now - warned_at >= self._write_window
+                ):
+                    _error_log.warning(
+                        "Sustained write rate limiting for %s: %d write 429s in %ds",
+                        key, len(recent_429s), self._write_window,
+                    )
+                    self._write_429_warned_at[key] = now
+            return max(1, int(hits[0] + self._write_window - now) + 1)
+        hits.append(now)
+        self._write_hits.setdefault(key, hits)
+        return None
+
     # -------------------------------------------------------------- headers
 
     def _decorate(self, path: str, status: int, raw_headers) -> list[tuple[bytes, bytes]]:
-        if path == "/healthz" or path == "/api" or path.startswith("/api/"):
+        if path in ("/healthz", "/readyz") or path == "/api" or path.startswith("/api/"):
             forced: bytes | None = _NO_STORE
         elif path.startswith("/assets/") and (200 <= status < 300 or status == 304):
             forced = _IMMUTABLE  # hashed filenames, safe to cache forever

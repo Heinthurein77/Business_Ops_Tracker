@@ -1,5 +1,8 @@
-from sqlalchemy import MetaData, create_engine, event
-from sqlalchemy.engine import make_url
+import time
+
+from fastapi import HTTPException
+from sqlalchemy import MetaData, create_engine, event, text
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from src.config import settings
@@ -75,8 +78,83 @@ Base = declarative_base(metadata=MetaData(naming_convention=NAMING_CONVENTION))
 
 
 def get_db():
-    db = SessionLocal()
+    db = _new_validated_session()
     try:
         yield db
+    except Exception as exc:
+        # A transient DB failure mid-request cannot be retried here — the
+        # endpoint already ran and only it knows what to redo — so the
+        # session is rolled back and the failure surfaces as a distinct
+        # 503 "database unavailable" instead of the generic 500 the edge
+        # middleware would otherwise produce. The retry (above) covers
+        # session acquisition; this covers the failure's shape.
+        if is_transient_db_error(exc):
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            raise DatabaseUnavailableError() from exc
+        raise
     finally:
         db.close()
+
+
+class DatabaseUnavailableError(HTTPException):
+    """The database could not be reached (transient failure, pool
+    exhaustion, or a dead connection). 503, not 500, so callers and
+    operators can tell "the database is down" from "the app has a bug"."""
+
+    def __init__(self, detail: str = "Database unavailable — please retry shortly"):
+        super().__init__(status_code=503, detail=detail)
+
+
+# Pause between the failed session-acquisition attempt and the one retry
+# (D-3). A module constant so tests can shrink it to zero.
+DB_RETRY_BACKOFF_SECONDS = 0.5
+
+
+def is_transient_db_error(exc: BaseException) -> bool:
+    """True for the DB failures worth one retry / a 503: lost connections,
+    pool timeouts, and other operational errors. Deliberately NOT every
+    DBAPIError — IntegrityError, ProgrammingError and DataError are
+    application bugs or bad input, and retrying them (or calling them a
+    503) would hide the real problem."""
+    if isinstance(exc, (OperationalError, InterfaceError, SATimeoutError, TimeoutError, ConnectionError)):
+        return True
+    if isinstance(exc, DBAPIError):
+        return isinstance(exc.orig, (OSError, TimeoutError, ConnectionError))
+    return False
+
+
+def _new_validated_session():
+    """Opens a session and proves the pooled connection is alive with a
+    cheap SELECT 1. On a transient failure the dead session is discarded
+    and one fresh session is tried; if that fails too, the request gets a
+    503 "database unavailable" instead of waiting out a pool timeout and
+    surfacing as a generic 500."""
+    db = SessionLocal()
+    try:
+        db.execute(text("SELECT 1"))
+        return db
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+        if not is_transient_db_error(exc):
+            raise
+        time.sleep(DB_RETRY_BACKOFF_SECONDS)
+        retry_db = SessionLocal()
+        try:
+            retry_db.execute(text("SELECT 1"))
+            return retry_db
+        except Exception as retry_exc:
+            try:
+                retry_db.rollback()
+            except Exception:
+                pass
+            retry_db.close()
+            if is_transient_db_error(retry_exc):
+                raise DatabaseUnavailableError() from retry_exc
+            raise

@@ -85,7 +85,7 @@ services:
     # assume a small managed database.
     instance_count: 1
     health_check:
-      http_path: /healthz
+      http_path: /readyz
       initial_delay_seconds: 20
       period_seconds: 10
       timeout_seconds: 5

@@ -214,7 +214,7 @@ def create_entry(db: Session, bu_id: int, entry_date: date, description: str,
         raise HTTPException(409, f"Journal entry number {e.entry_no} already exists — please retry")
     for ln in lines:
         db.add(JournalLine(
-            entry_id=e.id, account_id=ln["account_id"],
+            entry_id=e.id, business_unit_id=bu_id, account_id=ln["account_id"],
             debit=Decimal(str(ln.get("debit") or 0)),
             credit=Decimal(str(ln.get("credit") or 0)),
             memo=ln.get("memo"),

@@ -7,6 +7,7 @@ the business-unit detail page.
 """
 import calendar as calendar_module
 import json
+import logging
 import re
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -15,12 +16,14 @@ from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, Request
 from sqlalchemy import case, func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from src.config import settings
 from src.models import ActivityLog, AuditLog, CeoProfile, DailyFinancial, HeadOfficeDailyFinancial, HealthStatus, MonthlyTarget, SocialLog, User
 
 APP_TZ = ZoneInfo(settings.APP_TIMEZONE)
+
+_audit_log = logging.getLogger("business_ops_tracker.audit")
 
 PHYSICAL_HEALTH_OPTIONS = ["Healthy", "Tired", "Sick"]
 STRESS_LEVEL_OPTIONS = ["Low", "Medium", "High"]
@@ -396,12 +399,22 @@ def log_audit(
     request: Optional[Request] = None,
     username: Optional[str] = None,
 ):
-    """Writes one audit row and commits. `username` is recorded when there is
-    no authenticated `user` (e.g. a failed login for a name that may not
+    """Writes one audit row. `username` is recorded when there is no
+    authenticated `user` (e.g. a failed login for a name that may not
     exist), so those events stay attributable and countable by the throttle.
     Anything a caller may have copied from the outside world is scrubbed here
     — control characters/newlines can't forge log lines, and length is capped
-    so an unauthenticated request can't stuff the table."""
+    so an unauthenticated request can't stuff the table.
+
+    D-8: the row is written on its OWN short-lived session (bound to the
+    same engine as the caller's session, so tests with a private engine
+    still see the row), never on the caller's session — so it neither
+    commits the caller's pending business transaction nor gets rolled
+    back with it. The signature is unchanged. An audit-write failure is
+    logged and swallowed: losing one audit row must never fail the
+    request it was recording (and an audit row for an operation whose
+    business transaction then rolls back stays as the record that the
+    attempt happened)."""
     # Imported here (not at module top) to keep this function self-contained.
     from src.client_ip import get_client_ip
     from src.throttle import MAX_USERNAME_LEN, strip_control_chars
@@ -424,8 +437,40 @@ def log_audit(
         details=text[:details_limit],
         ip_address=get_client_ip(request),
     )
-    db.add(entry)
-    db.commit()
+    audit_db = _audit_session(db)
+    try:
+        audit_db.add(entry)
+        audit_db.commit()
+    except Exception:
+        # Non-fatal by design (see docstring): never let the audit trail
+        # break the request it is recording.
+        _audit_log.warning("Audit log write failed for action=%s", action, exc_info=True)
+        try:
+            audit_db.rollback()
+        except Exception:
+            pass
+    finally:
+        audit_db.close()
+
+
+def _audit_session(db: Optional[Session]):
+    """A fresh short-lived session on the same engine as the caller's
+    session, so the audit write is its own transaction. `get_bind()`
+    returns the engine for a normal session; if it ever returns a
+    Connection (a session mid-transaction), its `.engine` is used so the
+    audit session gets a separate pooled connection and cannot commit or
+    roll back the caller's work. Falls back to the app's SessionLocal
+    when no usable bind is available."""
+    try:
+        bind = db.get_bind() if db is not None else None
+    except Exception:
+        bind = None
+    if bind is not None:
+        engine = getattr(bind, "engine", bind)
+        return sessionmaker(bind=engine)()
+    from src.database import SessionLocal
+
+    return SessionLocal()
 
 
 # --- Legacy (pre-expansion) resubmit-change format — financial fields only,

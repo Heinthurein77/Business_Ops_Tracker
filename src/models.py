@@ -7,6 +7,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
@@ -684,6 +685,11 @@ class Account(Base):
     __tablename__ = "accounts"
     __table_args__ = (
         UniqueConstraint("business_unit_id", "code", name="uq_account_bu_code"),
+        # D-12: the composite-FK target for journal_lines — a line's
+        # (business_unit_id, account_id) must reference an account of that
+        # same BU. (business_unit_id, id) has to be UNIQUE for Postgres to
+        # accept it as an FK target even though id alone is already the PK.
+        UniqueConstraint("business_unit_id", "id", name="uq_accounts_bu_id"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -741,16 +747,36 @@ class JournalEntry(Base):
 
 class JournalLine(Base):
     __tablename__ = "journal_lines"
+    __table_args__ = (
+        # D-12: DB-level guard that a line's account belongs to the entry's
+        # BU. The plain account_id FK alone can't express that; this
+        # composite FK ties (business_unit_id, account_id) to the same
+        # pair on accounts, so a cross-BU line is rejected by the database
+        # even from a code path that never calls validate_lines().
+        ForeignKeyConstraint(
+            ["business_unit_id", "account_id"],
+            ["accounts.business_unit_id", "accounts.id"],
+            name="fk_journal_lines_bu_account_accounts",
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     entry_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=False, index=True)
+    # Denormalised from the entry (set by create_entry): the BU half of the
+    # composite FK above. Nullable only so pre-existing direct JournalLine
+    # constructions (migration-chain smoke test) keep working; every
+    # application write goes through create_entry, which always sets it.
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=True, index=True)
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False, index=True)
     debit = Column(Numeric(16, 2), default=0, nullable=False)
     credit = Column(Numeric(16, 2), default=0, nullable=False)
     memo = Column(String(255), nullable=True)
 
     entry = relationship("JournalEntry", back_populates="lines")
-    account = relationship("Account")
+    # D-12 added a second FK path to accounts (the composite
+    # (business_unit_id, account_id) guard above); the join must be pinned
+    # to account_id or mapper configuration fails as ambiguous.
+    account = relationship("Account", foreign_keys=[account_id])
 
 
 class FiscalPeriod(Base):
@@ -1612,3 +1638,19 @@ class AttendanceRecord(Base):
 
     employee = relationship("Employee")
     business_unit = relationship("BusinessUnit")
+
+
+class JobHeartbeat(Base):
+    """Dead-man heartbeat for scheduled jobs (R-6 / A-1).
+
+    One row per job, upserted by the job itself after each run. The
+    log-scan job (src/jobs/log_scan.py) alerts the Chairman when a row is
+    stale (> 36 h) — that is how a silently-dead cron is noticed instead
+    of being discovered months later when the alerts it should have sent
+    never arrive.
+    """
+    __tablename__ = "job_heartbeats"
+
+    job_name = Column(String(80), primary_key=True)
+    last_run_at = Column(DateTime, nullable=False)
+    last_status = Column(String(20), nullable=False)  # ok / failed

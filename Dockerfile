@@ -61,7 +61,7 @@ ENV PORT=8000
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -f "http://127.0.0.1:${PORT}/healthz" || exit 1
+    CMD curl -f "http://127.0.0.1:${PORT}/readyz" || exit 1
 
 # Runs through `sh -c` so $PORT is expanded at container start (Render sets
 # this dynamically) — but a plain shell-form CMD would leave uvicorn as a

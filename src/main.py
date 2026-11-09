@@ -8,6 +8,8 @@ client-side; FastAPI never returns HTML except the SPA's index.html shell.
 import logging
 import os
 import secrets
+import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -17,7 +19,8 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from src.auth import (
     InsufficientRoleException,
@@ -28,7 +31,7 @@ from src.auth import (
     hash_password,
 )
 from src.config import settings
-from src.database import SessionLocal
+from src.database import SessionLocal, engine
 from src.edge import EdgeMiddleware
 from src.models import BusinessUnit, User
 from src.routers import accounting, admin, auth, ceo, ho, modules, ops, users
@@ -67,6 +70,108 @@ def run_migrations() -> None:
     alembic_cfg = Config(os.path.join(REPO_ROOT, "alembic.ini"))
     alembic_cfg.set_main_option("script_location", os.path.join(REPO_ROOT, "alembic"))
     command.upgrade(alembic_cfg, "head")
+
+
+# ---------------------------------------------------------------------------
+# Startup retries (D-2). Startup used to be all-or-nothing: one Neon blip
+# at boot crashed the process and `restart: unless-stopped` turned it into
+# a tight crash loop, with no way to tell "DB down" from "bad migration"
+# without reading logs. DB-dependent startup steps are now retried with
+# backoff (5 attempts over ~60 s) and the two failure kinds log distinct
+# lines. Traffic is still only served after the steps succeed — lifespan
+# is not restructured to yield early.
+# ---------------------------------------------------------------------------
+
+STARTUP_DB_MAX_ATTEMPTS = 5
+# Seconds between attempts: 5 + 10 + 15 + 30 = 60 s of backoff across the
+# 5 attempts (plus the attempts' own time).
+STARTUP_DB_RETRY_DELAYS = (5, 10, 15, 30)
+
+_DB_UNREACHABLE_MARKERS = (
+    "could not connect",
+    "connection refused",
+    "connection timed out",
+    "could not translate host",
+    "name or service not known",
+    "server closed the connection",
+    "connection reset",
+)
+
+
+def _is_db_unreachable(exc: BaseException) -> bool:
+    """True when the error means "the database cannot be reached" as
+    opposed to "the database answered and the step itself failed". An
+    OperationalError is the usual shape; the message markers cover drivers
+    that surface the same failure differently."""
+    if isinstance(exc, OperationalError):
+        return True
+    message = str(exc).lower()
+    return any(marker in message for marker in _DB_UNREACHABLE_MARKERS)
+
+
+def _run_startup_step(step_name: str, func, *, attempts: int = STARTUP_DB_MAX_ATTEMPTS,
+                      delays=STARTUP_DB_RETRY_DELAYS, sleep=time.sleep):
+    """Runs one DB-dependent startup step, retrying transient failures with
+    backoff. Logs a distinct line for "database unreachable" vs a step that
+    failed on its own merits ("migration failed" / "seeding failed"), then
+    re-raises after the last attempt so the process still fails loudly
+    instead of serving traffic against a broken schema."""
+    last_exc: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return func()
+        except Exception as exc:  # noqa: BLE001 — retried, then re-raised
+            last_exc = exc
+            if attempt == attempts:
+                break
+            delay = delays[min(attempt - 1, len(delays) - 1)]
+            if _is_db_unreachable(exc):
+                logger.warning(
+                    "Startup step %r: database unreachable (attempt %d/%d): %s — retrying in %ss",
+                    step_name, attempt, attempts, exc, delay,
+                )
+            elif step_name == "migrations":
+                logger.warning(
+                    "Startup step 'migrations': migration failed (attempt %d/%d): %s — retrying in %ss",
+                    attempt, attempts, exc, delay,
+                )
+            else:
+                logger.warning(
+                    "Startup step %r failed (attempt %d/%d): %s — retrying in %ss",
+                    step_name, attempt, attempts, exc, delay,
+                )
+            sleep(delay)
+    logger.error(
+        "Startup step %r failed after %d attempts; giving up: %s", step_name, attempts, last_exc
+    )
+    raise last_exc  # type: ignore[misc]
+
+
+# File a generated (random) bootstrap Chairman password is written to
+# instead of the log stream (D-13). It lives under LOCAL_UPLOAD_DIR — the
+# writable volume, /app/uploads in the Docker image — with 0600 perms, and
+# the server operator fetches it with:
+#   docker compose exec web cat /app/uploads/.bootstrap_chairman_password
+# then deletes the file after the first login.
+BOOTSTRAP_PASSWORD_FILENAME = ".bootstrap_chairman_password"
+
+
+def _bootstrap_password_path() -> Path:
+    return Path(settings.LOCAL_UPLOAD_DIR) / BOOTSTRAP_PASSWORD_FILENAME
+
+
+def _write_bootstrap_password_file(password: str) -> Path:
+    """Writes the generated bootstrap password to the 0600 file above and
+    returns its path. The full value never goes to the log stream."""
+    path = _bootstrap_password_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, password.encode("utf-8"))
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
+    return path
 
 
 # Real business unit names, keyed by BU number — falls back to "Business
@@ -133,8 +238,9 @@ def seed_users(db) -> None:
     # a fresh prod database comes up, before its real owner ever has. So a
     # real (ENVIRONMENT=production) deploy only bootstraps the one Chairman
     # account — with the password from BOOTSTRAP_CHAIRMAN_PASSWORD when that
-    # secret is configured (never logged), otherwise a random one logged once
-    # so the deployer can retrieve it from the deploy logs — and stops there;
+    # secret is configured (never logged), otherwise a random one written to
+    # the 0600 file /app/uploads/.bootstrap_chairman_password (see D-13)
+    # — and stops there;
     # every other account is created afterward through Manage Users
     # (Chairman-only), which already hands out its own one-time temporary
     # password per account instead of a fixed, publicly-known string.
@@ -162,10 +268,18 @@ def seed_users(db) -> None:
                         "BOOTSTRAP_CHAIRMAN_PASSWORD secret; a password change is required at first login."
                     )
                 else:
+                    # D-13: the generated password is NOT printed to the log
+                    # stream — anyone with log access would hold the Chairman
+                    # credential. Only a truncated hint plus the file path is
+                    # logged; the full value is in the 0600 file, retrievable
+                    # by the server operator (see _write_bootstrap_password_file).
+                    password_file = _write_bootstrap_password_file(bootstrap_password)
                     logger.warning(
                         "First boot: seeded the 'chairman' account with a random temporary "
-                        "password — record it now, it will not be shown again: %s",
-                        bootstrap_password,
+                        "password — the full value is NOT shown here; it was written to %s "
+                        "(hint: first 4 characters %s…). Delete that file after first login.",
+                        password_file,
+                        bootstrap_password[:4],
                     )
         return
 
@@ -205,7 +319,7 @@ def seed_users(db) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if settings.RUN_MIGRATIONS_ON_STARTUP:
-        run_migrations()
+        _run_startup_step("migrations", run_migrations)
     else:
         logger.info(
             "RUN_MIGRATIONS_ON_STARTUP is false: schema migrations are expected to have "
@@ -213,8 +327,9 @@ async def lifespan(app: FastAPI):
         )
     db = SessionLocal()
     try:
-        seed_business_units(db)
-        seed_users(db)
+        # Seeding is idempotent (existence checks before insert), so a
+        # retried attempt after a partial failure is safe.
+        _run_startup_step("seeding", lambda: (seed_business_units(db), seed_users(db)))
     finally:
         db.close()
     yield
@@ -283,6 +398,40 @@ async def handle_profile_setup_required(request: Request, exc: ProfileSetupRequi
 @app.api_route("/healthz", methods=["GET", "HEAD"])
 def healthz():
     return {"status": "ok"}
+
+
+# Readiness (D-1), split from liveness: /healthz only says the process is
+# up, /readyz proves the database answers. The Docker HEALTHCHECK and the
+# DO health check point at /readyz, so a dead database makes the platform
+# restart / stop routing to the container instead of reporting "healthy"
+# while every API call 500s. The ping runs in a daemon thread bounded by
+# READY_TIMEOUT_SECONDS — a hung database must fail the probe fast, not
+# hang the health check until the platform's own timeout.
+READY_TIMEOUT_SECONDS = 3.0
+
+
+def _db_is_ready(timeout_seconds: float = READY_TIMEOUT_SECONDS) -> bool:
+    result: dict[str, bool] = {}
+
+    def _ping() -> None:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            result["ok"] = True
+        except Exception:
+            result["ok"] = False
+
+    thread = threading.Thread(target=_ping, daemon=True)
+    thread.start()
+    thread.join(timeout_seconds)
+    return result.get("ok", False)
+
+
+@app.api_route("/readyz", methods=["GET", "HEAD"])
+def readyz():
+    if _db_is_ready():
+        return {"status": "ok"}
+    return JSONResponse(status_code=503, content={"status": "not_ready", "detail": "Database unavailable"})
 
 
 # ---------------------------------------------------------------------------

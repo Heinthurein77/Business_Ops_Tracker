@@ -165,6 +165,20 @@ class Settings:
         # Optional: supply the first Chairman password from a secret instead
         # of having the app generate one and print it to the logs.
         self.BOOTSTRAP_CHAIRMAN_PASSWORD: str = os.getenv("BOOTSTRAP_CHAIRMAN_PASSWORD", "")
+        if self.BOOTSTRAP_CHAIRMAN_PASSWORD:
+            # D-13: a weak configured bootstrap password would seed the
+            # Chairman account with it — validate with the same policy every
+            # other password goes through and refuse to start on a weak one.
+            from src.schemas import password_policy_error
+
+            _bootstrap_error = password_policy_error(
+                self.BOOTSTRAP_CHAIRMAN_PASSWORD, username="chairman"
+            )
+            if _bootstrap_error:
+                raise RuntimeError(
+                    "BOOTSTRAP_CHAIRMAN_PASSWORD is too weak — refusing to start: "
+                    f"{_bootstrap_error}"
+                )
 
         # --- Data protection ---
         # Comma-separated Fernet keys, newest first (older ones only decrypt —
@@ -202,6 +216,11 @@ class Settings:
         # single signed-in account can't hammer PDF/Excel generation.
         self.EDGE_EXPORT_RATE_LIMIT: int = int(os.getenv("EDGE_EXPORT_RATE_LIMIT", "60"))
         self.EDGE_EXPORT_RATE_WINDOW: int = int(os.getenv("EDGE_EXPORT_RATE_WINDOW", "300"))
+        # Per-user/per-minute budget for mutating API endpoints, enforced by
+        # the edge middleware (D-10). Generous on purpose (120/min): it only
+        # stops scripted abuse, never a human clicking through the app.
+        self.EDGE_WRITE_RATE_LIMIT: int = int(os.getenv("EDGE_WRITE_RATE_LIMIT", "120"))
+        self.EDGE_WRITE_RATE_WINDOW: int = int(os.getenv("EDGE_WRITE_RATE_WINDOW", "60"))
 
         # --- Cloudflare R2 ---
         self.R2_ACCOUNT_ID: str = os.getenv("R2_ACCOUNT_ID", "")
