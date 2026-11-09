@@ -3,7 +3,8 @@
 #                  or: doctl apps update <APP_ID> --spec .do/app.yaml
 #
 # Before deploying:
-#   1. Replace github.repo / github.branch below (web service AND migrate job).
+#   1. github.repo is set to Heinthurein77/Business_Ops_Tracker below (web
+#      service AND migrate job) — only the branch would need changing.
 #   2. Set the SECRET-type values (JWT_SECRET_KEY, DATA_ENCRYPTION_KEY, R2_*) via
 #      `doctl apps update` or the DO dashboard — the values below are placeholders
 #      and are not stored in git. The app refuses to start with the placeholders.
@@ -72,7 +73,7 @@ services:
     dockerfile_path: Dockerfile
     source_dir: /
     github:
-      repo: your-github-username/business_ops_tracker
+      repo: Heinthurein77/Business_Ops_Tracker
       branch: main
       deploy_on_push: true
     http_port: 8000
@@ -156,7 +157,7 @@ jobs:
     dockerfile_path: Dockerfile
     source_dir: /
     github:
-      repo: your-github-username/business_ops_tracker
+      repo: Heinthurein77/Business_Ops_Tracker
       branch: main
     instance_size_slug: apps-s-1vcpu-0.5gb
     run_command: alembic upgrade head

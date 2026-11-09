@@ -26,13 +26,17 @@ export default function NotificationBell() {
   }
 
   async function markRead(n) {
-    await api.markNotificationRead(n.id);
-    refresh();
+    try {
+      await api.markNotificationRead(n.id);
+      refresh();
+    } catch { /* silent, matching refresh() */ }
   }
 
   async function markAll() {
-    await api.markAllNotificationsRead();
-    refresh();
+    try {
+      await api.markAllNotificationsRead();
+      refresh();
+    } catch { /* silent, matching refresh() */ }
   }
 
   return (

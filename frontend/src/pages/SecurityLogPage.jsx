@@ -31,11 +31,12 @@ const EVENT_FILTERS = [
 
 export default function SecurityLogPage() {
   const [data, setData] = useState(null);
+  const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [eventFilter, setEventFilter] = useState('all');
 
   useEffect(() => {
-    api.securityLog().then(setData);
+    api.securityLog().then(setData).catch((err) => setError(err.message || 'Failed to load security log'));
   }, []);
 
   const filtered = useMemo(() => {
@@ -57,6 +58,17 @@ export default function SecurityLogPage() {
   const hasActiveFilters = search.trim() !== '' || eventFilter !== 'all';
 
   if (!data) {
+    if (error) {
+      return (
+        <div className={`min-h-screen flex items-center justify-center ${PAGE_BG} px-4`}>
+          <div className="max-w-md w-full rounded-xl bg-red-500/10 border border-red-500/20 px-5 py-4 text-sm text-red-700 dark:text-red-400">
+            <p className="font-bold mb-1">Couldn't load this page</p>
+            <p>{error}</p>
+            <button onClick={() => window.location.reload()} className="mt-3 text-xs font-semibold bg-red-600 hover:bg-red-500 text-white px-3.5 py-2 rounded-lg transition-colors">Retry</button>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className={`min-h-screen flex items-center justify-center ${PAGE_BG}`}>
         <div className="w-8 h-8 border-2 border-slate-200 dark:border-slate-700 border-t-brand-600 rounded-full animate-spin" />

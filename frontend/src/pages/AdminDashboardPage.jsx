@@ -71,7 +71,9 @@ export default function AdminDashboardPage() {
   const isDark = theme === 'dark';
   const [searchParams, setSearchParams] = useSearchParams();
   const [ov, setOv] = useState(null);
+  const [ovError, setOvError] = useState('');
   const [detail, setDetail] = useState(null);
+  const [detailError, setDetailError] = useState('');
   const [dateIndex, setDateIndex] = useState(0);
   const [buSelectorOpen, setBuSelectorOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -89,15 +91,19 @@ export default function AdminDashboardPage() {
   }, []);
 
   async function loadOverview() {
-    const data = await api.adminOverview();
-    setOv(data);
-    if (!searchParams.get('bu') && data.operations[0]) {
-      setSearchParams({ bu: String(data.operations[0].bu_id) }, { replace: true });
+    try {
+      const data = await api.adminOverview();
+      setOv(data);
+      if (!searchParams.get('bu') && data.operations[0]) {
+        setSearchParams({ bu: String(data.operations[0].bu_id) }, { replace: true });
+      }
+    } catch (err) {
+      setOvError(err.message || 'Failed to load dashboard');
     }
   }
 
   useEffect(() => {
-    loadOverview();
+    loadOverview().catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -106,8 +112,9 @@ export default function AdminDashboardPage() {
   useEffect(() => {
     if (!selectedBuId) return;
     setDetail(null);
+    setDetailError('');
     setDateIndex(0);
-    api.businessUnitDetail(selectedBuId).then(setDetail);
+    api.businessUnitDetail(selectedBuId).then(setDetail).catch((err) => setDetailError(err.message || 'Failed to load business unit detail'));
   }, [selectedBuId]);
 
   function selectBu(buId) {
@@ -129,6 +136,17 @@ export default function AdminDashboardPage() {
   const greeting = localHour < 12 ? 'Good Morning' : localHour < 17 ? 'Good Afternoon' : 'Good Evening';
 
   if (!ov) {
+    if (ovError) {
+      return (
+        <div className={`min-h-screen flex items-center justify-center ${PAGE_BG} px-4`}>
+          <div className="max-w-md w-full rounded-xl bg-red-500/10 border border-red-500/20 px-5 py-4 text-sm text-red-700 dark:text-red-400">
+            <p className="font-bold mb-1">Couldn't load the dashboard</p>
+            <p>{ovError}</p>
+            <button onClick={() => window.location.reload()} className="mt-3 text-xs font-semibold bg-red-600 hover:bg-red-500 text-white px-3.5 py-2 rounded-lg transition-colors">Retry</button>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className={`min-h-screen flex items-center justify-center ${PAGE_BG}`}>
         <div className="w-8 h-8 border-2 border-slate-200 dark:border-slate-700 border-t-brand-600 rounded-full animate-spin" />
@@ -460,7 +478,15 @@ export default function AdminDashboardPage() {
 
         {!detail ? (
           <section className={`${GLASS} p-10 flex items-center justify-center`}>
-            <div className="w-6 h-6 border-2 border-slate-200 dark:border-slate-700 border-t-brand-600 rounded-full animate-spin" />
+            {detailError ? (
+              <div className="text-sm text-red-700 dark:text-red-400 text-center">
+                <p className="font-bold mb-1">Couldn't load this business unit</p>
+                <p>{detailError}</p>
+                <button onClick={() => window.location.reload()} className="mt-3 text-xs font-semibold bg-red-600 hover:bg-red-500 text-white px-3.5 py-2 rounded-lg transition-colors">Retry</button>
+              </div>
+            ) : (
+              <div className="w-6 h-6 border-2 border-slate-200 dark:border-slate-700 border-t-brand-600 rounded-full animate-spin" />
+            )}
           </section>
         ) : (
           <>

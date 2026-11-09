@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client';
+import { useAuth } from '../context/AuthContext';
 import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
@@ -54,6 +55,12 @@ const thisPeriod = () => new Date().toISOString().slice(0, 7);
 const today = () => new Date().toISOString().slice(0, 10);
 
 export default function AccountingPage() {
+  // BU-assigned accountants see only their BU's books; Chairman/HO-only
+  // actions (journal approval, year-end close, period close/reopen,
+  // exchange-rate entry) 403 for them on the backend, so hide them here
+  // instead of showing dead-end buttons.
+  const { user } = useAuth();
+  const isAccountant = user?.role === 'Accountant';
   const [tab, setTab] = useState('reports');
   const [bus, setBus] = useState([]);
   // "group" (Chairman/HO + legacy accountants) or "bu" (accountant pinned
@@ -453,7 +460,7 @@ export default function AccountingPage() {
                       <td className="py-2 pr-3 text-right tabular-nums">{money(i.budget)}</td>
                       <td className="py-2 pr-3 text-right tabular-nums">{money(i.actual)}</td>
                       <td className={`py-2 pr-3 text-right tabular-nums font-semibold ${i.variance < 0 ? 'text-red-500' : 'text-emerald-600 dark:text-emerald-400'}`}>{money(i.variance)}{i.variance_pct !== null && i.variance_pct !== undefined ? ` (${Number(i.variance_pct).toFixed(0)}%)` : ''}</td>
-                      <td className="py-2 text-right"><button onClick={async () => { await api.accDeleteBudget(i.id); load(); }} className="text-xs font-semibold text-red-500 hover:underline">Remove</button></td>
+                      <td className="py-2 text-right"><button onClick={async () => { try { await api.accDeleteBudget(i.id); load(); } catch (e) { setError(e.message); } }} className="text-xs font-semibold text-red-500 hover:underline">Remove</button></td>
                     </tr>
                   ))}
                   {(!budgets || budgets.items.length === 0) && <tr><td colSpan={5} className="py-6 text-center text-slate-400">No budgets set for this month yet</td></tr>}
@@ -502,7 +509,7 @@ export default function AccountingPage() {
               </section>
             )}
 
-            {(
+            {!isAccountant && (
               <section className={`${GLASS} p-6`}>
                 <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-1.5">Year-End Close</h2>
                 <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">Posts one closing journal on Dec 31 moving the year's profit into Retained Earnings (3200), then closes all 12 periods. Run it while December is still open — it cannot be undone except by reversing the journal.</p>
@@ -675,7 +682,7 @@ export default function AccountingPage() {
                       {e.approval_status === 'pending' && <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300">Awaiting approval</span>}
                       {e.approval_status === 'approved' && <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">Approved</span>}
                       {e.approval_status === 'rejected' && <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300">Approval rejected</span>}
-                      {e.approval_status === 'pending' && <>
+                      {e.approval_status === 'pending' && !isAccountant && <>
                         <button onClick={async () => { try { await api.accApproveJournal(e.id); flash(`${e.entry_no} approved — it can now be posted.`); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Approve</button>
                         <button onClick={async () => { try { await api.accRejectJournalApproval(e.id); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-red-500 hover:underline">Reject</button>
                       </>}
@@ -726,8 +733,8 @@ export default function AccountingPage() {
                           <td className="py-2 pr-3 capitalize text-slate-500">{a.account_type}</td>
                           <td className="py-2 text-right">
                             {a.is_header ? <span className="text-[10px] font-bold text-slate-400">HEADER</span> : a.is_active
-                              ? <button onClick={async () => { await api.accUpdateAccount(a.id, { is_active: false }); loadCoa(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Active</button>
-                              : <button onClick={async () => { await api.accUpdateAccount(a.id, { is_active: true }); loadCoa(); }} className="text-xs font-semibold text-slate-400 hover:underline">Inactive</button>}
+                              ? <button onClick={async () => { try { await api.accUpdateAccount(a.id, { is_active: false }); loadCoa(); } catch (e) { setError(e.message); } }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Active</button>
+                              : <button onClick={async () => { try { await api.accUpdateAccount(a.id, { is_active: true }); loadCoa(); } catch (e) { setError(e.message); } }} className="text-xs font-semibold text-slate-400 hover:underline">Inactive</button>}
                           </td>
                         </tr>
                       ))}
@@ -797,7 +804,7 @@ export default function AccountingPage() {
                       <td className="py-2 pr-3 text-right tabular-nums font-semibold">{money(a.book_value)}</td>
                       <td className="py-2 pr-3 text-right tabular-nums">{money(a.monthly_depreciation)}</td>
                       <td className="py-2 pr-3 text-slate-500">{a.last_depreciated_period || '—'}</td>
-                      <td className="py-2 text-right">{a.status === 'active' && <button onClick={async () => { await api.accDisposeAsset(a.id); load(); }} className="text-xs font-semibold text-red-500 hover:underline">Dispose</button>}</td>
+                      <td className="py-2 text-right">{a.status === 'active' && <button onClick={async () => { try { await api.accDisposeAsset(a.id); load(); } catch (e) { setError(e.message); } }} className="text-xs font-semibold text-red-500 hover:underline">Dispose</button>}</td>
                     </tr>
                   ))}
                   {assets.length === 0 && <tr><td colSpan={7} className="py-8 text-center text-slate-400">No fixed assets yet</td></tr>}
@@ -859,7 +866,7 @@ export default function AccountingPage() {
                         <td className="py-2 pr-3">{t.description || '—'}</td>
                         <td className="py-2 pr-3 text-right tabular-nums">{t.deposit ? money(t.deposit) : '—'}</td>
                         <td className="py-2 pr-3 text-right tabular-nums">{t.withdrawal ? money(t.withdrawal) : '—'}</td>
-                        <td className="py-2 text-center"><input type="checkbox" checked={t.is_reconciled} onChange={async (e) => { await api.accSetReconciled(t.id, e.target.checked); load(); }} className="accent-emerald-600 w-4 h-4" /></td>
+                        <td className="py-2 text-center"><input type="checkbox" checked={t.is_reconciled} onChange={async (e) => { try { await api.accSetReconciled(t.id, e.target.checked); load(); } catch (err) { setError(err.message); } }} className="accent-emerald-600 w-4 h-4" /></td>
                       </tr>
                     ))}
                     {bankTxns.length === 0 && <tr><td colSpan={5} className="py-6 text-center text-slate-400">No statement lines yet</td></tr>}
@@ -926,11 +933,15 @@ export default function AccountingPage() {
             <section className={`${GLASS} p-6`}>
               <h2 className="font-bold text-slate-900 dark:text-slate-100 mb-1.5">Exchange Rates — USD</h2>
               <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">MMK per 1 USD. USD invoices and purchase orders convert to MMK in the journal at the document rate; new documents pre-fill the latest rate.{rates?.latest && <> Latest: <strong className="text-slate-700 dark:text-slate-200">Ks {Number(rates.latest.rate).toLocaleString()}</strong> ({rates.latest.rate_date})</>}</p>
+              {!isAccountant ? (
               <form onSubmit={saveRate} className="flex flex-wrap items-end gap-3">
                 <input type="date" value={rateForm.rate_date} onChange={(e) => setRateForm((f) => ({ ...f, rate_date: e.target.value }))} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
                 <input type="number" min="0" step="any" value={rateForm.rate} onChange={(e) => setRateForm((f) => ({ ...f, rate: e.target.value }))} placeholder="Ks per 1 USD" className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm w-44" />
                 <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Save rate</button>
               </form>
+              ) : (
+              <p className="text-sm text-slate-500 dark:text-slate-400">Exchange rates are set by Chairman/HO.</p>
+              )}
             </section>
           </div>
         )}
@@ -939,7 +950,7 @@ export default function AccountingPage() {
           <section className={`${GLASS} p-6`}>
             <div className="flex items-center justify-between flex-wrap gap-3 mb-5">
               <p className="text-sm text-slate-500 dark:text-slate-400">Posting into a closed period is blocked. Reopening needs Chairman/HO.</p>
-              <button onClick={closePeriod} className="whitespace-nowrap text-xs font-semibold bg-red-500/10 border border-red-500/20 text-red-600 dark:text-red-400 px-3.5 py-2 rounded-lg hover:bg-red-500/20 transition-colors">Close {period}</button>
+              {!isAccountant && <button onClick={closePeriod} className="whitespace-nowrap text-xs font-semibold bg-red-500/10 border border-red-500/20 text-red-600 dark:text-red-400 px-3.5 py-2 rounded-lg hover:bg-red-500/20 transition-colors">Close {period}</button>}
             </div>
             <ul className="divide-y divide-slate-100 dark:divide-slate-800">
               {periods.map((p) => (
@@ -947,7 +958,7 @@ export default function AccountingPage() {
                   <span className="text-sm font-semibold">{p.period}</span>
                   <div className="flex items-center gap-2">
                     <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${p.status === 'closed' ? 'bg-red-500/10 border-red-500/20 text-red-600 dark:text-red-400' : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400'}`}>{p.status}</span>
-                    {p.status === 'closed' && <button onClick={() => reopenPeriod(p.period)} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">Reopen</button>}
+                    {p.status === 'closed' && !isAccountant && <button onClick={() => reopenPeriod(p.period)} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">Reopen</button>}
                   </div>
                 </li>
               ))}

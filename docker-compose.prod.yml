@@ -26,9 +26,14 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
       DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?DATA_ENCRYPTION_KEY must be set}
       BOOTSTRAP_CHAIRMAN_PASSWORD: ${BOOTSTRAP_CHAIRMAN_PASSWORD:-}
-      JWT_ALGORITHM: HS256
+      # JWT_ALGORITHM is pinned to HS256 in code (src/config.py) — not
+      # configurable via env, so no variable is passed here.
       JWT_EXPIRE_MINUTES: "480"
       TOTAL_BUSINESS_UNITS: "23"
+      # If deploy/db_roles.sql has been applied and DATABASE_URL points at the
+      # restricted bot_app role, set this to "false" — bot_app cannot run DDL,
+      # so startup migrations would fail with permission denied. Migrations
+      # then run via MIGRATION_DATABASE_URL (bot_migrator) instead.
       RUN_MIGRATIONS_ON_STARTUP: "true"
       R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
       R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}

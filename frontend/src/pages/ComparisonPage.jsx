@@ -24,6 +24,7 @@ export default function ComparisonPage() {
   const { theme } = useTheme();
   const isDark = theme === 'dark';
   const [data, setData] = useState(null);
+  const [error, setError] = useState('');
   const [metric, setMetric] = useState('cash_flow');
   const [trendBuId, setTrendBuId] = useState(null);
 
@@ -32,7 +33,7 @@ export default function ComparisonPage() {
       setData(d);
       const bus = d.trend_by_bu || d.trend_cash_flow_by_bu || [];
       setTrendBuId((prev) => prev ?? bus[0]?.bu_id ?? null);
-    });
+    }).catch((err) => setError(err.message || 'Failed to load comparison'));
   }, []);
 
   const sorted = useMemo(() => {
@@ -46,6 +47,17 @@ export default function ComparisonPage() {
   }, [sorted, metric]);
 
   if (!data) {
+    if (error) {
+      return (
+        <div className={`min-h-screen flex items-center justify-center ${PAGE_BG} px-4`}>
+          <div className="max-w-md w-full rounded-xl bg-red-500/10 border border-red-500/20 px-5 py-4 text-sm text-red-700 dark:text-red-400">
+            <p className="font-bold mb-1">Couldn't load this page</p>
+            <p>{error}</p>
+            <button onClick={() => window.location.reload()} className="mt-3 text-xs font-semibold bg-red-600 hover:bg-red-500 text-white px-3.5 py-2 rounded-lg transition-colors">Retry</button>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className={`min-h-screen flex items-center justify-center ${PAGE_BG}`}>
         <div className="w-8 h-8 border-2 border-slate-200 dark:border-slate-700 border-t-brand-600 rounded-full animate-spin" />

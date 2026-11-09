@@ -69,7 +69,6 @@ export const api = {
 
   hoDashboard: () => getJson('/api/ho/dashboard'),
   submitHoReport: (formData) => postForm('/api/ho/submit-report', formData),
-  getHoMonthlyTarget: (month) => getJson(`/api/ho/monthly-target${month ? `?month=${month}` : ''}`),
   setHoMonthlyTarget: (payload) => postJson('/api/ho/monthly-target', payload),
 
   ceoDashboard: (month, date) => {
@@ -80,11 +79,9 @@ export const api = {
     return getJson(`/api/ceo/dashboard${query ? `?${query}` : ''}`);
   },
   submitReport: (formData) => postForm('/api/ceo/submit-report', formData),
-  getMonthlyTarget: (month) => getJson(`/api/ceo/monthly-target${month ? `?month=${month}` : ''}`),
   setMonthlyTarget: (payload) => postJson('/api/ceo/monthly-target', payload),
   getCeoProfile: () => getJson('/api/ceo/profile'),
   setCeoProfile: (formData) => postForm('/api/ceo/profile', formData),
-  getFinancialNotes: () => getJson('/api/ceo/financial-notes'),
   addFinancialNote: (noteText) => postJson('/api/ceo/financial-notes', { note_text: noteText }),
 
   adminOverview: () => getJson('/api/admin/overview'),
@@ -154,7 +151,6 @@ export const api = {
   },
   createInventoryItem: (payload) => postJson('/api/ops/inventory', payload),
   recordStockMovement: (id, payload) => postJson(`/api/ops/inventory/${id}/movements`, payload),
-  listStockMovements: (id) => getJson(`/api/ops/inventory/${id}/movements`),
   deleteInventoryItem: (id) => fetch(`/api/ops/inventory/${id}`, {
     method: 'DELETE', credentials: 'include',
   }).then(handle),
@@ -243,7 +239,6 @@ export const api = {
 
   // ---- Accounting (ERP Phase 1) ----
   accBusinessUnits: () => getJson('/api/accounting/business-units'),
-  accTemplates: () => getJson('/api/accounting/templates'),
   accProvision: (buId, template) => postJson(`/api/accounting/provision/${buId}?template=${template}`),
   accCoa: (buId) => getJson(`/api/accounting/coa?business_unit_id=${buId}`),
   accCreateAccount: (payload) => postJson('/api/accounting/accounts', payload),
@@ -375,7 +370,6 @@ export const api = {
   modSellUnit: (id, payload) => fetch(`/api/modules/property-units/${id}/sell`, {
     method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
   }).then(handle),
-  modInstallments: (invoiceId) => getJson(`/api/modules/invoices/${invoiceId}/installments`),
   modLeases: (buId) => getJson(`/api/modules/leases${buId ? `?business_unit_id=${buId}` : ''}`),
   modCreateLease: (payload) => fetch('/api/modules/leases', {
     method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
@@ -389,9 +383,6 @@ export const api = {
   posDailySummary: (buId, day) => getJson(`/api/ops/pos-sales/daily-summary?${new URLSearchParams({ ...(buId ? { business_unit_id: buId } : {}), ...(day ? { date: day } : {}) })}`),
   listQuotations: (buId) => getJson(`/api/ops/quotations${buId ? `?business_unit_id=${buId}` : ''}`),
   createQuotation: (payload) => postJson('/api/ops/quotations', payload),
-  updateQuotation: (id, payload) => fetch(`/api/ops/quotations/${id}`, {
-    method: 'PATCH', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
-  }).then(handle),
   setQuotationStatus: (id, status) => postJson(`/api/ops/quotations/${id}/status`, { status }),
   convertQuotation: (id) => postJson(`/api/ops/quotations/${id}/convert`),
   invoicePdfUrl: (id) => `/api/ops/sales-invoices/${id}/pdf`,
