@@ -6,6 +6,10 @@ name: postgres-check
 # service and executes tests/test_bot_review_minors_postgres.py, which
 # attempts one violating insert per CHECK / partial unique index / FK
 # ON DELETE policy and asserts the database itself rejects it.
+# CM-3 (BOT real-time risk review 2026-11-09): it also runs
+# tests/test_rt_postgres_concurrency.py, which races two threads
+# against receive_po / send_invoice / record_payment and asserts
+# exactly one success + a 409 loser on Postgres.
 # Runs on every push/PR to main and weekly (a typo in a CHECK expression
 # that is syntactically valid would otherwise surface only on Neon).
 on:
@@ -52,5 +56,5 @@ jobs:
       - name: Run migration chain on Postgres
         run: python -m alembic upgrade head
 
-      - name: Postgres-only constraint checks
-        run: python -m pytest tests/test_bot_review_minors_postgres.py -q
+      - name: Postgres-only constraint checks + concurrency proof
+        run: python -m pytest tests/test_bot_review_minors_postgres.py tests/test_rt_postgres_concurrency.py -q
