@@ -14,6 +14,7 @@ Per request, in order:
      and any unhandled exception turned into a generic JSON 500.
 """
 import asyncio
+import ipaddress
 import json
 import logging
 import re
@@ -27,6 +28,7 @@ from starlette.requests import Request
 from src.auth import decode_access_token
 from src.client_ip import get_client_ip
 from src.config import settings
+from src.throttle import check_client_ip_configuration, ip_is_throttle_key
 
 _error_log = logging.getLogger("business_ops_tracker.error")
 
@@ -74,7 +76,26 @@ def is_export_path(path: str) -> bool:
         or any(pattern.match(path) for pattern in _EXPORT_PATH_PATTERNS)
     )
 
-# After an early rejection the unread request body is read and discarded
+def is_heavy_get_path(path: str) -> bool:
+    """The heaviest read endpoints (SM-4): full-group comparison, the admin
+    overview, the health dashboard and the journal list. Normal API and
+    dashboard traffic is deliberately NOT matched — only these get the
+    modest per-caller GET budget in _heavy_get_budget_retry. Report/export
+    paths are already covered by is_export_path above."""
+    return path in {
+        "/api/admin/comparison",
+        "/api/admin/overview",
+        "/api/admin/health-dashboard",
+        "/api/accounting/journal",
+        "/api/admin/operations",
+    }
+
+
+# Modest per-caller budget for the heavy GET endpoints above (SM-4): 60
+# requests per minute per caller is far above a human reloading a dashboard
+# and only stops scripted hammering of the pool.
+_HEAVY_GET_LIMIT = 60
+_HEAVY_GET_WINDOW = 60
 # (bounded) before the connection closes. Closing a socket that still has
 # unread inbound data makes the OS answer with a reset, which can destroy the
 # 4xx the client has not read yet — the client then sees a dropped connection
@@ -237,6 +258,16 @@ class EdgeMiddleware:
         self._upload_window = 24 * 60 * 60
         self._upload_hits: dict[str, deque] = {}
 
+        # Modest per-caller budget for the heaviest GET endpoints (SM-4).
+        self._heavy_get_hits: dict[str, deque] = {}
+
+        # SM-3: verify at startup (this middleware is built once, when the
+        # app starts) that the deployed proxy setup resolves to a real
+        # client IP — a misconfigured CLIENT_IP_HEADER / TRUSTED_PROXY_HOPS
+        # silently disables per-IP throttling. Best effort; the check
+        # itself never raises.
+        check_client_ip_configuration()
+
     # ------------------------------------------------------------------ ASGI
 
     async def __call__(self, scope, receive, send) -> None:
@@ -268,6 +299,15 @@ class EdgeMiddleware:
             # 2. Origin / CSRF check.
             if not self._origin_ok(headers):
                 await self._reject(send, path, 403, "Cross-origin request blocked", unread)
+                return
+
+            # 2b. Sm-4: an upload path without a Content-Length would be
+            # metered as 0 bytes against the daily byte budget (a chunked
+            # client could push 50 x 10 MB against a 200 MB budget). The
+            # body-cap step below already rejects a non-numeric length;
+            # a missing length is refused here instead of counted as 0.
+            if is_upload_path(path) and headers.get(b"content-length") is None:
+                await self._reject(send, path, 411, "Content-Length is required for uploads", unread)
                 return
 
             # 3. Body size cap — before any framework parsing or auth.
@@ -316,12 +356,34 @@ class EdgeMiddleware:
                 )
                 return
 
-        # 4c. Daily upload budget (D-m7) — upload paths only, per caller.
+        # 4c. Heavy-GET budget (SM-4) — the full-group comparison, admin
+        # overview, health dashboard and journal list have no budget at
+        # all today, so a burst of dashboard reloads hits the pool
+        # directly. Modest (60/min per caller); normal dashboard traffic
+        # never reaches it.
+        if method == "GET" and is_heavy_get_path(path):
+            retry = self._heavy_get_budget_retry(scope, headers)
+            if retry is not None:
+                await self._reject(
+                    send,
+                    path,
+                    429,
+                    "Too many report requests — please slow down",
+                    unread,
+                    extra_headers=[(b"retry-after", str(retry).encode("ascii"))],
+                )
+                return
+
+        # 4d. Daily upload budget (D-m7) — upload paths only, per caller.
         # Checked after the origin/body/write checks so rejected requests
         # don't consume upload budget; a request that passes the checks
-        # consumes one count slot and its Content-Length in bytes.
+        # consumes one count slot and its Content-Length in bytes. The
+        # recorded hit is refunded below (send_wrapper) when the app
+        # rejects the file with a 4xx, so a rejected upload does not burn
+        # one of the 50/day slots (SM-7).
+        upload_refund = None
         if method in _UNSAFE_METHODS and is_upload_path(path):
-            retry = self._upload_budget_retry(scope, headers)
+            retry, refund_key, refund_stamp = self._upload_budget_retry(scope, headers)
             if retry is not None:
                 await self._reject(
                     send,
@@ -332,6 +394,7 @@ class EdgeMiddleware:
                     extra_headers=[(b"retry-after", str(retry).encode("ascii"))],
                 )
                 return
+            upload_refund = (refund_key, refund_stamp)
 
         state = _RequestState()
         received = 0
@@ -350,6 +413,7 @@ class EdgeMiddleware:
             return message
 
         async def send_wrapper(message) -> None:
+            nonlocal upload_refund
             if state.suppress:
                 return
             if message["type"] == "http.response.start":
@@ -364,6 +428,13 @@ class EdgeMiddleware:
                     )
                     return
                 state.started = True
+                if upload_refund is not None and 400 <= message["status"] < 500:
+                    # SM-7: the app rejected this upload (bad magic bytes,
+                    # oversize, wrong extension, 401, ...) — refund the
+                    # upload-budget slot consumed up front so retrying a
+                    # rejected file does not burn the daily budget.
+                    self._refund_upload(*upload_refund)
+                    upload_refund = None
                 message = {
                     **message,
                     "headers": self._decorate(path, message["status"], message.get("headers") or []),
@@ -441,7 +512,20 @@ class EdgeMiddleware:
         by the very same helper the throttles use so the two never disagree
         about who called. A forged cookie therefore only ever budgets the
         caller's own IP bucket, never someone else's. The key is an
-        identifier for budgeting only, never authentication."""
+        identifier for budgeting only, never authentication.
+
+        SM-4: the IP half applies ip_is_throttle_key — when the client IP
+        resolves to the proxy/private IP (misconfigured TRUSTED_PROXY_HOPS,
+        or no proxy at all in front of uvicorn), *every* unauthenticated
+        caller would otherwise share one `ip:<proxy>` bucket (all logins
+        from one office/NAT share a single 120/min write budget). Such an
+        address gets a one-off bucket instead: no shared bucket, and
+        effectively no edge budget for that request — login and
+        forgot-password have their own database-backed throttles.
+        Loopback is the one exception and keeps its per-IP bucket: it is a
+        single host (local tooling, the test harness, SSH-tunnel access),
+        so it cannot conflate distinct remote users the way a proxy LAN /
+        CGNAT address can."""
         token = None
         for part in headers.get(b"cookie", b"").decode("latin-1").split(";"):
             name, _, value = part.strip().partition("=")
@@ -452,7 +536,15 @@ class EdgeMiddleware:
             payload = decode_access_token(token)
             if payload and isinstance(payload.get("sub"), str):
                 return f"user:{payload['sub']}"
-        return f"ip:{get_client_ip(Request(scope)) or 'unknown'}"
+        ip = get_client_ip(Request(scope))
+        if ip and not ip_is_throttle_key(ip):
+            try:
+                loopback = ipaddress.ip_address(ip).is_loopback
+            except ValueError:
+                loopback = False
+            if not loopback:
+                return f"ip:untrusted-{secrets.token_hex(4)}"
+        return f"ip:{ip or 'unknown'}"
 
     def _export_budget_retry(self, scope, headers: dict[bytes, bytes]) -> int | None:
         """Records one hit against the caller's export budget; returns the
@@ -494,6 +586,22 @@ class EdgeMiddleware:
         key = self._caller_key(scope, headers)
 
         now = time.monotonic()
+        # Sm-3: prune + evict the sustained-429 tracking entry when its
+        # window has fully expired, so _write_429_hits / _write_429_warned_at
+        # cannot grow one entry per caller that ever 429'd (the m5 fix
+        # covered only _export_hits/_write_hits/_upload_hits). Runs on
+        # every mutating call from a caller who previously 429'd.
+        old_429s = self._write_429_hits.get(key)
+        if old_429s is not None:
+            while old_429s and old_429s[0] <= now - self._write_window:
+                old_429s.popleft()
+            if not old_429s:
+                self._write_429_hits.pop(key, None)
+                # A warning older than a day is stale — drop it so the next
+                # sustained burst warns again.
+                self._write_429_warned_at.pop(key, None)
+            elif key in self._write_429_warned_at and now - self._write_429_warned_at[key] >= 24 * 60 * 60:
+                self._write_429_warned_at.pop(key, None)
         hits = self._write_hits.setdefault(key, deque())
         cutoff = now - self._write_window
         while hits and hits[0] <= cutoff:
@@ -503,8 +611,6 @@ class EdgeMiddleware:
         if len(hits) >= self._write_limit:
             if key.startswith("user:"):
                 recent_429s = self._write_429_hits.setdefault(key, deque())
-                while recent_429s and recent_429s[0] <= cutoff:
-                    recent_429s.popleft()
                 recent_429s.append(now)
                 # "Never warned" must not suppress the first warning: time.monotonic()
                 # is uptime-based, so a default of 0.0 would silence the first
@@ -524,17 +630,57 @@ class EdgeMiddleware:
         self._write_hits.setdefault(key, hits)
         return None
 
-    def _upload_budget_retry(self, scope, headers: dict[bytes, bytes]) -> int | None:
+    def _heavy_get_budget_retry(self, scope, headers: dict[bytes, bytes]) -> int | None:
+        """SM-4: same sliding-window mechanism as the export budget, for
+        the heaviest GET endpoints (see is_heavy_get_path). Returns the
+        Retry-After seconds when over budget, else None. Empty buckets are
+        evicted like the other budgets."""
+        key = self._caller_key(scope, headers)
+
+        now = time.monotonic()
+        hits = self._heavy_get_hits.setdefault(key, deque())
+        cutoff = now - _HEAVY_GET_WINDOW
+        while hits and hits[0] <= cutoff:
+            hits.popleft()
+        if not hits:
+            self._heavy_get_hits.pop(key, None)
+        if len(hits) >= _HEAVY_GET_LIMIT:
+            return max(1, int(hits[0] + _HEAVY_GET_WINDOW - now) + 1)
+        hits.append(now)
+        self._heavy_get_hits.setdefault(key, hits)
+        return None
+
+    def _refund_upload(self, key: str, stamp: float) -> None:
+        """SM-7: remove one recorded upload-budget hit (identified by the
+        monotonic timestamp returned by _upload_budget_retry) — called
+        when the app rejects the upload with a 4xx, so a rejected file
+        does not burn one of the caller's 50/day slots. Best effort; a
+        missing key/stamp is a no-op."""
+        hits = self._upload_hits.get(key)
+        if not hits:
+            return
+        for i, (when, _size) in enumerate(hits):
+            if when == stamp:
+                del hits[i]
+                break
+        if not hits:
+            self._upload_hits.pop(key, None)
+
+    def _upload_budget_retry(self, scope, headers: dict[bytes, bytes]) -> tuple[int | None, str, float | None]:
         """Records one upload against the caller's daily upload budget
-        (D-m7); returns Retry-After seconds when over budget, else None.
+        (D-m7); returns (retry_after, key, stamp).
 
         Same sliding-window mechanism as the D-10 write budget
         (_write_budget_retry), keyed by the same caller key, but over a
         24 h window and enforcing both a count limit and a total-bytes
         limit. Size is the request's Content-Length, which the body-cap
-        step already validated (absent/invalid counts as 0 — the cap step
-        rejects a non-numeric Content-Length before this runs). Empty
-        buckets are evicted so the map cannot grow without bound.
+        step already validated (absent counts as 0 here, but the caller
+        refuses upload paths without a Content-Length before this runs —
+        Sm-4 — so a missing length never reaches this accounting).
+        `stamp` identifies the recorded hit so the caller can refund it
+        when the app rejects the file (SM-7); it is None when the upload
+        was refused and nothing was recorded. Empty buckets are evicted
+        so the map cannot grow without bound.
         """
         key = self._caller_key(scope, headers)
 
@@ -554,11 +700,11 @@ class EdgeMiddleware:
         total_bytes = sum(entry[1] for entry in hits)
         if len(hits) >= self._upload_count_limit or total_bytes + size > self._upload_bytes_limit:
             if hits:
-                return max(1, int(hits[0][0] + self._upload_window - now) + 1)
-            return self._upload_window
+                return max(1, int(hits[0][0] + self._upload_window - now) + 1), key, None
+            return self._upload_window, key, None
         hits.append((now, size))
         self._upload_hits.setdefault(key, hits)
-        return None
+        return None, key, now
 
     # -------------------------------------------------------------- headers
 

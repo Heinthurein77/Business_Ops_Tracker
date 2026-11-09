@@ -234,12 +234,12 @@ def check_client_ip_configuration() -> None:
     the app from starting; the ERROR log line (picked up by the log scan)
     is the signal.
 
-    The synthetic request carries a public client IP (8.8.8.8, the
-    a real public address (8.8.8.8)) as seen by one private proxy hop,
-    which is the shape the production Caddy setup produces: a single
-    X-Forwarded-For entry appended by the trusted proxy, with the proxy
-    itself as the TCP peer. (Entries are counted from the right, so with
-    TRUSTED_PROXY_HOPS=1 the single entry is the address the proxy saw.)"""
+    The synthetic request carries a public client IP (8.8.8.8) as seen by
+    one private proxy hop, which is the shape the production Caddy setup
+    produces: a single X-Forwarded-For entry appended by the trusted proxy,
+    with the proxy itself as the TCP peer. (Entries are counted from the
+    right, so with TRUSTED_PROXY_HOPS=1 the single entry is the address
+    the proxy saw.)"""
     try:
         from starlette.requests import Request as StarletteRequest
 
