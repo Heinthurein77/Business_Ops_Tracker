@@ -19,16 +19,10 @@ logger = logging.getLogger(__name__)
 # time instead of handing out the stored URL.
 PRESIGNED_URL_EXPIRY_SECONDS = 900
 
-if settings.IS_PRODUCTION and settings.R2_PUBLIC_BASE_URL:
-    # D-5: with a public base URL every upload is effectively public —
-    # anyone with the link can read it forever, with no auth. Loud at
-    # startup so a deploy can never silently turn private attachments
-    # (receipts, report evidence) into public files.
-    logger.warning(
-        "R2_PUBLIC_BASE_URL is set in production: all uploaded files are "
-        "effectively public (no authentication, no expiry). Remove it to "
-        "serve attachments only through the session-gated view endpoint."
-    )
+# SM-8 / Sm-8: R2_PUBLIC_BASE_URL is refused in production by the config
+# guard (src/config.py raises at startup), so no upload can ever be served
+# from a permanent public base there. This module no longer warns about it
+# — it cannot be set in production at all.
 
 # Content-Type is derived from the (already extension-allowlisted) filename
 # rather than trusted from the caller's UploadFile.content_type, which is
@@ -153,10 +147,61 @@ def upload_fileobj(
                      settings.R2_BUCKET_NAME, key, exc)
         return None
 
+    # SM-8: verify the object is actually there before handing out a URL —
+    # without a read-back, a view in the next second can fail with a raw R2
+    # NoSuchKey instead of an app error. A failed HEAD fails the upload
+    # (callers 503) rather than storing a pointer to a missing object.
+    if not _verify_object_exists(client, key):
+        logger.error("R2 upload verification failed: bucket=%s key=%s (object not readable after PUT)",
+                     settings.R2_BUCKET_NAME, key)
+        return None
+
     if settings.R2_PUBLIC_BASE_URL:
         return f"{settings.R2_PUBLIC_BASE_URL.rstrip('/')}/{key}"
 
     return presigned_url_for_key(key)
+
+
+def _verify_object_exists(client, key: str) -> bool:
+    """HEAD-check that `key` is readable after upload (SM-8). Returns False
+    when the HEAD fails. A client without a head_object method (test fakes)
+    cannot verify and is treated as verified — the real boto3 client always
+    has the method, so this fallback never applies in production."""
+    head = getattr(client, "head_object", None)
+    if head is None:
+        return True
+    try:
+        head(Bucket=settings.R2_BUCKET_NAME, Key=key)
+        return True
+    except (BotoCoreError, ClientError):
+        return False
+
+
+def delete_object(key: Optional[str]) -> bool:
+    """Best-effort delete of one stored object (SM-7: when a record's
+    attachment is replaced, the previous object is deleted instead of being
+    orphaned in R2 forever — nothing ever deleted an R2 object before).
+    Returns True when the object is gone (or was never in R2 — the local
+    dev fallback file is removed too); False on failure. Never raises, so
+    a failed cleanup can never break the request that replaced the file."""
+    if not key or ".." in key:
+        return False
+    client = _get_client()
+    if client is None:
+        # Local dev fallback: remove the file under LOCAL_UPLOAD_DIR.
+        try:
+            path = Path(settings.LOCAL_UPLOAD_DIR) / key
+            path.unlink(missing_ok=True)
+            return True
+        except OSError:
+            return False
+    try:
+        client.delete_object(Bucket=settings.R2_BUCKET_NAME, Key=key)
+        return True
+    except (BotoCoreError, ClientError) as exc:
+        logger.warning("R2 delete failed: bucket=%s key=%s error=%s",
+                       settings.R2_BUCKET_NAME, key, exc)
+        return False
 
 
 def presigned_url_for_key(key: str, expires_in: int = PRESIGNED_URL_EXPIRY_SECONDS) -> Optional[str]:

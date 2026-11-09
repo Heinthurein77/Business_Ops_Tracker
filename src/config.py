@@ -246,6 +246,19 @@ class Settings:
             else ""
         )
         self.R2_PUBLIC_BASE_URL: str = os.getenv("R2_PUBLIC_BASE_URL", "")
+        if self.IS_PRODUCTION and self.R2_PUBLIC_BASE_URL:
+            # SM-8 / Sm-8: with a public base URL every upload is effectively
+            # public — anyone with the link can read receipts and report
+            # evidence forever, with no auth. A startup log warning used to
+            # be the only guard (src/r2_storage.py); a single mis-set env
+            # var could silently convert the whole attachment store to
+            # public files. Refuse to start instead, like the other
+            # production guards above.
+            raise RuntimeError(
+                "R2_PUBLIC_BASE_URL must not be set in production — it makes every uploaded "
+                "file permanently public. Remove it to serve attachments only through the "
+                "session-gated view endpoint."
+            )
 
         # --- Local file storage fallback (attachments/profile photos) ---
         # Used only when R2 isn't configured AND this isn't production — a
