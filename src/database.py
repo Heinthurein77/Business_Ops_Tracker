@@ -53,8 +53,16 @@ else:
         # A managed database allows a small fixed number of connections (about
         # 22 on the smallest DigitalOcean cluster) and a rolling deploy briefly
         # runs two instances, so keep each well under half of that.
-        pool_size=4,
-        max_overflow=4,
+        # PM-5/SM-11: 5+5 = 10 per instance (was 4+4 = 8). The raise is
+        # deliberately modest — two instances still peak at 20 of ~22 —
+        # because the real fix is PM-1: reports now aggregate in SQL and
+        # hold a connection for milliseconds instead of seconds. The
+        # audit row still takes a second pooled connection per audited
+        # request (src/utils.py _audit_session, outside this workstream's
+        # files); batching audit writes onto the caller's connection or a
+        # dedicated audit pool is a follow-up, not done here.
+        pool_size=5,
+        max_overflow=5,
         pool_timeout=10,
         pool_recycle=1800,
         pool_use_lifo=True,
@@ -132,7 +140,22 @@ def _new_validated_session():
     cheap SELECT 1. On a transient failure the dead session is discarded
     and one fresh session is tried; if that fails too, the request gets a
     503 "database unavailable" instead of waiting out a pool timeout and
-    surfacing as a generic 500."""
+    surfacing as a generic 500.
+
+    PM-5 note: the explicit SELECT 1 stays even though pool_pre_ping
+    also validates on checkout — it is the probe the one-retry path
+    above keys off (D-3, pinned by TestGetDbRetry), and pre_ping alone
+    would surface a dead connection as a failure at first use with no
+    retry. One extra round-trip per request is the price of the retry.
+
+    Expected month-end behaviour (PM-5/SM-11): with the pool at 10, an
+    11th concurrent request waits up to pool_timeout (10 s) and then
+    gets 503 "Database unavailable — please retry shortly". That is pool
+    exhaustion, not Neon being down: reports are SQL-aggregated now, so
+    a sustained burst of 503s means genuinely more than 10 concurrent
+    DB sessions (month-end morning), and hammering retry/refresh only
+    queues more waiters — wait a minute and retry once.
+    """
     db = SessionLocal()
     try:
         db.execute(text("SELECT 1"))

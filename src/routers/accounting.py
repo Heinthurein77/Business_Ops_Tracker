@@ -16,7 +16,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -768,6 +768,23 @@ def _period_start(period: Optional[str]) -> Optional[date]:
     return date(int(y), int(m), 1)
 
 
+def _long_report_timeout(db: Session) -> None:
+    """Pm-3: allow a longer statement timeout for the known heavy
+    group-wide report endpoints (60 s instead of the global 15 s).
+
+    SET LOCAL lasts only for the current transaction, so it cannot leak
+    into other requests sharing the pooled connection, and it is a
+    no-op on SQLite (no SET LOCAL there). After PM-1's SQL aggregation
+    these queries should finish in milliseconds; the longer budget is
+    headroom for the largest group (23 BUs) at month-end, not a licence
+    to scan history — the aggregation is what keeps them fast. The
+    global 15 s stays as-is for every other endpoint.
+    """
+    bind = db.get_bind()
+    if bind is not None and bind.dialect.name == "postgresql":
+        db.execute(text("SET LOCAL statement_timeout = '60s'"))
+
+
 def _period_end(period: Optional[str]) -> Optional[date]:
     if not period:
         return None
@@ -902,6 +919,7 @@ def consolidated_pl(period: Optional[str] = None, user: User = Depends(require_a
     disclosed, like consolidated_bs does for 1180/2180."""
     period = validate_period(period)
     require_group_access(user)
+    _long_report_timeout(db)  # Pm-3: 60 s for this group-wide report
     income: dict[str, Decimal] = {}
     expense: dict[str, Decimal] = {}
     names: dict[str, str] = {}
@@ -988,6 +1006,7 @@ def consolidated_bs(period: Optional[str] = None, user: User = Depends(require_a
     not real assets/liabilities of the group."""
     period = validate_period(period)
     require_group_access(user)
+    _long_report_timeout(db)  # Pm-3: 60 s for this group-wide report
     groups: dict[str, dict[str, Decimal]] = {"asset": {}, "liability": {}, "equity": {}}
     names: dict[str, str] = {}
     retained = ZERO
@@ -1036,6 +1055,7 @@ def bu_comparison(period: Optional[str] = None, user: User = Depends(require_acc
     """Per-BU P&L for a period — the group scoreboard."""
     period = validate_period(period)
     require_group_access(user)
+    _long_report_timeout(db)  # Pm-3: 60 s for this group-wide report
     per_bu: dict[int, dict[str, Decimal]] = {}
     for t in _posted_totals(db, start=_period_start(period), end=_period_end(period),
                             types=("income", "expense")):
@@ -1661,6 +1681,7 @@ def export_report(report: str, format: str = "xlsx", business_unit_id: Optional[
 
     from fastapi.responses import StreamingResponse
 
+    _long_report_timeout(db)  # Pm-3: 60 s for the journal export path
     period = validate_period(period)
     if report not in ("pl", "bs", "tb", "journal", "consolidated-pl", "consolidated-bs"):
         raise HTTPException(400, "report must be pl, bs, tb, journal, consolidated-pl or consolidated-bs")
@@ -1779,6 +1800,7 @@ def finance_summary(period: Optional[str] = None, user: User = Depends(require_a
     """Group finance snapshot for the Chairman dashboard: this month's
     P&L, cash position (1110+1120), AR/AP outstanding, tax payable."""
     require_group_access(user)
+    _long_report_timeout(db)  # Pm-3: 60 s for this group-wide snapshot
     period = validate_period(period) or date.today().strftime("%Y-%m")
     start, end = _period_start(period), _period_end(period)
     income = ZERO
