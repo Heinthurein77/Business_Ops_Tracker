@@ -24,14 +24,20 @@ export function resolveHomePath(user) {
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  // SM-1: the session's real expiry, from /api/auth/me (the cookie is
+  // httponly, so the frontend cannot read it itself). Drives the
+  // "session expires in 15 min" warning (SessionExpiryBanner).
+  const [sessionExpiresAt, setSessionExpiresAt] = useState(null);
 
   const refresh = useCallback(async () => {
     try {
       const data = await api.me();
       setUser(data.user);
+      setSessionExpiresAt(data.session_expires_at || null);
       return data.user;
     } catch {
       setUser(null);
+      setSessionExpiresAt(null);
       return null;
     }
   }, []);
@@ -40,22 +46,39 @@ export function AuthProvider({ children }) {
     refresh().finally(() => setLoading(false));
   }, [refresh]);
 
+  // SM-1: the global 401 handler in api/client.js fires this event when
+  // any call comes back 401 (expired or revoked session). Drop the user
+  // at once — ProtectedRoute then sends the tab to /login — instead of
+  // leaving a logged-in-looking UI until the next action fails.
+  useEffect(() => {
+    const onExpired = () => {
+      setUser(null);
+      setSessionExpiresAt(null);
+    };
+    window.addEventListener('session-expired', onExpired);
+    return () => window.removeEventListener('session-expired', onExpired);
+  }, []);
+
   const login = useCallback(async (username, password) => {
     const data = await api.login(username, password);
     setUser(data.user);
+    // Exact expiry comes from /api/auth/me; refresh so the warning banner
+    // has the real value instead of a client-side guess.
+    refresh().catch(() => {});
     return data;
-  }, []);
+  }, [refresh]);
 
   const logout = useCallback(async () => {
     try {
       await api.logout();
     } finally {
       setUser(null);
+      setSessionExpiresAt(null);
     }
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout, refresh, setUser }}>
+    <AuthContext.Provider value={{ user, loading, login, logout, refresh, setUser, sessionExpiresAt }}>
       {children}
     </AuthContext.Provider>
   );

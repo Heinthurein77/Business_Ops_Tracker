@@ -29,6 +29,21 @@ async function handle(response) {
   const isJson = (response.headers.get('content-type') || '').includes('application/json');
   const body = isJson ? await response.json().catch(() => ({})) : null;
   if (!response.ok) {
+    if (response.status === 401) {
+      // SM-1: global 401 handling — every API call funnels through here,
+      // so a session that expired (or was revoked on another device) is
+      // caught in one place instead of each page's .catch. The flag lets
+      // the login page say "your session expired" instead of a bare
+      // redirect, and the event lets AuthContext drop the user immediately
+      // (ProtectedRoute then sends the tab to /login). In-flight form
+      // data is NOT lost: the daily-report / PO / invoice forms persist
+      // their drafts to localStorage (see utils/drafts.js) and restore
+      // them after re-login.
+      try {
+        sessionStorage.setItem('bot-session-expired', '1');
+        window.dispatchEvent(new CustomEvent('session-expired'));
+      } catch { /* storage/event unavailable — the 401 still throws below */ }
+    }
     throw new ApiError(formatDetail(body?.detail) || `Request failed (${response.status})`, response.status, body?.redirect_to);
   }
   return body;
@@ -112,6 +127,13 @@ export const api = {
   listPasswordResets: () => getJson('/api/admin/password-resets'),
   approvePasswordReset: (id) => postJson(`/api/admin/password-resets/${id}/approve`),
   rejectPasswordReset: (id) => postJson(`/api/admin/password-resets/${id}/reject`),
+  // ---- Journal failures (SC-1): operations whose journal never posted ----
+  journalFailures: () => getJson('/api/admin/journal-failures'),
+  // Re-post endpoint (workstream A): POST /api/accounting/journal/retry
+  // {"source": "...", "source_id": <id>} — returns already_posted:true if a
+  // journal has since appeared, 404 if the source is unknown, 409 if it
+  // still cannot post.
+  retryJournal: (source, sourceId) => postJson('/api/accounting/journal/retry', { source, source_id: sourceId }),
   exportExcelUrl: (startDate, endDate) => {
     const params = new URLSearchParams();
     if (startDate) params.set('start_date', startDate);
