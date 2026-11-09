@@ -326,11 +326,13 @@ def test_cash_flow_classifies_by_dominant_counter_account(db):
 
 # ----------------------------------------------------------------- M-C10
 
-def _received_po_with_return(db, return_qty):
+def _received_po_with_return(db, return_qty, n=1):
     s = Supplier(business_unit_id=1, name="Vendor")
     db.add(s)
     db.commit()
-    po = PurchaseOrder(business_unit_id=1, supplier_id=s.id, po_no="PO-1",
+    # Distinct numbers per call: the M-D5 per-BU unique constraints
+    # (workstream D) reject a second PO/return carrying the same number.
+    po = PurchaseOrder(business_unit_id=1, supplier_id=s.id, po_no=f"PO-1-{n:04d}",
                        status="received", order_date=date(2026, 10, 1),
                        exchange_rate=Decimal("1"))
     db.add(po)
@@ -340,7 +342,7 @@ def _received_po_with_return(db, return_qty):
     db.add(pl)
     db.commit()
     if return_qty:
-        r = PurchaseReturn(business_unit_id=1, po_id=po.id, return_no="PR-1-0001",
+        r = PurchaseReturn(business_unit_id=1, po_id=po.id, return_no=f"PR-1-{n:04d}",
                            status="posted", return_date=date(2026, 10, 2))
         db.add(r)
         db.commit()
@@ -354,7 +356,7 @@ def _received_po_with_return(db, return_qty):
 def test_finance_summary_ap_nets_purchase_returns(db):
     _received_po_with_return(db, return_qty=0)
     assert finance_summary(period="2026-10", user=CHAIRMAN, db=db)["ap_outstanding"] == 10000
-    _received_po_with_return(db, return_qty=4)  # second PO + 4-unit return
+    _received_po_with_return(db, return_qty=4, n=2)  # second PO + 4-unit return
     out = finance_summary(period="2026-10", user=CHAIRMAN, db=db)
     assert out["ap_outstanding"] == 10000 + 10000 - 4000
 

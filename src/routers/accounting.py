@@ -17,6 +17,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.accounting_templates import (
@@ -202,7 +203,15 @@ def create_entry(db: Session, bu_id: int, entry_date: date, description: str,
         posted_at=datetime.utcnow() if post else None,
     )
     db.add(e)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        # M-D5: the per-BU unique constraint on entry_no fired — a
+        # concurrent create took this count+1 number first. 409, not a 500.
+        # (Callers that swallow posting failures still surface this as a
+        # failed journal, never as a silent duplicate.)
+        db.rollback()
+        raise HTTPException(409, f"Journal entry number {e.entry_no} already exists — please retry")
     for ln in lines:
         db.add(JournalLine(
             entry_id=e.id, account_id=ln["account_id"],

@@ -544,6 +544,12 @@ class Notification(Base):
 class InventoryItem(Base):
     """Stock items per business unit (retail/convenience stores)."""
     __tablename__ = "inventory_items"
+    __table_args__ = (
+        # Stock can never go below zero at the database level (M-C5); the
+        # API validates this too. Postgres-only, like every other CHECK
+        # here — see _pg_check.
+        _pg_check("current_stock >= 0", name="ck_inventory_items_stock_non_negative"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
@@ -699,6 +705,13 @@ class JournalEntry(Base):
     """Double-entry journal header. Posted entries are immutable; corrections
     are made with a reversal entry (reversal_of_id points back)."""
     __tablename__ = "journal_entries"
+    __table_args__ = (
+        # entry_no is count+1 per BU per month (M-D5): the database, not
+        # just the count, must guarantee two concurrent creates cannot
+        # store the same number.
+        UniqueConstraint("business_unit_id", "entry_no",
+                         name="uq_journal_entries_bu_entry_no"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
@@ -801,6 +814,10 @@ class PurchaseOrder(Base):
     Dr Accounts Payable / Cr Cash (when the BU has a chart of accounts).
     """
     __tablename__ = "purchase_orders"
+    __table_args__ = (
+        UniqueConstraint("business_unit_id", "po_no",
+                         name="uq_purchase_orders_bu_po_no"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
@@ -867,6 +884,10 @@ class SalesInvoice(Base):
     Payments post Dr 1110 Cash / Cr 1130 AR.
     """
     __tablename__ = "sales_invoices"
+    __table_args__ = (
+        UniqueConstraint("business_unit_id", "invoice_no",
+                         name="uq_sales_invoices_bu_invoice_no"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
@@ -915,6 +936,10 @@ class InvoicePayment(Base):
     amount = Column(Numeric(16, 2), nullable=False)
     payment_date = Column(Date, nullable=False)
     method = Column(String(20), default="cash", nullable=False)  # cash/bank/mobile
+    # The currency the payment was made in (M-D7). Validated against the
+    # invoice currency at record time; stored so the balance is never
+    # silently applied 1:1 across currencies.
+    currency = Column(String(3), default="MMK", nullable=False)
     notes = Column(String(255), nullable=True)
     received_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -1350,6 +1375,10 @@ class Quotation(Base):
     SalesInvoice that follows the normal invoice flow.
     """
     __tablename__ = "quotations"
+    __table_args__ = (
+        UniqueConstraint("business_unit_id", "quote_no",
+                         name="uq_quotations_bu_quote_no"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
@@ -1393,6 +1422,10 @@ class SalesReturn(Base):
     balance in invoice_amounts().
     """
     __tablename__ = "sales_returns"
+    __table_args__ = (
+        UniqueConstraint("business_unit_id", "return_no",
+                         name="uq_sales_returns_bu_return_no"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
@@ -1428,6 +1461,10 @@ class PurchaseReturn(Base):
     Stocks out at PO line cost and posts Dr 2110 AP / Cr 1140 Inventory.
     """
     __tablename__ = "purchase_returns"
+    __table_args__ = (
+        UniqueConstraint("business_unit_id", "return_no",
+                         name="uq_purchase_returns_bu_return_no"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
@@ -1521,6 +1558,10 @@ class StockTransfer(Base):
     transfer cost, journal (destination books) Dr 1140 / Cr 2180.
     """
     __tablename__ = "stock_transfers"
+    __table_args__ = (
+        UniqueConstraint("from_business_unit_id", "transfer_no",
+                         name="uq_stock_transfers_from_bu_transfer_no"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     from_business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)

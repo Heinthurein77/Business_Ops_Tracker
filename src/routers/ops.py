@@ -13,6 +13,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.auth import get_current_user, require_roles
@@ -1454,7 +1455,13 @@ def create_po(payload: POIn, user: User = Depends(get_current_user), db: Session
         approval_stage="first" if total_mmk > TWO_STAGE_THRESHOLD else None,
     )
     db.add(po)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        # M-D5: the per-BU unique constraint on po_no fired — a concurrent
+        # create took this count+1 number first. 409 (retryable), not a 500.
+        db.rollback()
+        raise HTTPException(409, f"Purchase order number {po.po_no} already exists — please retry")
     for ln in payload.lines:
         db.add(PurchaseOrderLine(po_id=po.id, item_name=ln.item_name,
                                  inventory_item_id=ln.inventory_item_id,
@@ -1858,7 +1865,13 @@ def create_invoice(payload: InvoiceIn, user: User = Depends(get_current_user), d
         project_id=payload.project_id,
     )
     db.add(inv)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        # M-D5: the per-BU unique constraint on invoice_no fired — a
+        # concurrent create took this count+1 number first. 409, not a 500.
+        db.rollback()
+        raise HTTPException(409, f"Invoice number {inv.invoice_no} already exists — please retry")
     import json as _json
     for ln in payload.lines:
         db.add(SalesInvoiceLine(invoice_id=inv.id, description=ln.description,
@@ -2030,7 +2043,10 @@ def record_payment(invoice_id: int, payload: PaymentIn, user: User = Depends(get
     if amt > a["balance"]:
         raise HTTPException(400, f"Payment {amt} exceeds balance {a['balance']}")
     db.add(InvoicePayment(invoice_id=inv.id, amount=amt, payment_date=payload.payment_date,
-                          method=payload.method, notes=payload.notes, received_by_id=user.id))
+                          method=payload.method, notes=payload.notes, received_by_id=user.id,
+                          # M-D7: record the payment's currency (the
+                          # invoice's, unless the caller stated it).
+                          currency=(payload.currency or inv_currency).upper()))
     db.flush()
     a2 = invoice_amounts(db, inv)
     inv.status = "paid" if a2["balance"] <= 0 else "partial"
@@ -2951,7 +2967,13 @@ def create_quotation(payload: QuotationIn, user: User = Depends(get_current_user
         project_id=payload.project_id,
     )
     db.add(q)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        # M-D5: the per-BU unique constraint on quote_no fired — a
+        # concurrent create took this count+1 number first. 409, not a 500.
+        db.rollback()
+        raise HTTPException(409, f"Quotation number {q.quote_no} already exists — please retry")
     _fill_quotation_lines(db, q, payload.lines)
     db.commit()
     db.refresh(q)
@@ -3038,7 +3060,13 @@ def convert_quotation(quotation_id: int, user: User = Depends(get_current_user),
         currency=q.currency, exchange_rate=q.exchange_rate, project_id=q.project_id,
     )
     db.add(inv)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        # M-D5: the per-BU unique constraint on invoice_no fired — a
+        # concurrent create took this count+1 number first. 409, not a 500.
+        db.rollback()
+        raise HTTPException(409, f"Invoice number {inv.invoice_no} already exists — please retry")
     for ln in q.lines:
         db.add(SalesInvoiceLine(invoice_id=inv.id, description=ln.description,
                                 quantity=ln.quantity, unit_price=ln.unit_price,
@@ -3143,7 +3171,13 @@ def create_sales_return(payload: SalesReturnIn, user: User = Depends(get_current
                     return_date=payload.return_date or today_local(),
                     reason=payload.reason, created_by_id=user.id)
     db.add(r)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        # M-D5: the per-BU unique constraint on return_no fired — a
+        # concurrent create took this count+1 number first. 409, not a 500.
+        db.rollback()
+        raise HTTPException(409, f"Sales return number {r.return_no} already exists — please retry")
     for ln in payload.lines:
         il = line_by_id[ln.invoice_line_id]
         qty = Decimal(str(ln.quantity))
@@ -3266,7 +3300,13 @@ def create_purchase_return(payload: PurchaseReturnIn, user: User = Depends(get_c
                        return_date=payload.return_date or today_local(),
                        reason=payload.reason, created_by_id=user.id)
     db.add(r)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        # M-D5: the per-BU unique constraint on return_no fired — a
+        # concurrent create took this count+1 number first. 409, not a 500.
+        db.rollback()
+        raise HTTPException(409, f"Purchase return number {r.return_no} already exists — please retry")
     total_cost = Decimal("0")
     fx = Decimal(str(getattr(po, "exchange_rate", 1) or 1))
     for ln in payload.lines:

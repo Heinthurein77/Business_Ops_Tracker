@@ -14,6 +14,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.auth import get_current_user
@@ -961,7 +962,13 @@ def create_stock_transfer(payload: StockTransferIn, user: User = Depends(get_cur
                       transfer_no=f"TRF-{payload.from_business_unit_id}-{count + 1:04d}",
                       status="draft", notes=payload.notes, created_by_id=user.id)
     db.add(t)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        # M-D5: the per-BU unique constraint on transfer_no fired — a
+        # concurrent create took this count+1 number first. 409, not a 500.
+        db.rollback()
+        raise HTTPException(409, f"Stock transfer number {t.transfer_no} already exists — please retry")
     for ln in payload.lines:
         db.add(StockTransferLine(transfer_id=t.id, inventory_item_id=ln.inventory_item_id,
                                  quantity=Decimal(str(ln.quantity))))
