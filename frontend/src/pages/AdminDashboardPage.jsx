@@ -6,6 +6,7 @@ import AdminSidebar, { displayNameOf } from '../components/AdminSidebar';
 import CeoProfileCard from '../components/CeoProfileCard';
 import FinanceStrip from '../components/FinanceStrip';
 import Footer from '../components/Footer';
+import LastUpdated from '../components/LastUpdated';
 import QuadrantStatusCircle from '../components/QuadrantStatusCircle';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
@@ -72,6 +73,9 @@ export default function AdminDashboardPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [ov, setOv] = useState(null);
   const [ovError, setOvError] = useState('');
+  // SM-5: when the overview was last refreshed (LastUpdated, top bar).
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [detail, setDetail] = useState(null);
   const [detailError, setDetailError] = useState('');
   const [dateIndex, setDateIndex] = useState(0);
@@ -91,14 +95,18 @@ export default function AdminDashboardPage() {
   }, []);
 
   async function loadOverview() {
+    setRefreshing(true);
     try {
       const data = await api.adminOverview();
       setOv(data);
       if (!searchParams.get('bu') && data.operations[0]) {
         setSearchParams({ bu: String(data.operations[0].bu_id) }, { replace: true });
       }
+      setUpdatedAt(new Date());
     } catch (err) {
       setOvError(err.message || 'Failed to load dashboard');
+    } finally {
+      setRefreshing(false);
     }
   }
 
@@ -283,6 +291,8 @@ export default function AdminDashboardPage() {
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{ov.today_display} &middot; {ov.submission_compliance.submitted} of {ov.submission_compliance.total} BUs reported today</p>
           </div>
           <div className="flex items-center gap-3 flex-wrap w-full sm:w-auto">
+            {/* SM-5: visible freshness + manual refresh for this dashboard. */}
+            <LastUpdated updatedAt={updatedAt} onRefresh={loadOverview} refreshing={refreshing} />
             <div className="relative w-full sm:w-auto" ref={searchRef}>
               <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M17 10a7 7 0 11-14 0 7 7 0 0114 0z" />

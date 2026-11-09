@@ -3,6 +3,7 @@ import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
+import LastUpdated from '../components/LastUpdated';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
 
 const TABS = [
@@ -72,6 +73,9 @@ export default function AccountingPage() {
   const [period, setPeriod] = useState(thisPeriod());
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  // SM-5: when the tab data was last refreshed (LastUpdated, header).
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
 
   const [coa, setCoa] = useState([]);
   const [template, setTemplate] = useState('retail');
@@ -136,6 +140,7 @@ export default function AccountingPage() {
   const load = useCallback(async () => {
     if (!buId) return;
     setError('');
+    setRefreshing(true);
     try {
       const bu = Number(buId);
       if (tab === 'reports') {
@@ -178,7 +183,9 @@ export default function AccountingPage() {
         }
       }
       if (tab === 'ledger' && ledgerAcc) setLedger(await api.accLedger(Number(ledgerAcc), period));
+      setUpdatedAt(new Date());
     } catch (e) { setError(e.message); }
+    finally { setRefreshing(false); }
   }, [tab, buId, period, ledgerAcc, selectedBank]);
 
   useEffect(() => { load(); }, [load]);
@@ -352,6 +359,8 @@ export default function AccountingPage() {
               {bus.map((b) => <option key={b.bu_id} value={b.bu_id}>{b.bu_name}</option>)}
             </select>
             <input type="month" value={period} onChange={(e) => setPeriod(e.target.value)} className="text-sm font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 shadow-sm focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/25" />
+            {/* SM-5: visible freshness + manual refresh for this tab. */}
+            <LastUpdated updatedAt={updatedAt} onRefresh={load} refreshing={refreshing} />
           </div>
         </header>
 
