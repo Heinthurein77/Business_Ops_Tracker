@@ -1,8 +1,10 @@
 import { viewUploadUrl } from '../utils/safeUrl';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
+import LastUpdated from '../components/LastUpdated';
+import { loadDraft, saveDraft } from '../utils/drafts';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
 
 const TABS = [
@@ -101,11 +103,17 @@ export default function OpsPage() {
   const [suppliers, setSuppliers] = useState([]);
   const [supForm, setSupForm] = useState({ name: '', contact_person: '', phone: '' });
   const [pos, setPos] = useState([]);
-  const [poForm, setPoForm] = useState({ supplier_id: '', order_date: new Date().toISOString().slice(0, 10), currency: 'MMK', exchange_rate: '', lines: [{ item_name: '', quantity: '', unit_cost: '' }] });
+  // SM-1: draft persistence — an unsaved PO / invoice form survives a
+  // session expiry and is restored after re-login (loadDraft returns
+  // null when nothing was saved; the reset after a successful submit
+  // writes the empty form, which clears the draft).
+  const [poForm, setPoForm] = useState(() => loadDraft('ops-po-form') || { supplier_id: '', order_date: new Date().toISOString().slice(0, 10), currency: 'MMK', exchange_rate: '', lines: [{ item_name: '', quantity: '', unit_cost: '' }] });
+  useEffect(() => { saveDraft('ops-po-form', poForm); }, [poForm]);
   const [salesCustomers, setSalesCustomers] = useState([]);
   const [custForm, setCustForm] = useState({ name: '', phone: '' });
   const [invoices, setInvoices] = useState([]);
-  const [invCreate, setInvCreate] = useState({ customer_id: '', invoice_date: new Date().toISOString().slice(0, 10), due_date: '', tax_rate: 5, currency: 'MMK', exchange_rate: '', project_id: '', lines: [{ description: '', quantity: 1, unit_price: '', inventory_item_id: '' }] });
+  const [invCreate, setInvCreate] = useState(() => loadDraft('ops-invoice-form') || { customer_id: '', invoice_date: new Date().toISOString().slice(0, 10), due_date: '', tax_rate: 5, currency: 'MMK', exchange_rate: '', project_id: '', lines: [{ description: '', quantity: 1, unit_price: '', inventory_item_id: '' }] });
+  useEffect(() => { saveDraft('ops-invoice-form', invCreate); }, [invCreate]);
   const [payAmt, setPayAmt] = useState({});
   const [agingData, setAgingData] = useState(null);
   const [employees, setEmployees] = useState([]);
@@ -145,13 +153,62 @@ export default function OpsPage() {
   const [leaveBals, setLeaveBals] = useState([]);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  // SC-1: a money action whose journal did NOT post is a persistent
+  // blocking warning — it stays until dismissed, never a success notice
+  // and never auto-dismissed. Set by journalWarningFor() below.
+  const [journalWarning, setJournalWarning] = useState('');
+  // SM-5: when the lists were last refreshed (LastUpdated, top of page).
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  // Sm-6: one money action at a time — busyRef is the guard (state lags a
+  // render, so a double-click would slip past a state-only check).
+  const busyRef = useRef(null);
+  const [busy, setBusy] = useState(null);
 
   useEffect(() => {
     api.adminOverview().then((d) => setBus(d.operations || [])).catch(() => {});
   }, []);
 
+  // SC-1: a money response carrying journal_posted:false (or
+  // installments_ok:false) is a persistent blocking warning — never a
+  // success notice. Returns true when it raised a warning, so callers
+  // skip their success notice.
+  function journalWarningFor(res, label) {
+    if (!res) return false;
+    if (res.journal_posted === false) {
+      setJournalWarning(`${label}: saved, but the journal did NOT post — the books do not reflect this yet. Re-post it from Journal Failures (Admin menu) or ask Head Office.`);
+      return true;
+    }
+    if (res.installments_ok === false) {
+      setJournalWarning(`${label}: saved, but the installment allocation failed — check the invoice balance before relying on it.`);
+      return true;
+    }
+    return false;
+  }
+
+  // Sm-6 + SM-5: one money action at a time, and the lists are refetched
+  // first so the action runs against the freshest row the UI has seen
+  // (the server's version check is the real guard; this keeps the user
+  // from acting on a visibly stale row). Errors from the action itself
+  // surface in the error banner; the post-action load() still runs.
+  async function runMoney(key, fn) {
+    if (busyRef.current) return;
+    busyRef.current = key;
+    setBusy(key);
+    try {
+      await load();
+      await fn();
+    } catch (err) {
+      setError(err.message || 'Action failed');
+    } finally {
+      busyRef.current = null;
+      setBusy(null);
+    }
+  }
+
   const load = useCallback(async () => {
     setError('');
+    setRefreshing(true);
     try {
       const bu = buId ? Number(buId) : undefined;
       if (tab === 'actions') setActions((await api.listActionItems({ business_unit_id: bu })).items);
@@ -220,8 +277,13 @@ export default function OpsPage() {
         setAttRecords(att.items);
         setAttSummary(att.summary);
       }
+      // SM-5: the "Updated HH:MM" timestamp only moves on a successful
+      // refresh — a failed load keeps the old (honest) timestamp.
+      setUpdatedAt(new Date());
     } catch (e) {
       setError(e.message || 'Failed to load');
+    } finally {
+      setRefreshing(false);
     }
   }, [tab, buId, attMonth]);
 
@@ -277,8 +339,11 @@ export default function OpsPage() {
   }
 
   async function completePosSale() {
+    if (busyRef.current) return;
     if (!buId) { setError('Select a specific business unit first (not All Business Units)'); return; }
     if (posCart.length === 0) return;
+    busyRef.current = 'pos-sale';
+    setBusy('pos-sale');
     try {
       const sale = await api.createPosSale({
         business_unit_id: Number(buId), payment_method: posPay.payment_method,
@@ -286,40 +351,55 @@ export default function OpsPage() {
         lines: posCart.map((l) => ({ inventory_item_id: l.item_id, quantity: l.quantity, unit_price: l.unit_price, serial_nos: l.serial_nos && l.serial_nos.length ? l.serial_nos : undefined })),
       });
       setPosCart([]);
-      setNotice(`POS sale #${sale.id} completed — ${money(sale.total)}. Do not re-enter it in the CEO daily report.`);
-      setTimeout(() => setNotice(''), 5000);
+      if (!journalWarningFor(sale, `POS sale #${sale.id}`)) {
+        setNotice(`POS sale #${sale.id} completed — ${money(sale.total)}. Do not re-enter it in the CEO daily report.`);
+        setTimeout(() => setNotice(''), 5000);
+      }
       load();
     } catch (err) { setError(err.message); }
+    finally { busyRef.current = null; setBusy(null); }
   }
 
   async function submitSalesReturn(inv) {
+    if (busyRef.current) return;
     const lines = inv.lines
       .map((l) => ({ invoice_line_id: l.id, quantity: Number(returnQty[l.id]) || 0 }))
       .filter((l) => l.quantity > 0);
     if (lines.length === 0) { setError('Enter a return quantity on at least one line'); return; }
+    busyRef.current = `sales-return-${inv.id}`;
+    setBusy(`sales-return-${inv.id}`);
     try {
       const r = await api.createSalesReturn({ invoice_id: inv.id, lines });
-      setNotice(`Credit note ${r.return_no} posted — ${money(r.total)} credited to ${inv.invoice_no}.`);
-      setTimeout(() => setNotice(''), 4000);
+      if (!journalWarningFor(r, `Credit note ${r.return_no}`)) {
+        setNotice(`Credit note ${r.return_no} posted — ${money(r.total)} credited to ${inv.invoice_no}.`);
+        setTimeout(() => setNotice(''), 4000);
+      }
       setReturnFor(null);
       setReturnQty({});
       load();
     } catch (err) { setError(err.message); }
+    finally { busyRef.current = null; setBusy(null); }
   }
 
   async function submitPurchaseReturn(po) {
+    if (busyRef.current) return;
     const lines = po.lines
       .map((l) => ({ po_line_id: l.id, quantity: Number(poReturnQty[l.id]) || 0 }))
       .filter((l) => l.quantity > 0);
     if (lines.length === 0) { setError('Enter a return quantity on at least one line'); return; }
+    busyRef.current = `purchase-return-${po.id}`;
+    setBusy(`purchase-return-${po.id}`);
     try {
       const r = await api.createPurchaseReturn({ po_id: po.id, lines });
-      setNotice(`Debit note ${r.return_no} posted — ${money(r.total)} returned to supplier.`);
-      setTimeout(() => setNotice(''), 4000);
+      if (!journalWarningFor(r, `Debit note ${r.return_no}`)) {
+        setNotice(`Debit note ${r.return_no} posted — ${money(r.total)} returned to supplier.`);
+        setTimeout(() => setNotice(''), 4000);
+      }
       setPoReturnFor(null);
       setPoReturnQty({});
       load();
     } catch (err) { setError(err.message); }
+    finally { busyRef.current = null; setBusy(null); }
   }
 
   async function createTransfer(e) {
@@ -456,20 +536,36 @@ export default function OpsPage() {
   }
 
   async function transferItem(item) {
+    if (busyRef.current) return;
     const qty = Number(moveQty[item.id]);
     const dest = transferTo[item.id];
     if (!qty || !dest) { setError('Enter a quantity and pick a destination BU to transfer'); return; }
+    busyRef.current = `quick-transfer-${item.id}`;
+    setBusy(`quick-transfer-${item.id}`);
     try {
-      await api.transferStock(item.id, { to_business_unit_id: Number(dest), quantity: qty });
-      setNotice(`Transferred ${qty} × ${item.name}.`);
-      setTimeout(() => setNotice(''), 4000);
+      const res = await api.transferStock(item.id, { to_business_unit_id: Number(dest), quantity: qty });
+      if (!journalWarningFor(res, `Transfer of ${qty} × ${item.name}`)) {
+        setNotice(`Transferred ${qty} × ${item.name}.`);
+        setTimeout(() => setNotice(''), 4000);
+      }
     } catch (err) { setError(err.message); }
+    finally { busyRef.current = null; setBusy(null); }
     load();
   }
 
   async function review(exp, decision) {
-    await api.reviewExpense(exp.id, { decision });
-    load();
+    if (busyRef.current) return;
+    busyRef.current = `review-${exp.id}`;
+    setBusy(`review-${exp.id}`);
+    try {
+      // CM-8: optimistic concurrency — the server rejects (409) when the
+      // expense changed since it was loaded; SM-5: refetch first.
+      await load();
+      const res = await api.reviewExpense(exp.id, { decision, expected_version: exp.version });
+      journalWarningFor(res, `Expense #${exp.id}`);
+      load();
+    } catch (err) { setError(err.message); }
+    finally { busyRef.current = null; setBusy(null); }
   }
 
   async function remind() {
@@ -524,6 +620,8 @@ export default function OpsPage() {
             <button onClick={remind} className="whitespace-nowrap text-xs font-semibold bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 px-3.5 py-2 rounded-lg hover:bg-amber-500/20 transition-colors">
               Remind missing reports
             </button>
+            {/* SM-5: visible freshness + manual refresh for these lists. */}
+            <LastUpdated updatedAt={updatedAt} onRefresh={load} refreshing={refreshing} />
             <div className="flex items-center gap-1.5 flex-wrap">
               <input type="month" value={reportMonth} onChange={(e) => setReportMonth(e.target.value)} className="text-xs font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2.5 py-2" />
               <a href={api.monthlyReportUrl(reportMonth)} className="whitespace-nowrap text-xs font-semibold bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 px-3.5 py-2 rounded-lg hover:opacity-90 transition-opacity">
@@ -536,6 +634,12 @@ export default function OpsPage() {
           </div>
         </header>
 
+        {journalWarning && (
+          <div className="text-sm font-medium text-amber-800 dark:text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-4 py-2.5 flex items-start justify-between gap-3">
+            <span>{journalWarning}</span>
+            <button onClick={() => setJournalWarning('')} className="shrink-0 text-amber-700 dark:text-amber-400 hover:underline text-xs font-bold">Dismiss</button>
+          </div>
+        )}
         {notice && <div className="text-sm font-medium text-emerald-700 dark:text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-4 py-2.5">{notice}</div>}
         {error && <div className="text-sm font-medium text-red-700 dark:text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-2.5">{error}</div>}
 
@@ -631,7 +735,7 @@ export default function OpsPage() {
                             <option value="">Transfer to…</option>
                             {bus.filter((b) => b.bu_id !== i.business_unit_id).map((b) => <option key={b.bu_id} value={b.bu_id}>{b.bu_name}</option>)}
                           </select>
-                          <button onClick={() => transferItem(i)} className="text-xs font-semibold text-sky-600 dark:text-sky-400 hover:underline">Transfer</button>
+                          <button onClick={() => transferItem(i)} disabled={busy === `quick-transfer-${i.id}`} className="text-xs font-semibold text-sky-600 dark:text-sky-400 hover:underline disabled:opacity-50">Transfer</button>
                           <button onClick={async () => { if (batchItem === i.id) { setBatchItem(null); } else { setBatchItem(i.id); setBatches((await api.modBatches(i.id)).items); } }} className="text-xs font-semibold text-amber-600 dark:text-amber-400 hover:underline">Batches</button>
                           <button onClick={async () => { if (serialItem === i.id) { setSerialItem(null); } else { setSerialItem(i.id); setSerials((await api.listSerials(i.id)).items); } }} className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">Serials</button>
                           <button onClick={async () => { await api.deleteInventoryItem(i.id); load(); }} className="text-xs font-semibold text-slate-400 hover:underline">Remove</button>
@@ -730,14 +834,14 @@ export default function OpsPage() {
                       <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[po.status] || STATUS_BADGE.open}`}>{po.status}</span>
                       {po.stage_label && <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300">{po.stage_label}</span>}
                       {(po.approval_stage === 'first' || po.approval_stage === 'final') && po.status === 'draft' && <>
-                        <button onClick={async () => { try { await api.approvePO(po.id); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Approve</button>
-                        <button onClick={async () => { try { await api.rejectPOApproval(po.id); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-red-500 hover:underline">Reject</button>
+                        <button onClick={() => runMoney(`po-approve-${po.id}`, async () => { await api.approvePO(po.id); load(); })} disabled={busy === `po-approve-${po.id}`} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-50">Approve</button>
+                        <button onClick={() => runMoney(`po-reject-${po.id}`, async () => { await api.rejectPOApproval(po.id); load(); })} disabled={busy === `po-reject-${po.id}`} className="text-xs font-semibold text-red-500 hover:underline disabled:opacity-50">Reject</button>
                       </>}
-                      {po.status === 'draft' && <button onClick={async () => { await api.orderPO(po.id); load(); }} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">Order</button>}
-                      {(po.status === 'draft' || po.status === 'ordered') && <button onClick={async () => { await api.receivePO(po.id); setNotice(`Received ${po.po_no} — stock updated, AP posted.`); setTimeout(() => setNotice(''), 4000); load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Receive</button>}
-                      {po.status === 'received' && <button onClick={async () => { await api.payPO(po.id); load(); }} className="text-xs font-semibold text-violet-600 dark:text-violet-400 hover:underline">Pay</button>}
+                      {po.status === 'draft' && <button onClick={() => runMoney(`po-order-${po.id}`, async () => { await api.orderPO(po.id); load(); })} disabled={busy === `po-order-${po.id}`} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline disabled:opacity-50">Order</button>}
+                      {(po.status === 'draft' || po.status === 'ordered') && <button onClick={() => runMoney(`po-receive-${po.id}`, async () => { const res = await api.receivePO(po.id); if (!journalWarningFor(res, `Received ${po.po_no}`)) { setNotice(`Received ${po.po_no} — stock updated, AP posted.`); setTimeout(() => setNotice(''), 4000); } load(); })} disabled={busy === `po-receive-${po.id}`} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-50">Receive</button>}
+                      {po.status === 'received' && <button onClick={() => runMoney(`po-pay-${po.id}`, async () => { const res = await api.payPO(po.id); journalWarningFor(res, `Payment for ${po.po_no}`); load(); })} disabled={busy === `po-pay-${po.id}`} className="text-xs font-semibold text-violet-600 dark:text-violet-400 hover:underline disabled:opacity-50">Pay</button>}
                       {(po.status === 'received' || po.status === 'paid') && <button onClick={() => { setPoReturnFor(poReturnFor === po.id ? null : po.id); setPoReturnQty({}); }} className="text-xs font-semibold text-amber-600 dark:text-amber-400 hover:underline">Return items</button>}
-                      {(po.status === 'draft' || po.status === 'ordered') && <button onClick={async () => { await api.cancelPO(po.id); load(); }} className="text-xs font-semibold text-red-500 hover:underline">Cancel</button>}
+                      {(po.status === 'draft' || po.status === 'ordered') && <button onClick={() => runMoney(`po-cancel-${po.id}`, async () => { await api.cancelPO(po.id); load(); })} disabled={busy === `po-cancel-${po.id}`} className="text-xs font-semibold text-red-500 hover:underline disabled:opacity-50">Cancel</button>}
                     </div>
                   </div>
                   {poReturnFor === po.id && (
@@ -749,7 +853,7 @@ export default function OpsPage() {
                           <input type="number" min="0" value={poReturnQty[l.id] || ''} onChange={(e) => setPoReturnQty((q) => ({ ...q, [l.id]: e.target.value }))} placeholder="Return qty" className="w-28 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1.5 text-xs" />
                         </div>
                       ))}
-                      <button onClick={() => submitPurchaseReturn(po)} className="mt-1 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold px-3 py-1.5 rounded-lg">Post debit note</button>
+                      <button onClick={() => submitPurchaseReturn(po)} disabled={busy === `purchase-return-${po.id}`} className="mt-1 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold px-3 py-1.5 rounded-lg disabled:opacity-50">Post debit note</button>
                     </div>
                   )}
                 </li>
@@ -861,14 +965,14 @@ export default function OpsPage() {
                       </div>
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[inv.status] || STATUS_BADGE.draft}`}>{inv.status}</span>
-                        {inv.stored_status === 'draft' && <button onClick={async () => { await api.sendInvoice(inv.id); load(); }} className="text-xs font-semibold text-sky-600 dark:text-sky-400 hover:underline">Send</button>}
+                        {inv.stored_status === 'draft' && <button onClick={() => runMoney(`inv-send-${inv.id}`, async () => { const res = await api.sendInvoice(inv.id); journalWarningFor(res, `Invoice ${inv.invoice_no}`); load(); })} disabled={busy === `inv-send-${inv.id}`} className="text-xs font-semibold text-sky-600 dark:text-sky-400 hover:underline disabled:opacity-50">Send</button>}
                         {inv.stored_status === 'draft' && <button onClick={async () => { await api.cancelInvoice(inv.id); load(); }} className="text-xs font-semibold text-red-500 hover:underline">Cancel</button>}
                         <a href={api.invoicePdfUrl(inv.id)} className="text-xs font-semibold text-red-500 hover:underline">PDF</a>
                         <a href={api.deliveryNoteUrl(inv.id)} className="text-xs font-semibold text-slate-500 dark:text-slate-400 hover:underline">Delivery Note</a>
                         {(inv.stored_status === 'sent' || inv.stored_status === 'partial' || inv.stored_status === 'paid') && <button onClick={() => { setReturnFor(returnFor === inv.id ? null : inv.id); setReturnQty({}); }} className="text-xs font-semibold text-amber-600 dark:text-amber-400 hover:underline">Return items</button>}
                         {(inv.stored_status === 'sent' || inv.stored_status === 'partial') && <>
                           <input type="number" value={payAmt[inv.id] || ''} onChange={(e) => setPayAmt((p) => ({ ...p, [inv.id]: e.target.value }))} placeholder="Amount" className="w-28 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1.5 text-xs" />
-                          <button onClick={async () => { const amt = Number(payAmt[inv.id]); if (!amt) return; try { await api.recordInvoicePayment(inv.id, { amount: amt, payment_date: new Date().toISOString().slice(0, 10), method: 'cash' }); setPayAmt((p) => ({ ...p, [inv.id]: '' })); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Record payment</button>
+                          <button onClick={() => runMoney(`inv-pay-${inv.id}`, async () => { const amt = Number(payAmt[inv.id]); if (!amt) return; const res = await api.recordInvoicePayment(inv.id, { amount: amt, payment_date: new Date().toISOString().slice(0, 10), method: 'cash' }); setPayAmt((p) => ({ ...p, [inv.id]: '' })); journalWarningFor(res, `Payment on ${inv.invoice_no}`); load(); })} disabled={busy === `inv-pay-${inv.id}`} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-50">Record payment</button>
                         </>}
                       </div>
                     </div>
@@ -882,7 +986,7 @@ export default function OpsPage() {
                             <input type="number" min="0" value={returnQty[l.id] || ''} onChange={(e) => setReturnQty((q) => ({ ...q, [l.id]: e.target.value }))} placeholder="Return qty" className="w-28 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1.5 text-xs" />
                           </div>
                         ))}
-                        <button onClick={() => submitSalesReturn(inv)} className="mt-1 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold px-3 py-1.5 rounded-lg">Post credit note</button>
+                        <button onClick={() => submitSalesReturn(inv)} disabled={busy === `sales-return-${inv.id}`} className="mt-1 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold px-3 py-1.5 rounded-lg disabled:opacity-50">Post credit note</button>
                       </div>
                     )}
                   </li>
@@ -1045,7 +1149,7 @@ export default function OpsPage() {
                     <input type="number" value={posPay.tax_rate} onChange={(e) => setPosPay({ ...posPay, tax_rate: e.target.value })} title="Commercial tax %" placeholder="Tax %" className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
                     <input value={posPay.customer_name} onChange={(e) => setPosPay({ ...posPay, customer_name: e.target.value })} placeholder="Walk-in customer name (optional)" className="flex-1 min-w-[180px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm" />
                     <span className="text-sm font-bold">Total: {money(posCart.reduce((s, l) => s + l.quantity * l.unit_price, 0) * (1 + (Number(posPay.tax_rate) || 0) / 100))}</span>
-                    <button onClick={completePosSale} className="bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold px-5 py-2.5 rounded-lg transition-colors">Complete Sale</button>
+                    <button onClick={completePosSale} disabled={busy === 'pos-sale'} className="bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold px-5 py-2.5 rounded-lg transition-colors disabled:opacity-50">Complete Sale</button>
                   </div>
                 </div>
               )}
@@ -1061,7 +1165,7 @@ export default function OpsPage() {
                     </div>
                     <div className="flex items-center gap-2">
                       <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[s.status] || STATUS_BADGE.open}`}>{s.status}</span>
-                      {s.status === 'completed' && <button onClick={async () => { try { await api.voidPosSale(s.id); setNotice(`POS sale #${s.id} voided — stock restored, journals reversed.`); setTimeout(() => setNotice(''), 4000); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-red-500 hover:underline">Void</button>}
+                      {s.status === 'completed' && <button onClick={() => runMoney(`void-pos-${s.id}`, async () => { const res = await api.voidPosSale(s.id); if (!journalWarningFor(res, `POS sale #${s.id}`)) { setNotice(`POS sale #${s.id} voided — stock restored, journals reversed.`); setTimeout(() => setNotice(''), 4000); } load(); })} disabled={busy === `void-pos-${s.id}`} className="text-xs font-semibold text-red-500 hover:underline disabled:opacity-50">Void</button>}
                     </div>
                   </li>
                 ))}
@@ -1107,9 +1211,9 @@ export default function OpsPage() {
                     </div>
                     <div className="flex items-center gap-2">
                       <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[t.status] || STATUS_BADGE.open}`}>{t.status.replace('_', ' ')}</span>
-                      {t.status === 'draft' && <button onClick={async () => { try { await api.modSendTransfer(t.id); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-sky-600 dark:text-sky-400 hover:underline">Send</button>}
-                      {t.status === 'in_transit' && <button onClick={async () => { try { await api.modReceiveTransfer(t.id); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Receive</button>}
-                      {(t.status === 'draft' || t.status === 'in_transit') && <button onClick={async () => { try { await api.modCancelTransfer(t.id); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-red-500 hover:underline">Cancel</button>}
+                      {t.status === 'draft' && <button onClick={() => runMoney(`transfer-send-${t.id}`, async () => { const res = await api.modSendTransfer(t.id); journalWarningFor(res, `Transfer ${t.transfer_no}`); load(); })} disabled={busy === `transfer-send-${t.id}`} className="text-xs font-semibold text-sky-600 dark:text-sky-400 hover:underline disabled:opacity-50">Send</button>}
+                      {t.status === 'in_transit' && <button onClick={() => runMoney(`transfer-receive-${t.id}`, async () => { const res = await api.modReceiveTransfer(t.id); journalWarningFor(res, `Transfer ${t.transfer_no}`); load(); })} disabled={busy === `transfer-receive-${t.id}`} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-50">Receive</button>}
+                      {(t.status === 'draft' || t.status === 'in_transit') && <button onClick={() => runMoney(`transfer-cancel-${t.id}`, async () => { await api.modCancelTransfer(t.id); load(); })} disabled={busy === `transfer-cancel-${t.id}`} className="text-xs font-semibold text-red-500 hover:underline disabled:opacity-50">Cancel</button>}
                     </div>
                   </li>
                 ))}
@@ -1194,8 +1298,8 @@ export default function OpsPage() {
                     <p className="text-sm font-bold text-slate-900 dark:text-slate-100">{run.period} <span className="font-normal text-slate-400">· gross {money(run.total_gross)} · deductions {money(run.total_deductions)} · net {money(run.total_net)}</span></p>
                     <div className="flex items-center gap-2">
                       <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[run.status] || STATUS_BADGE.draft}`}>{run.status}</span>
-                      {run.status === 'draft' && <button onClick={async () => { try { await api.approvePayroll(run.id); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-sky-600 dark:text-sky-400 hover:underline">Approve</button>}
-                      {run.status === 'approved' && <button onClick={async () => { try { await api.payPayroll(run.id); } catch (err) { setError(err.message); } setNotice(`Payroll ${run.period} paid — journal posted.`); setTimeout(() => setNotice(''), 4000); load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Pay (post journal)</button>}
+                      {run.status === 'draft' && <button onClick={() => runMoney(`payroll-approve-${run.id}`, async () => { await api.approvePayroll(run.id); load(); })} disabled={busy === `payroll-approve-${run.id}`} className="text-xs font-semibold text-sky-600 dark:text-sky-400 hover:underline disabled:opacity-50">Approve</button>}
+                      {run.status === 'approved' && <button onClick={() => runMoney(`payroll-pay-${run.id}`, async () => { const out = await api.payPayroll(run.id); if (!journalWarningFor(out, `Payroll ${run.period}`)) { setNotice(`Payroll ${run.period} paid — journal posted.`); setTimeout(() => setNotice(''), 4000); } load(); })} disabled={busy === `payroll-pay-${run.id}`} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-50">Pay (post journal)</button>}
                     </div>
                   </div>
                   <div className="overflow-x-auto">
@@ -1210,12 +1314,12 @@ export default function OpsPage() {
                             <td className="py-1.5 pr-3 text-right tabular-nums">{money(l.base_salary)}</td>
                             <td className="py-1.5 pr-3 text-right">
                               {run.status === 'draft' ? (
-                                <input type="number" defaultValue={l.allowances || ''} placeholder="0" onBlur={async (e) => { const v = Number(e.target.value) || 0; if (v !== l.allowances) { await api.updatePayrollLine(run.id, l.id, { allowances: v }); load(); } }} className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-xs text-right" />
+                                <input type="number" defaultValue={l.allowances || ''} placeholder="0" onBlur={async (e) => { const v = Number(e.target.value) || 0; if (v !== l.allowances) { try { await api.updatePayrollLine(run.id, l.id, { allowances: v, expected_version: run.version }); } catch (err) { setError(err.message); } load(); } }} className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-xs text-right" />
                               ) : <span className="tabular-nums">{money(l.allowances)}</span>}
                             </td>
                             <td className="py-1.5 pr-3 text-right">
                               {run.status === 'draft' ? (
-                                <input type="number" defaultValue={(l.manual_deductions ?? l.deductions) || ''} placeholder="0" onBlur={async (e) => { const v = Number(e.target.value) || 0; if (v !== (l.manual_deductions ?? l.deductions)) { await api.updatePayrollLine(run.id, l.id, { deductions: v }); load(); } }} className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-xs text-right" />
+                                <input type="number" defaultValue={(l.manual_deductions ?? l.deductions) || ''} placeholder="0" onBlur={async (e) => { const v = Number(e.target.value) || 0; if (v !== (l.manual_deductions ?? l.deductions)) { try { await api.updatePayrollLine(run.id, l.id, { deductions: v, expected_version: run.version }); } catch (err) { setError(err.message); } load(); } }} className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-xs text-right" />
                               ) : <span className="tabular-nums">{money(l.deductions)}{l.advance_deduction > 0 && <span className="block text-[10px] font-normal text-slate-400">incl. advance repayment {money(l.advance_deduction)}</span>}</span>}
                             </td>
                             <td className="py-1.5 text-right tabular-nums font-semibold">{money(l.net)}</td>
@@ -1250,8 +1354,8 @@ export default function OpsPage() {
                     <div className="flex items-center gap-2">
                       <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[a.status] || STATUS_BADGE.pending}`}>{a.status}</span>
                       {a.status === 'pending' && <>
-                        <button onClick={async () => { try { await api.approveAdvance(a.id); setNotice(`Advance approved for ${a.employee_name} — cash disbursed.`); setTimeout(() => setNotice(''), 4000); } catch (err) { setError(err.message); } load(); }} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Approve & disburse</button>
-                        <button onClick={async () => { await api.rejectAdvance(a.id); load(); }} className="text-xs font-semibold text-red-500 hover:underline">Reject</button>
+                        <button onClick={() => runMoney(`adv-approve-${a.id}`, async () => { const res = await api.approveAdvance(a.id); if (!journalWarningFor(res, `Advance for ${a.employee_name}`)) { setNotice(`Advance approved for ${a.employee_name} — cash disbursed.`); setTimeout(() => setNotice(''), 4000); } load(); })} disabled={busy === `adv-approve-${a.id}`} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-50">Approve & disburse</button>
+                        <button onClick={() => runMoney(`adv-reject-${a.id}`, async () => { await api.rejectAdvance(a.id); load(); })} disabled={busy === `adv-reject-${a.id}`} className="text-xs font-semibold text-red-500 hover:underline disabled:opacity-50">Reject</button>
                       </>}
                     </div>
                   </li>
@@ -1339,8 +1443,8 @@ export default function OpsPage() {
                       ? <a href={viewUploadUrl(e.receipt_url)} target="_blank" rel="noreferrer" className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">Receipt</a>
                       : <label className="text-xs font-semibold text-slate-400 hover:text-brand-600 cursor-pointer hover:underline">+ Receipt<input type="file" accept="image/*,.pdf" className="hidden" onChange={async (ev) => { const f = ev.target.files?.[0]; if (f) { try { await api.opsUploadReceipt(e.id, f); load(); } catch (err) { setError(err.message); } } }} /></label>}
                     {e.status === 'pending' && <>
-                      <button onClick={() => review(e, 'approved')} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Approve</button>
-                      <button onClick={() => review(e, 'rejected')} className="text-xs font-semibold text-red-500 hover:underline">Reject</button>
+                      <button onClick={() => review(e, 'approved')} disabled={busy === `review-${e.id}`} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-50">Approve</button>
+                      <button onClick={() => review(e, 'rejected')} disabled={busy === `review-${e.id}`} className="text-xs font-semibold text-red-500 hover:underline disabled:opacity-50">Reject</button>
                     </>}
                   </div>
                 </li>
