@@ -2019,8 +2019,9 @@ def export_report(report: str, format: str = "xlsx", business_unit_id: Optional[
                     w = max(w, len(str(r[i])) if r[i] is not None else 0)
             widths.append(max(14, min(46, w + 2)))
         wb = Workbook(write_only=True)
-        ws = wb.active
-        ws.title = title[:31]
+        # Write-only workbooks have no active sheet (wb.active is None) —
+        # create_sheet returns the WriteOnlyWorksheet.
+        ws = wb.create_sheet(title[:31])
         for i, w in enumerate(widths, start=1):
             ws.column_dimensions[get_column_letter(i)].width = w
         # P3-1: every string cell goes through _sanitize_excel_cell so a
