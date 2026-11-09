@@ -712,15 +712,55 @@ def delete_journal(entry_id: int, user: User = Depends(require_accounting),
 
 # ---------------------------------------------------------------- reports
 
-def _posted_lines(db: Session, bu_id: int, upto: Optional[date] = None):
-    q = (db.query(JournalLine, Account, JournalEntry)
-         .join(Account, JournalLine.account_id == Account.id)
+# PM-1: report aggregation happens in SQL. _posted_totals returns ONE row
+# per account (debit/credit summed by the database, entry_date range in
+# the query) instead of loading every posted journal line into Python.
+# Callers loop only over these aggregated rows (one per account), so a
+# report's cost grows with the chart of accounts, not with journal
+# history. bu_id=None means group-wide. start/end bound the period;
+# types optionally restricts to account types (e.g. income/expense).
+def _posted_totals(db: Session, bu_id: Optional[int] = None,
+                   start: Optional[date] = None, end: Optional[date] = None,
+                   types: Optional[tuple] = None,
+                   codes: Optional[tuple] = None) -> list[dict]:
+    q = (db.query(
+            Account.id.label("account_id"),
+            Account.code.label("code"),
+            Account.name.label("name"),
+            Account.account_type.label("account_type"),
+            JournalEntry.business_unit_id.label("business_unit_id"),
+            func.coalesce(func.sum(JournalLine.debit), 0).label("debit"),
+            func.coalesce(func.sum(JournalLine.credit), 0).label("credit"))
+         .join(JournalLine, JournalLine.account_id == Account.id)
          .join(JournalEntry, JournalLine.entry_id == JournalEntry.id)
-         .filter(JournalEntry.business_unit_id == bu_id,
-                 JournalEntry.status == "posted"))
-    if upto:
-        q = q.filter(JournalEntry.entry_date <= upto)
-    return q.all()
+         .filter(JournalEntry.status == "posted")
+         .group_by(Account.id, Account.code, Account.name, Account.account_type,
+                   JournalEntry.business_unit_id))
+    if bu_id is not None:
+        q = q.filter(JournalEntry.business_unit_id == bu_id)
+    if start is not None:
+        q = q.filter(JournalEntry.entry_date >= start)
+    if end is not None:
+        q = q.filter(JournalEntry.entry_date <= end)
+    if types is not None:
+        q = q.filter(Account.account_type.in_(types))
+    if codes is not None:
+        q = q.filter(Account.code.in_(codes))
+    return [{
+        "account_id": r.account_id, "code": r.code, "name": r.name,
+        "account_type": r.account_type, "business_unit_id": r.business_unit_id,
+        # SUM over Numeric comes back Decimal on Postgres; on SQLite it can
+        # come back int/float, so normalise through str() exactly like the
+        # existing cash_sum() does.
+        "debit": Decimal(str(r.debit or 0)), "credit": Decimal(str(r.credit or 0)),
+    } for r in q.all()]
+
+
+def _period_start(period: Optional[str]) -> Optional[date]:
+    if not period:
+        return None
+    y, m = period.split("-")
+    return date(int(y), int(m), 1)
 
 
 def _period_end(period: Optional[str]) -> Optional[date]:
@@ -736,25 +776,20 @@ def trial_balance(business_unit_id: int, period: Optional[str] = None,
                   user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     period = validate_period(period)
     check_bu_access(user, business_unit_id)
-    totals: dict[int, dict] = {}
-    for line, acc, _e in _posted_lines(db, business_unit_id, _period_end(period)):
-        t = totals.setdefault(acc.id, {"account": acc, "debit": ZERO, "credit": ZERO})
-        t["debit"] += line.debit or ZERO
-        t["credit"] += line.credit or ZERO
     items = []
     td = tc = ZERO
-    for t in totals.values():
+    for t in sorted(_posted_totals(db, business_unit_id, end=_period_end(period)),
+                    key=lambda r: r["code"]):
         bal = t["debit"] - t["credit"]
         items.append({
-            "account_id": t["account"].id, "code": t["account"].code,
-            "name": t["account"].name, "account_type": t["account"].account_type,
+            "account_id": t["account_id"], "code": t["code"],
+            "name": t["name"], "account_type": t["account_type"],
             "debit": fmt(t["debit"]), "credit": fmt(t["credit"]),
             "balance": fmt(bal),
             "balance_side": "debit" if bal >= 0 else "credit",
         })
         td += t["debit"]
         tc += t["credit"]
-    items.sort(key=lambda x: x["code"])
     return {"items": items, "total_debit": fmt(td), "total_credit": fmt(tc),
             "balanced": td == tc}
 
@@ -794,13 +829,12 @@ def profit_loss(business_unit_id: int, period: Optional[str] = None,
     check_bu_access(user, business_unit_id)
     income: dict[str, Decimal] = {}
     expense: dict[str, Decimal] = {}
-    for line, acc, e in _posted_lines(db, business_unit_id, _period_end(period)):
-        if period and period_of(e.entry_date) != period:
-            continue
-        if acc.account_type == "income":
-            income[acc.code] = income.get(acc.code, ZERO) + (line.credit or ZERO) - (line.debit or ZERO)
-        elif acc.account_type == "expense":
-            expense[acc.code] = expense.get(acc.code, ZERO) + (line.debit or ZERO) - (line.credit or ZERO)
+    for t in _posted_totals(db, business_unit_id, start=_period_start(period),
+                            end=_period_end(period), types=("income", "expense")):
+        if t["account_type"] == "income":
+            income[t["code"]] = income.get(t["code"], ZERO) + t["credit"] - t["debit"]
+        elif t["account_type"] == "expense":
+            expense[t["code"]] = expense.get(t["code"], ZERO) + t["debit"] - t["credit"]
     names = {a.code: a.name for a in db.query(Account).filter(
         Account.business_unit_id == business_unit_id).all()}
     ti = sum(income.values(), ZERO)
@@ -819,16 +853,16 @@ def balance_sheet(business_unit_id: int, period: Optional[str] = None,
     check_bu_access(user, business_unit_id)
     groups: dict[str, dict[str, Decimal]] = {"asset": {}, "liability": {}, "equity": {}}
     retained = ZERO
-    for line, acc, _e in _posted_lines(db, business_unit_id, _period_end(period)):
-        if acc.account_type in groups:
-            bal = (line.debit or ZERO) - (line.credit or ZERO)
-            if acc.account_type != "asset":
+    for t in _posted_totals(db, business_unit_id, end=_period_end(period)):
+        if t["account_type"] in groups:
+            bal = t["debit"] - t["credit"]
+            if t["account_type"] != "asset":
                 bal = -bal  # liability/equity are credit-normal
-            groups[acc.account_type][acc.code] = groups[acc.account_type].get(acc.code, ZERO) + bal
-        elif acc.account_type == "income":
-            retained += (line.credit or ZERO) - (line.debit or ZERO)
-        elif acc.account_type == "expense":
-            retained -= (line.debit or ZERO) - (line.credit or ZERO)
+            groups[t["account_type"]][t["code"]] = groups[t["account_type"]].get(t["code"], ZERO) + bal
+        elif t["account_type"] == "income":
+            retained += t["credit"] - t["debit"]
+        elif t["account_type"] == "expense":
+            retained -= t["debit"] - t["credit"]
     names = {a.code: a.name for a in db.query(Account).filter(
         Account.business_unit_id == business_unit_id).all()}
 
@@ -854,16 +888,6 @@ def balance_sheet(business_unit_id: int, period: Optional[str] = None,
 
 # ------------------------------------------------------- Phase 2: consolidation
 
-def _all_posted_lines(db: Session, upto: Optional[date] = None):
-    q = (db.query(JournalLine, Account, JournalEntry)
-         .join(Account, JournalLine.account_id == Account.id)
-         .join(JournalEntry, JournalLine.entry_id == JournalEntry.id)
-         .filter(JournalEntry.status == "posted"))
-    if upto:
-        q = q.filter(JournalEntry.entry_date <= upto)
-    return q.all()
-
-
 @router.get("/reports/consolidated-pl")
 def consolidated_pl(period: Optional[str] = None, user: User = Depends(require_accounting),
                     db: Session = Depends(get_db)):
@@ -878,23 +902,49 @@ def consolidated_pl(period: Optional[str] = None, user: User = Depends(require_a
     names: dict[str, str] = {}
     ic_income: dict[str, Decimal] = {}
     ic_expense: dict[str, Decimal] = {}
-    posted = _all_posted_lines(db, _period_end(period))
+    start, end = _period_start(period), _period_end(period)
+    for t in _posted_totals(db, start=start, end=end, types=("income", "expense")):
+        names.setdefault(t["code"], t["name"])
+        if t["account_type"] == "income":
+            income[t["code"]] = income.get(t["code"], ZERO) + t["credit"] - t["debit"]
+        elif t["account_type"] == "expense":
+            expense[t["code"]] = expense.get(t["code"], ZERO) + t["debit"] - t["credit"]
     # Reversals of intercompany entries carry source "reversal": they
-    # belong to the elimination too, via the entry they reverse.
-    ic_entry_ids = {e.id for _l, _a, e in posted if e.source == "intercompany"}
-    for line, acc, e in posted:
-        names.setdefault(acc.code, acc.name)
-        if period and period_of(e.entry_date) != period:
-            continue
-        if acc.account_type == "income":
-            income[acc.code] = income.get(acc.code, ZERO) + (line.credit or ZERO) - (line.debit or ZERO)
-        elif acc.account_type == "expense":
-            expense[acc.code] = expense.get(acc.code, ZERO) + (line.debit or ZERO) - (line.credit or ZERO)
-        if e.source == "intercompany" or (e.source == "reversal" and e.reversal_of_id in ic_entry_ids):
-            if acc.account_type == "income":
-                ic_income[acc.code] = ic_income.get(acc.code, ZERO) + (line.credit or ZERO) - (line.debit or ZERO)
-            elif acc.account_type == "expense":
-                ic_expense[acc.code] = ic_expense.get(acc.code, ZERO) + (line.debit or ZERO) - (line.credit or ZERO)
+    # belong to the elimination too, via the entry they reverse. The id
+    # set is built from entries up to the period end (a reversal in this
+    # period can reverse an older intercompany entry), exactly as the old
+    # full-history loop did; the amounts below are period-bounded.
+    ic_ids_q = db.query(JournalEntry.id).filter(
+        JournalEntry.status == "posted", JournalEntry.source == "intercompany")
+    if end:
+        ic_ids_q = ic_ids_q.filter(JournalEntry.entry_date <= end)
+    ic_entry_ids = [e_id for (e_id,) in ic_ids_q.all()]
+    if ic_entry_ids:
+        ic_source = or_(
+            JournalEntry.source == "intercompany",
+            (JournalEntry.source == "reversal")
+            & (JournalEntry.reversal_of_id.in_(ic_entry_ids)))
+    else:
+        ic_source = JournalEntry.source == "intercompany"
+    ic_q = (db.query(
+            Account.code.label("code"),
+            Account.account_type.label("account_type"),
+            func.coalesce(func.sum(JournalLine.debit), 0).label("debit"),
+            func.coalesce(func.sum(JournalLine.credit), 0).label("credit"))
+         .join(JournalLine, JournalLine.account_id == Account.id)
+         .join(JournalEntry, JournalLine.entry_id == JournalEntry.id)
+         .filter(JournalEntry.status == "posted",
+                 Account.account_type.in_(("income", "expense")))
+         .filter(ic_source))
+    if start is not None:
+        ic_q = ic_q.filter(JournalEntry.entry_date >= start)
+    if end is not None:
+        ic_q = ic_q.filter(JournalEntry.entry_date <= end)
+    for r in ic_q.group_by(Account.code, Account.account_type).all():
+        if r.account_type == "income":
+            ic_income[r.code] = ic_income.get(r.code, ZERO) + Decimal(str(r.credit or 0)) - Decimal(str(r.debit or 0))
+        elif r.account_type == "expense":
+            ic_expense[r.code] = ic_expense.get(r.code, ZERO) + Decimal(str(r.debit or 0)) - Decimal(str(r.credit or 0))
     # Eliminate only up to the matched side: if the buyer capitalised the
     # charge instead of expensing it, the unmatched revenue stays (its
     # offset lives on the balance sheet, not in this P&L).
@@ -936,17 +986,17 @@ def consolidated_bs(period: Optional[str] = None, user: User = Depends(require_a
     groups: dict[str, dict[str, Decimal]] = {"asset": {}, "liability": {}, "equity": {}}
     names: dict[str, str] = {}
     retained = ZERO
-    for line, acc, _e in _all_posted_lines(db, _period_end(period)):
-        names.setdefault(acc.code, acc.name)
-        if acc.account_type in groups:
-            bal = (line.debit or ZERO) - (line.credit or ZERO)
-            if acc.account_type != "asset":
+    for t in _posted_totals(db, end=_period_end(period)):
+        names.setdefault(t["code"], t["name"])
+        if t["account_type"] in groups:
+            bal = t["debit"] - t["credit"]
+            if t["account_type"] != "asset":
                 bal = -bal
-            groups[acc.account_type][acc.code] = groups[acc.account_type].get(acc.code, ZERO) + bal
-        elif acc.account_type == "income":
-            retained += (line.credit or ZERO) - (line.debit or ZERO)
-        elif acc.account_type == "expense":
-            retained -= (line.debit or ZERO) - (line.credit or ZERO)
+            groups[t["account_type"]][t["code"]] = groups[t["account_type"]].get(t["code"], ZERO) + bal
+        elif t["account_type"] == "income":
+            retained += t["credit"] - t["debit"]
+        elif t["account_type"] == "expense":
+            retained -= t["debit"] - t["credit"]
     ic_asset = groups["asset"].get("1180", ZERO)
     ic_liab = groups["liability"].get("2180", ZERO)
     elimination = min(ic_asset, ic_liab)
@@ -982,14 +1032,13 @@ def bu_comparison(period: Optional[str] = None, user: User = Depends(require_acc
     period = validate_period(period)
     require_group_access(user)
     per_bu: dict[int, dict[str, Decimal]] = {}
-    for line, acc, e in _all_posted_lines(db, _period_end(period)):
-        if period and period_of(e.entry_date) != period:
-            continue
-        row = per_bu.setdefault(e.business_unit_id, {"income": ZERO, "expense": ZERO})
-        if acc.account_type == "income":
-            row["income"] += (line.credit or ZERO) - (line.debit or ZERO)
-        elif acc.account_type == "expense":
-            row["expense"] += (line.debit or ZERO) - (line.credit or ZERO)
+    for t in _posted_totals(db, start=_period_start(period), end=_period_end(period),
+                            types=("income", "expense")):
+        row = per_bu.setdefault(t["business_unit_id"], {"income": ZERO, "expense": ZERO})
+        if t["account_type"] == "income":
+            row["income"] += t["credit"] - t["debit"]
+        elif t["account_type"] == "expense":
+            row["expense"] += t["debit"] - t["credit"]
     names = {bu.id: bu.name for bu in db.query(BusinessUnit).all()}
     items = [{
         "business_unit_id": bu_id, "bu_name": names.get(bu_id, str(bu_id)),
@@ -1474,11 +1523,13 @@ def bank_reconciliation(bank_id: int, user: User = Depends(require_accounting),
     info = serialize_bank_account(db, b)
     ledger_balance = None
     if b.account_id:
-        total = ZERO
-        for line, acc, _e in _posted_lines(db, b.business_unit_id):
-            if acc.id == b.account_id:
-                total += (line.debit or ZERO) - (line.credit or ZERO)
-        ledger_balance = fmt(total)
+        # PM-1: one SQL SUM for this account, not the BU's whole history.
+        total = db.query(func.coalesce(func.sum(JournalLine.debit - JournalLine.credit), 0)).join(
+            JournalEntry, JournalLine.entry_id == JournalEntry.id).filter(
+            JournalEntry.business_unit_id == b.business_unit_id,
+            JournalEntry.status == "posted",
+            JournalLine.account_id == b.account_id).scalar()
+        ledger_balance = fmt(Decimal(str(total or 0)))
     return {
         **info, "ledger_balance": ledger_balance,
         "difference": (fmt(Decimal(str(ledger_balance)) - Decimal(str(info["statement_balance"])))
@@ -1683,43 +1734,40 @@ def finance_summary(period: Optional[str] = None, user: User = Depends(require_a
     P&L, cash position (1110+1120), AR/AP outstanding, tax payable."""
     require_group_access(user)
     period = validate_period(period) or date.today().strftime("%Y-%m")
+    start, end = _period_start(period), _period_end(period)
     income = ZERO
     expense = ZERO
+    # PM-1: this month's P&L in one SQL aggregate (was: every posted
+    # line group-wide loaded into Python, month filtered in Python).
+    for t in _posted_totals(db, start=start, end=end, types=("income", "expense")):
+        if t["account_type"] == "income":
+            income += t["credit"] - t["debit"]
+        else:
+            expense += t["debit"] - t["credit"]
     cash = ZERO
     tax_payable = ZERO
-    provisioned = set()
-    for line, acc, e in _all_posted_lines(db):
-        provisioned.add(e.business_unit_id)
-        if period_of(e.entry_date) == period:
-            if acc.account_type == "income":
-                income += (line.credit or ZERO) - (line.debit or ZERO)
-            elif acc.account_type == "expense":
-                expense += (line.debit or ZERO) - (line.credit or ZERO)
-        if acc.code in ("1110", "1120"):
-            cash += (line.debit or ZERO) - (line.credit or ZERO)
-        elif acc.code == "2130":
-            tax_payable += (line.credit or ZERO) - (line.debit or ZERO)
-    from src.models import PurchaseOrder, PurchaseReturn, SalesInvoice
-    from src.routers.ops import invoice_amounts, po_total
+    # Cash (1110+1120) and tax payable (2130) are cumulative balances.
+    for t in _posted_totals(db, codes=("1110", "1120", "2130")):
+        if t["code"] in ("1110", "1120"):
+            cash += t["debit"] - t["credit"]
+        elif t["code"] == "2130":
+            tax_payable += t["credit"] - t["debit"]
+    provisioned = {bu_id for (bu_id,) in db.query(
+        JournalEntry.business_unit_id).filter(
+        JournalEntry.status == "posted").distinct().all()}
+    from src.models import PurchaseOrder, SalesInvoice
+    from src.routers.ops import invoice_amounts_batch, po_net_totals_batch
 
     ar = ZERO
-    for inv in db.query(SalesInvoice).filter(SalesInvoice.status.in_(("sent", "partial"))).all():
-        ar += invoice_amounts(db, inv)["balance"] * Decimal(str(getattr(inv, "exchange_rate", 1) or 1))
+    invs = db.query(SalesInvoice).filter(SalesInvoice.status.in_(("sent", "partial"))).all()
+    amounts = invoice_amounts_batch(db, invs)
+    for inv in invs:
+        ar += amounts[inv.id]["balance"] * Decimal(str(getattr(inv, "exchange_rate", 1) or 1))
     received_pos = db.query(PurchaseOrder).filter(PurchaseOrder.status == "received").all()
     ap = ZERO
+    net_pos = po_net_totals_batch(db, received_pos)
     for po in received_pos:
-        ap += po_total(po) * Decimal(str(getattr(po, "exchange_rate", 1) or 1))
-    # Posted purchase returns reduce what is actually owed on a received
-    # PO: each return is valued at its PO line cost, converted at the PO's
-    # exchange rate exactly like po_total above.
-    received_by_id = {po.id: po for po in received_pos}
-    for r in db.query(PurchaseReturn).filter(PurchaseReturn.status == "posted").all():
-        po = received_by_id.get(r.po_id)
-        if not po:
-            continue
-        ret_total = sum((Decimal(str(l.quantity)) * Decimal(str(l.unit_cost))
-                         for l in r.lines), ZERO)
-        ap -= ret_total * Decimal(str(getattr(po, "exchange_rate", 1) or 1))
+        ap += net_pos[po.id] * Decimal(str(getattr(po, "exchange_rate", 1) or 1))
     return {
         "period": period, "has_books": len(provisioned) > 0,
         "income": fmt(income), "expenses": fmt(expense), "net_profit": fmt(income - expense),
@@ -1745,19 +1793,31 @@ def tax_report(business_unit_id: int, period: str, user: User = Depends(get_curr
     paid = ZERO
     items = []
     if acc:
-        for line, a, e in _posted_lines(db, business_unit_id):
-            if a.id != acc.id:
-                continue
+        start, end = _period_start(period), _period_end(period)
+        # PM-1: opening / in-period sums in SQL; only the period's detail
+        # rows come back to Python (period-bounded, not full history).
+        base = db.query(func.coalesce(func.sum(JournalLine.credit), 0),
+                        func.coalesce(func.sum(JournalLine.debit), 0)).join(
+            JournalEntry, JournalLine.entry_id == JournalEntry.id).filter(
+            JournalLine.account_id == acc.id, JournalEntry.status == "posted")
+        ocr, odr = base.filter(JournalEntry.entry_date < start).one()
+        opening = Decimal(str(ocr or 0)) - Decimal(str(odr or 0))
+        ccr, cdr = base.filter(JournalEntry.entry_date >= start,
+                               JournalEntry.entry_date <= end).one()
+        charged = Decimal(str(ccr or 0))
+        paid = Decimal(str(cdr or 0))
+        for line, e in (db.query(JournalLine, JournalEntry)
+                        .join(JournalEntry, JournalLine.entry_id == JournalEntry.id)
+                        .filter(JournalLine.account_id == acc.id,
+                                JournalEntry.status == "posted",
+                                JournalEntry.entry_date >= start,
+                                JournalEntry.entry_date <= end)
+                        .order_by(JournalEntry.entry_date, JournalEntry.id).all()):
             cr = line.credit or ZERO
             dr = line.debit or ZERO
-            if period_of(e.entry_date) < period:
-                opening += cr - dr
-            elif period_of(e.entry_date) == period:
-                charged += cr
-                paid += dr
-                items.append({"date": e.entry_date.isoformat(), "entry_no": e.entry_no,
-                              "description": e.description,
-                              "charged": fmt(cr), "paid": fmt(dr)})
+            items.append({"date": e.entry_date.isoformat(), "entry_no": e.entry_no,
+                          "description": e.description,
+                          "charged": fmt(cr), "paid": fmt(dr)})
     return {
         "period": period, "account_code": "2130",
         "opening_balance": fmt(opening), "tax_charged": fmt(charged),
@@ -1782,13 +1842,12 @@ def list_budgets(business_unit_id: int, period: str, user: User = Depends(get_cu
     for a in db.query(Account).filter(Account.business_unit_id == business_unit_id).all():
         types[a.code] = a.account_type
         names[a.code] = a.name
-    for line, acc, e in _posted_lines(db, business_unit_id):
-        if period_of(e.entry_date) != period or acc.account_type not in ("income", "expense"):
-            continue
-        if acc.account_type == "income":
-            actuals[acc.code] = actuals.get(acc.code, ZERO) + (line.credit or ZERO) - (line.debit or ZERO)
+    for t in _posted_totals(db, business_unit_id, start=_period_start(period),
+                            end=_period_end(period), types=("income", "expense")):
+        if t["account_type"] == "income":
+            actuals[t["code"]] = actuals.get(t["code"], ZERO) + t["credit"] - t["debit"]
         else:
-            actuals[acc.code] = actuals.get(acc.code, ZERO) + (line.debit or ZERO) - (line.credit or ZERO)
+            actuals[t["code"]] = actuals.get(t["code"], ZERO) + t["debit"] - t["credit"]
     items = []
     for b in db.query(Budget).filter(Budget.business_unit_id == business_unit_id,
                                      Budget.period == period).order_by(Budget.account_code).all():

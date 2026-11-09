@@ -1730,6 +1730,7 @@ def serialize_po(db: Session, po: PurchaseOrder) -> dict:
                         else "Approval rejected" if getattr(po, "approval_stage", None) == "rejected" else None),
         "currency": getattr(po, "currency", "MMK") or "MMK",
         "exchange_rate": float(getattr(po, "exchange_rate", 1) or 1),
+        "version": getattr(po, "version", 0) or 0,
         "received_at": po.received_at.isoformat() if po.received_at else None,
         "paid_at": po.paid_at.isoformat() if po.paid_at else None,
         "lines": [{"id": l.id, "item_name": l.item_name, "inventory_item_id": l.inventory_item_id,
@@ -1932,6 +1933,8 @@ def reject_po_approval(po_id: int, user: User = Depends(require_admin), db: Sess
 class POUpdate(BaseModel):
     notes: Optional[str] = None
     lines: Optional[list[POLineIn]] = None
+    # CM-8: optional optimistic-lock version the editor read.
+    expected_version: Optional[int] = None
 
 
 @router.patch("/purchase-orders/{po_id}")
@@ -1942,6 +1945,7 @@ def update_po(po_id: int, payload: POUpdate, user: User = Depends(get_current_us
     bu_scope(user, po.business_unit_id)
     if po.status != "draft":
         raise HTTPException(400, "Only draft POs can be edited")
+    _check_version(po, payload.expected_version, f"Purchase order {po.po_no}")
     if payload.notes is not None:
         po.notes = payload.notes
     if payload.lines is not None:
@@ -1970,6 +1974,7 @@ def update_po(po_id: int, payload: POUpdate, user: User = Depends(get_current_us
     db.refresh(po)
     total_mmk = po_total(po) * Decimal(str(getattr(po, "exchange_rate", 1) or 1))
     po.approval_stage = "first" if total_mmk > TWO_STAGE_THRESHOLD else None
+    po.version = (po.version or 0) + 1
     db.commit()
     db.refresh(po)
     _log_audit(db, user, "UPDATE_PO", f"po_id={po_id}")
@@ -2087,6 +2092,7 @@ def serialize_customer(c: Customer) -> dict:
         "contact_person": c.contact_person, "phone": c.phone, "email": c.email,
         "address": c.address, "credit_limit": float(c.credit_limit) if c.credit_limit is not None else None,
         "is_active": c.is_active,
+        "version": getattr(c, "version", 0) or 0,
     }
 
 
@@ -2164,6 +2170,73 @@ def invoice_amounts(db: Session, inv: SalesInvoice) -> dict:
             "returns": returns, "balance": total - returns - paid}
 
 
+def invoice_amounts_batch(db: Session, invoices) -> dict[int, dict]:
+    """invoice_amounts() for many invoices with O(1) queries (PM-3).
+
+    One aggregate query each for line totals, payments and posted-return
+    nets, instead of two queries plus one lazy line-load per invoice.
+    The per-invoice maths is identical to invoice_amounts() (same tax
+    quantisation, same balance definition); returns {invoice_id: amounts}
+    in exactly invoice_amounts()'s shape.
+    """
+    invs = list(invoices)
+    if not invs:
+        return {}
+    ids = [inv.id for inv in invs]
+    line_totals = {i_id: Decimal(str(v or 0)) for i_id, v in db.query(
+        SalesInvoiceLine.invoice_id,
+        func.coalesce(func.sum(SalesInvoiceLine.quantity * SalesInvoiceLine.unit_price), 0),
+    ).filter(SalesInvoiceLine.invoice_id.in_(ids)).group_by(SalesInvoiceLine.invoice_id).all()}
+    paid = {i_id: Decimal(str(v or 0)) for i_id, v in db.query(
+        InvoicePayment.invoice_id,
+        func.coalesce(func.sum(InvoicePayment.amount), 0),
+    ).filter(InvoicePayment.invoice_id.in_(ids)).group_by(InvoicePayment.invoice_id).all()}
+    returns_net = {i_id: Decimal(str(v or 0)) for i_id, v in db.query(
+        SalesReturn.invoice_id,
+        func.coalesce(func.sum(SalesReturnLine.quantity * SalesReturnLine.unit_price), 0),
+    ).join(SalesReturnLine, SalesReturnLine.return_id == SalesReturn.id).filter(
+        SalesReturn.invoice_id.in_(ids), SalesReturn.status == "posted",
+    ).group_by(SalesReturn.invoice_id).all()}
+    out = {}
+    for inv in invs:
+        subtotal = line_totals.get(inv.id, Decimal("0"))
+        tax = (subtotal * Decimal(str(inv.tax_rate or 0)) / Decimal("100")).quantize(Decimal("0.01"))
+        total = subtotal + tax
+        ret_net = returns_net.get(inv.id, Decimal("0"))
+        ret_tax = (ret_net * Decimal(str(inv.tax_rate or 0)) / Decimal("100")).quantize(Decimal("0.01"))
+        returns = ret_net + ret_tax
+        paid_amt = paid.get(inv.id, Decimal("0"))
+        out[inv.id] = {"subtotal": subtotal, "tax": tax, "total": total, "paid": paid_amt,
+                       "returns": returns, "balance": total - returns - paid_amt}
+    return out
+
+
+def po_net_totals_batch(db: Session, pos) -> dict[int, Decimal]:
+    """po_total() minus posted purchase returns, per PO, with O(1) queries (PM-3).
+
+    Returns {po_id: po_total - posted returns} in the PO's currency — the
+    net AP figure aging_report and finance_summary both need. Identical
+    arithmetic to po_total() minus the per-PO returns aggregate the
+    aging report used to run inline.
+    """
+    pos = list(pos)
+    if not pos:
+        return {}
+    ids = [po.id for po in pos]
+    totals = {p_id: Decimal(str(v or 0)) for p_id, v in db.query(
+        PurchaseOrderLine.po_id,
+        func.coalesce(func.sum(PurchaseOrderLine.quantity * PurchaseOrderLine.unit_cost), 0),
+    ).filter(PurchaseOrderLine.po_id.in_(ids)).group_by(PurchaseOrderLine.po_id).all()}
+    returns = {p_id: Decimal(str(v or 0)) for p_id, v in db.query(
+        PurchaseReturn.po_id,
+        func.coalesce(func.sum(PurchaseReturnLine.quantity * PurchaseReturnLine.unit_cost), 0),
+    ).join(PurchaseReturnLine, PurchaseReturnLine.return_id == PurchaseReturn.id).filter(
+        PurchaseReturn.po_id.in_(ids), PurchaseReturn.status == "posted",
+    ).group_by(PurchaseReturn.po_id).all()}
+    return {po.id: totals.get(po.id, Decimal("0")) - returns.get(po.id, Decimal("0"))
+            for po in pos}
+
+
 def serialize_invoice(db: Session, inv: SalesInvoice) -> dict:
     a = invoice_amounts(db, inv)
     overdue = (inv.status in ("sent", "partial") and inv.due_date is not None
@@ -2183,6 +2256,7 @@ def serialize_invoice(db: Session, inv: SalesInvoice) -> dict:
         "subtotal": float(a["subtotal"]), "tax_amount": float(a["tax"]),
         "total": float(a["total"]), "paid": float(a["paid"]), "balance": float(a["balance"]),
         "returns": float(a.get("returns") or 0),
+        "version": getattr(inv, "version", 0) or 0,
         "lines": [{"id": l.id, "description": l.description, "quantity": float(l.quantity),
                    "unit_price": float(l.unit_price),
                    "serial_nos": _serial_list(getattr(l, "serial_nos", None)),
@@ -2742,6 +2816,7 @@ def serialize_payroll(db: Session, run: PayrollRun) -> dict:
         "bu_name": run.business_unit.name if run.business_unit else None,
         "period": run.period, "status": run.status,
         "paid_at": run.paid_at.isoformat() if run.paid_at else None,
+        "version": getattr(run, "version", 0) or 0,
         "lines": lines,
         "total_gross": float(totals["gross"]), "total_deductions": float(totals["deductions"]),
         "total_advance_deductions": float(totals["advance_deductions"]),
