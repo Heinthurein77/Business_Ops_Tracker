@@ -141,9 +141,23 @@ def ensure_period_open(db: Session, bu_id: int, d: date) -> None:
         FiscalPeriod.business_unit_id == bu_id, FiscalPeriod.period == p).with_for_update().first()
     if row is None:
         row = FiscalPeriod(business_unit_id=bu_id, period=p, status="open")
-        db.add(row)
-        db.flush()
-    elif row.status == "closed":
+        try:
+            # Two concurrent first-posts in a fresh BU+period both see
+            # no row and both insert — the loser hits uq_fiscal_bu_period.
+            # Contain it in a SAVEPOINT and re-read the winner's row
+            # instead of surfacing a 500. The row is added INSIDE the
+            # block: begin_nested() auto-flushes pending objects first,
+            # so adding it before would fail outside the savepoint.
+            with db.begin_nested():
+                db.add(row)
+                db.flush()
+        except IntegrityError:
+            row = db.query(FiscalPeriod).filter(
+                FiscalPeriod.business_unit_id == bu_id,
+                FiscalPeriod.period == p).first()
+            if row is None:
+                raise
+    if row.status == "closed":
         raise HTTPException(400, f"Fiscal period {p} is closed for this business unit")
 
 
@@ -253,7 +267,10 @@ def create_entry(db: Session, bu_id: int, entry_date: date, description: str,
         posted_by_id=user_id if post else None,
         posted_at=utcnow() if post else None,
     )
-    db.add(e)
+    # NOTE: `e` is added INSIDE the savepoint block, because
+    # begin_nested() auto-flushes pending objects first — adding it
+    # before would make the failing INSERT happen outside the
+    # savepoint and de-activate the whole transaction.
     try:
         # Cm-3: the number is count+1, so two concurrent creates can
         # collide. Retry the computation once in-process inside a
@@ -261,9 +278,15 @@ def create_entry(db: Session, bu_id: int, entry_date: date, description: str,
         # caller's whole transaction (the old db.rollback() here used
         # to discard the caller's uncommitted business rows too).
         with db.begin_nested():
+            db.add(e)
             db.flush()
     except IntegrityError:
+        # Collision on entry_no — recompute once and retry. The
+        # savepoint rollback expunged `e` (objects added after the
+        # SAVEPOINT was established do not survive it), so re-add it
+        # before the retry flush.
         e.entry_no = next_entry_no(db, bu_id, entry_date)
+        db.add(e)
         try:
             with db.begin_nested():
                 db.flush()
@@ -1371,8 +1394,23 @@ def close_period(payload: PeriodAction, user: User = Depends(require_admin),
         return {"ok": True, "period": payload.period, "status": "closed"}
     if not row:
         row = FiscalPeriod(business_unit_id=payload.business_unit_id, period=payload.period)
-        db.add(row)
-        db.flush()
+        try:
+            # Same concurrent-create race as ensure_period_open: two
+            # closes for a fresh period both insert — the loser re-reads
+            # the winner's row instead of surfacing a 500. The row is
+            # added INSIDE the block (begin_nested() auto-flushes
+            # pending objects first).
+            with db.begin_nested():
+                db.add(row)
+                db.flush()
+        except IntegrityError:
+            row = db.query(FiscalPeriod).filter(
+                FiscalPeriod.business_unit_id == payload.business_unit_id,
+                FiscalPeriod.period == payload.period).first()
+            if row is None:
+                raise
+            if row.status == "closed":
+                return {"ok": True, "period": payload.period, "status": "closed"}
     # Unposted drafts in the period could never be posted once it closes.
     y, m = map(int, payload.period.split("-"))
     drafts = db.query(JournalEntry).filter(

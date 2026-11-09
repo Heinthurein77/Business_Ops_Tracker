@@ -2039,7 +2039,10 @@ def update_po(po_id: int, payload: POUpdate, user: User = Depends(get_current_us
     # Recompute on every draft edit, including "approved": an approver's
     # sign-off must never survive an edit that changes the order. Refresh
     # first: deleted lines linger in the in-memory collection after flush,
-    # so po_total() would otherwise see the pre-edit lines.
+    # so po_total() would otherwise see the pre-edit lines. Flush before
+    # the refresh, or unflushed edits above (e.g. notes) would be silently
+    # discarded by it.
+    db.flush()
     db.refresh(po)
     total_mmk = po_total(po) * Decimal(str(getattr(po, "exchange_rate", 1) or 1))
     po.approval_stage = "first" if total_mmk > TWO_STAGE_THRESHOLD else None
@@ -4499,13 +4502,11 @@ def approve_advance(advance_id: int, user: User = Depends(require_admin), db: Se
     # gets a 409 with the already-moved status, on BOTH dialects.
     claimed = db.query(StaffAdvance).filter(
         StaffAdvance.id == advance_id, StaffAdvance.status == "pending",
-    ).update({"status": "approved", "version": StaffAdvance.version + 1},
-             synchronize_session=False)
+    ).update({"status": "approved"}, synchronize_session=False)
     if claimed == 0:
         db.refresh(adv)
         raise HTTPException(409, f"Staff advance {advance_id} has already been decided (status: {adv.status})")
     adv.status = "approved"
-    adv.version = (adv.version or 0) + 1
     adv.approved_by_id = user.id
     adv.approved_at = utcnow()
     try:
