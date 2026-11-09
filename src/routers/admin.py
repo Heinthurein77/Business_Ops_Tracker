@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from src.auth import require_roles
 from src.database import get_db
+from src.jobs.reconcile_journals import find_journal_failures
 from src.models import (
     ActivityLog,
     AuditLog,
@@ -972,7 +973,13 @@ def report_logs(limit: int = 200, offset: int = 0,
         .outerjoin(User, AuditLog.user_id == User.id)
         .outerjoin(BusinessUnit, User.business_unit_id == BusinessUnit.id)
         .filter(AuditLog.action.in_(["DAILY_REPORT_SUBMITTED", "HO_DAILY_REPORT_SUBMITTED"]))
-        .order_by(AuditLog.timestamp.desc())
+        # SM-14: timestamp alone is not a total order — two rows stamped in
+        # the same microsecond (possible under a burst on one clock) order
+        # arbitrarily, and timestamp is client-generated, not commit order.
+        # (timestamp DESC, id DESC) makes the sequence the canonical order:
+        # id is monotonically increasing, so the tiebreak is the order the
+        # rows were written.
+        .order_by(AuditLog.timestamp.desc(), AuditLog.id.desc())
         .limit(limit).offset(offset)
         .all()
     )
@@ -1104,7 +1111,9 @@ def security_log(user: User = Depends(require_chairman), db: Session = Depends(g
     entries = (
         db.query(AuditLog)
         .filter(AuditLog.action.in_(SECURITY_LOG_ACTIONS))
-        .order_by(AuditLog.timestamp.desc())
+        # SM-14: (timestamp DESC, id DESC) — see report_logs above; the id
+        # tiebreak is the canonical order under concurrent writes.
+        .order_by(AuditLog.timestamp.desc(), AuditLog.id.desc())
         .limit(500)
         .all()
     )
@@ -1120,6 +1129,29 @@ def security_log(user: User = Depends(require_chairman), db: Session = Depends(g
         for e in entries
     ]
     return {"logs": logs}
+
+
+@router.get("/journal-failures")
+def journal_failures(limit: int = 200, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """SC-1: operations whose journal never posted (POS sales, returns,
+    transfers, expense approvals, daily reports) — the admin view for the
+    daily reconciliation job (src/jobs/reconcile_journals.py, same
+    detection). Each entry carries the (source, source_id) pair the
+    re-post endpoint takes, so the frontend can retry it in place:
+    POST /api/accounting/journal/retry {"source": ..., "source_id": ...}
+    (returns already_posted:true if a journal has since appeared, 404 if
+    the source is unknown, 409 if it still cannot post)."""
+    limit = max(1, min(limit, 500))
+    failures = find_journal_failures(db, limit=limit)
+    return {
+        "failures": failures,
+        "total": len(failures),
+        "retry": {
+            "method": "POST",
+            "path": "/api/accounting/journal/retry",
+            "body": {"source": "<source>", "source_id": "<source_id>"},
+        },
+    }
 
 
 @router.get("/ceo-profiles")
