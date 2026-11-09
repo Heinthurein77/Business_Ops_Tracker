@@ -12,7 +12,7 @@ os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 from sqlalchemy import create_engine
@@ -44,7 +44,10 @@ class DatabaseTestCase(unittest.TestCase):
         self.engine = create_engine("sqlite://")
         Base.metadata.create_all(self.engine)
         self.db = sessionmaker(bind=self.engine, autoflush=False)()
-        self.now = datetime.utcnow()
+        # Pm-4: naive UTC (the stored timestamps and throttle windows
+        # are naive); now(timezone.utc) without the tzinfo strip would
+        # break naive-vs-naive comparisons downstream.
+        self.now = datetime.now(timezone.utc).replace(tzinfo=None)
         throttle._warned_private_ip = False
 
     def tearDown(self):

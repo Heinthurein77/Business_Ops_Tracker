@@ -6,7 +6,7 @@ SessionLocal is monkeypatched in (the same pattern as the scheduled
 alerts tests in tests/test_bot_review_coverage_batch.py).
 """
 import io
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine
@@ -110,7 +110,9 @@ def _fresh_db_session(scan_db):
 
 def _seed_heartbeat(session, job, age_hours):
     # Relative to the real clock: main() compares against utcnow().
-    session.merge(JobHeartbeat(job_name=job, last_run_at=datetime.utcnow() - timedelta(hours=age_hours),
+    # Pm-4: naive UTC — JobHeartbeat.last_run_at is a naive column and
+    # stale_jobs() compares it against naive utcnow().
+    session.merge(JobHeartbeat(job_name=job, last_run_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=age_hours),
                                last_status="ok"))
     session.commit()
 

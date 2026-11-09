@@ -9,7 +9,7 @@ no httpx/TestClient).
 """
 import asyncio
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 os.environ.setdefault("ENVIRONMENT", "test")
@@ -46,7 +46,9 @@ def add_user(db, username, role, is_active=True):
 
 
 def add_failures(db, username, count, when=None):
-    when = when or datetime.utcnow()
+    # Pm-4: naive UTC — AuditLog.timestamp is a naive column and the
+    # throttle code compares naive-vs-naive.
+    when = when or datetime.now(timezone.utc).replace(tzinfo=None)
     for _ in range(count):
         db.add(AuditLog(action="LOGIN_FAILED", username=username, ip_address="1.1.1.1", timestamp=when))
     db.commit()

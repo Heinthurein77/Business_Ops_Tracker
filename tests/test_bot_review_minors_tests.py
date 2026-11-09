@@ -18,7 +18,7 @@ import os
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -332,7 +332,8 @@ def test_reset_chairman_revokes_sessions_and_sets_temp_password():
         assert chairman.token_version == 1
         assert chairman.require_password_change is True
         assert chairman.temp_password_expires_at is not None
-        assert chairman.temp_password_expires_at > datetime.utcnow()
+        # Pm-4: naive UTC — temp_password_expires_at is stored naive.
+        assert chairman.temp_password_expires_at > datetime.now(timezone.utc).replace(tzinfo=None)
         assert chairman.is_active is True
         # The recovery itself is audited (log_audit writes on its own
         # session, so the row is visible here on the same engine).
@@ -378,7 +379,8 @@ def _seed_audit_logs(db_path):
     engine = create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
-    now = datetime.utcnow()
+    # Pm-4: naive UTC — AuditLog.timestamp is a naive column.
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     session.add_all([
         # Old sign-in/out rows: deleted by the 90-day rule.
         AuditLog(action="LOGIN_SUCCESS", username="ceo_one", ip_address="1.2.3.4",
