@@ -1121,7 +1121,8 @@ class TestCrontabFlock:
         repo = Path(__file__).resolve().parents[1]
         lines = [l for l in (repo / "deploy" / "crontab").read_text().splitlines()
                  if l.strip() and not l.strip().startswith("#")]
-        assert len(lines) == 4  # Pm-1: no new lines added (coordinator adds reconcile)
+        assert len(lines) == 5  # Pm-1: 4 original lines + reconcile line added by coordinator
+        assert any("reconcile_journals" in l for l in lines)
         for line in lines:
             assert "flock -E 99 -n" in line
             assert "already running" in line
