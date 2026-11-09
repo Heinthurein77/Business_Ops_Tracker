@@ -1831,6 +1831,13 @@ def export_excel(
     if range_start and range_end and range_start > range_end:
         range_start, range_end = range_end, range_start
 
+    # PM-4 (coordinator synthesis): a bare call must not load the entire
+    # history of all four tables — default to the last 90 days when no
+    # range is given.
+    if range_start is None and range_end is None:
+        range_end = today_local()
+        range_start = range_end - timedelta(days=89)
+
     business_units = {bu.id: bu for bu in db.query(BusinessUnit).all()}
 
     financial_query = db.query(DailyFinancial)
@@ -1915,6 +1922,12 @@ def export_excel(
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
     sorted_keys = sorted(merged.keys(), key=lambda k: (k[1], business_units[k[0]].code if k[0] in business_units else ""), reverse=True)
+
+    # PM-4 (coordinator synthesis): hard cap — a range wider than ~10k
+    # (BU, day) rows must be narrowed instead of building a huge workbook
+    # in memory on a 768 MB container.
+    if len(sorted_keys) > 10000:
+        raise HTTPException(400, "Export too large (over 10,000 rows) — narrow the date range")
 
     for bu_id, report_date in sorted_keys:
         bu = business_units.get(bu_id)

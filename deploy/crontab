@@ -61,3 +61,10 @@
 # in the container) because it shells out to pg_dump / docker.
 # Log: ~/bot-backup.log
 30 3 * * 0 flock -E 99 -n ~/bot-backup.lock -c 'cd ~/business-ops-tracker && BACKUP_DIR=~/bot-backups ./scripts/backup.sh' >> ~/bot-backup.log 2>&1; rc=$?; if [ $rc -eq 99 ]; then echo "$(date) backup skipped: already running" >> ~/bot-backup.log; exit 0; else exit $rc; fi
+
+# --- reconcile_journals: list operations whose journal never posted
+# (SC-1 / SM-9 / SM-10) and notify Chairman/HO once per run while any
+# failure persists, plus a job_heartbeats row for the dead-man check.
+# Daily 07:30. Follows the same flock pattern as the lines above.
+# Log: ~/bot-reconcile.log
+30 7 * * * flock -E 99 -n ~/bot-reconcile.lock -c 'cd ~/business-ops-tracker && docker compose -f docker-compose.prod.yml exec -T app python -m src.jobs.reconcile_journals' >> ~/bot-reconcile.log 2>&1; rc=$?; if [ $rc -eq 99 ]; then echo "$(date) reconcile_journals skipped: already running" >> ~/bot-reconcile.log; exit 0; else exit $rc; fi

@@ -37,6 +37,7 @@ from src.utils import (
     build_health_rows,
     build_resubmit_audit_detail,
     build_social_rows,
+    classify_post_error,
     compute_field_changes,
     compute_ho_quadrant_summary,
     compute_monthly_social_counts,
@@ -640,12 +641,15 @@ def submit_report(
             # SM-13: route through server_error() — the response and the
             # audit row carry a fixed message + error_id, never the raw
             # exception text (which can carry SQL fragments and
-            # table/column names).
+            # table/column names). The fixed reason category (never raw
+            # text) tells the operator *why* the books did not move.
             err = server_error("Daily report journal could not be posted", exc, logger, context="ho auto-post")
             auto_post_error = err.detail
+            auto_post_reason = classify_post_error(exc)
             log_audit(db, user, "HO_DAILY_REPORT_AUTO_POST_FAILED",
                       f"date={report_date.isoformat()} error_id={_error_id_of(err.detail)}", request)
 
     if auto_post_error is not None:
-        return {"ok": True, "auto_post_failed": True, "auto_post_error": auto_post_error}
+        return {"ok": True, "auto_post_failed": True, "auto_post_error": auto_post_error,
+                "auto_post_reason": auto_post_reason}
     return {"ok": True}

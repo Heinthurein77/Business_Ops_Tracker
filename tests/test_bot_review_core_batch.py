@@ -236,7 +236,11 @@ def test_ceo_submit_surfaces_auto_post_failure(db):
         attachment=None)
     assert out["ok"] is True
     assert out.get("auto_post_failed") is True
-    assert "closed" in out["auto_post_error"].lower()
+    # SM-13 (coordinator synthesis): the response carries a fixed message
+    # + error_id and a safe reason category — never the raw exception text.
+    assert out.get("auto_post_reason") == "period_closed"
+    assert "error_id:" in out["auto_post_error"]
+    assert "Fiscal period" not in out["auto_post_error"]
     assert db.query(AuditLog).filter(
         AuditLog.action == "DAILY_REPORT_AUTO_POST_FAILED").count() == 1
 
@@ -666,6 +670,10 @@ def test_ho_submit_surfaces_posting_failure(db):
     out = _submit_ho(db, 9103, 500000)
     assert out["ok"] is True
     assert out.get("auto_post_failed") is True
-    assert "closed" in out["auto_post_error"].lower()
+    # SM-13 (coordinator synthesis): fixed message + error_id and a safe
+    # reason category — never the raw exception text.
+    assert out.get("auto_post_reason") == "period_closed"
+    assert "error_id:" in out["auto_post_error"]
+    assert "Fiscal period" not in out["auto_post_error"]
     assert db.query(AuditLog).filter(
         AuditLog.action == "HO_DAILY_REPORT_AUTO_POST_FAILED").count() == 1
