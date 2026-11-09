@@ -551,15 +551,6 @@ def test_ho_submit_report_auto_posts_to_ho_bu(ho_db):
     assert float(sum(l.debit for l in live[0].lines)) == 200000
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "INCIDENTAL BUG (not in the review, out of this workstream's file list): "
-    "ho_dashboard passes HeadOfficeActivityLog rows into the shared "
-    "build_activity_rows, which reads a.meetings_count / a.key_achievement — "
-    "columns the c9ec96d6b1e5 migration added only to activity_logs, not to "
-    "ho_activity_logs. The HO dashboard 500s as soon as any HO activity row "
-    "exists. Fix belongs in src/utils.py (getattr fallback) or ho.py, both "
-    "owned by other workstreams — left failing here on purpose so the fix "
-    "is visible; remove the marker when it lands."))
 def test_ho_dashboard_after_submit(ho_db):
     db, ho_user = ho_db, ho_db.test_ho
     _submit(db, ho_user)
