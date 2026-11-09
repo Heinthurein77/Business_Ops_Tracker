@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
@@ -26,7 +26,10 @@ from src.models import (
     Project, PropertyUnit, PurchaseOrder, SalesInvoice, Shipment,
     StockBatch, StockMovement, Supplier, User,
 )
-from src.routers.ops import bu_scope, invoice_amounts, po_total, sales_returns_total
+from src.routers.ops import (_commit_or_409, _idempotency_lookup,
+                             _idempotency_store, _stock_add, _stock_sub,
+                             bu_scope, invoice_amounts, po_total,
+                             sales_returns_total)
 
 router = APIRouter(prefix="/api/modules", tags=["modules"])
 ZERO = Decimal("0")
@@ -97,7 +100,10 @@ class BatchIn(BaseModel):
 def receive_batch(item_id: int, payload: BatchIn, user: User = Depends(get_current_user),
                   db: Session = Depends(get_db)):
     """Receive stock as a tracked batch; item stock rises at weighted avg."""
-    item = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
+    # CC-1: lock the item row — two concurrent batch receipts used to
+    # compute the weighted-average unit_cost from the same old values,
+    # and the second commit silently overwrote the first.
+    item = db.query(InventoryItem).filter(InventoryItem.id == item_id).with_for_update().first()
     if not item:
         raise HTTPException(404, "Item not found")
     bu_scope(user, item.business_unit_id)
@@ -113,14 +119,22 @@ def receive_batch(item_id: int, payload: BatchIn, user: User = Depends(get_curre
     old_cost = Decimal(str(item.unit_cost or 0))
     new_qty = old_qty + qty
     item.unit_cost = ((old_qty * old_cost) + (qty * cost)) / new_qty if new_qty else cost
-    item.current_stock = new_qty
+    _stock_add(db, item, qty)
     item.updated_at = utcnow()
     b = StockBatch(item_id=item.id, batch_no=payload.batch_no.strip(),
                    expiry_date=payload.expiry_date, quantity=qty, unit_cost=cost)
     db.add(b)
     db.add(StockMovement(item_id=item.id, movement_type="in", quantity=qty,
                          reason=f"Batch {b.batch_no} received", recorded_by_id=user.id))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # CM-4: the duplicate check above is check-then-act — two
+        # concurrent receipts of the same batch_no both pass it, and the
+        # loser hits the new uq_stock_batches_item_batch_no constraint.
+        # 409 (retryable), not a 500.
+        db.rollback()
+        raise HTTPException(409, f"Batch {payload.batch_no.strip()} already exists for this item — please retry")
     db.refresh(b)
     _log_audit(db, user, "RECEIVE_BATCH", f"item_id={item_id}")
     return serialize_batch(b)
@@ -157,9 +171,12 @@ def consume_batches_fefo(db: Session, item: InventoryItem, qty: Decimal) -> None
     qty = Decimal(str(qty))
     if qty <= 0:
         return
+    # CC-1: lock the batch rows — two concurrent FEFO consumptions used
+    # to read the same batch quantities and both deduct, driving a batch
+    # negative.
     batches = db.query(StockBatch).filter(StockBatch.item_id == item.id,
                                           StockBatch.quantity > 0).order_by(
-        StockBatch.expiry_date.is_(None), StockBatch.expiry_date, StockBatch.id).all()
+        StockBatch.expiry_date.is_(None), StockBatch.expiry_date, StockBatch.id).with_for_update().all()
     if not batches:
         return
     today = today_local()
@@ -239,7 +256,7 @@ def create_project(payload: ProjectIn, user: User = Depends(get_current_user), d
 @router.post("/projects/{project_id}/status")
 def set_project_status(project_id: int, status: str, user: User = Depends(get_current_user),
                        db: Session = Depends(get_db)):
-    p = db.query(Project).filter(Project.id == project_id).first()
+    p = db.query(Project).filter(Project.id == project_id).with_for_update().first()
     if not p:
         raise HTTPException(404, "Project not found")
     bu_scope(user, p.business_unit_id)
@@ -369,7 +386,7 @@ def create_shipment(payload: ShipmentIn, user: User = Depends(get_current_user),
 @router.post("/shipments/{shipment_id}/status")
 def set_shipment_status(shipment_id: int, status: str, user: User = Depends(get_current_user),
                         db: Session = Depends(get_db)):
-    s = db.query(Shipment).filter(Shipment.id == shipment_id).first()
+    s = db.query(Shipment).filter(Shipment.id == shipment_id).with_for_update().first()
     if not s:
         raise HTTPException(404, "Shipment not found")
     bu_scope(user, s.business_unit_id)
@@ -515,30 +532,49 @@ def complete_production(order_id: int, user: User = Depends(get_current_user),
         raise HTTPException(400, f"Cannot complete a {o.status} order")
     bom = o.bom
     qty = Decimal(str(o.quantity))
+    # Cm-4: lock every stock row this completion touches — components
+    # plus the finished item — in canonical (sorted id) order, before
+    # the stock check, so two concurrent completions cannot both pass
+    # the check on the same component stock.
+    _item_ids = sorted({c.component_item_id for c in bom.components} | {bom.finished_item_id})
+    _locked_items = {}
+    for _iid in _item_ids:
+        _locked_items[_iid] = db.query(InventoryItem).filter(
+            InventoryItem.id == _iid).with_for_update().first()
+    # Conditional claim (backstop on SQLite, where the FOR UPDATE load
+    # above is a no-op): two concurrent completes must not both consume
+    # the same components — the loser gets a 409.
+    _claimed = db.query(ProductionOrder).filter(
+        ProductionOrder.id == order_id, ProductionOrder.status == "planned",
+    ).update({"status": "completed"}, synchronize_session=False)
+    if _claimed == 0:
+        db.refresh(o)
+        raise HTTPException(409, f"Production order {order_id} has already been completed or moved (status: {o.status})")
     # check + value components
     materials = ZERO
     needs = []
     for c in bom.components:
-        item = c.component_item
+        item = _locked_items.get(c.component_item_id) or c.component_item
         need = Decimal(str(c.quantity_per_unit)) * qty
         if Decimal(str(item.current_stock or 0)) < need:
             raise HTTPException(400, f"Not enough stock of {item.name}: need {need}, have {item.current_stock}")
         materials += need * Decimal(str(item.unit_cost or 0))
         needs.append((item, need))
     for item, need in needs:
-        item.current_stock = Decimal(str(item.current_stock)) - need
+        if not _stock_sub(db, item, need):
+            raise HTTPException(409, f"Stock for {item.name} changed while completing — please retry")
         item.updated_at = utcnow()
         consume_batches_fefo(db, item, need)
         db.add(StockMovement(item_id=item.id, movement_type="out", quantity=need,
                              reason=f"Production order #{o.id}", recorded_by_id=user.id))
     total_cost = materials + Decimal(str(o.labour_cost or 0)) + Decimal(str(o.overhead_cost or 0))
     unit_cost = total_cost / qty if qty else ZERO
-    fin = bom.finished_item
+    fin = _locked_items.get(bom.finished_item_id) or bom.finished_item
     old_qty = Decimal(str(fin.current_stock or 0))
     old_cost = Decimal(str(fin.unit_cost or 0))
     new_qty = old_qty + qty
     fin.unit_cost = ((old_qty * old_cost) + total_cost) / new_qty if new_qty else unit_cost
-    fin.current_stock = new_qty
+    _stock_add(db, fin, qty)
     fin.updated_at = utcnow()
     db.add(StockMovement(item_id=fin.id, movement_type="in", quantity=qty,
                          reason=f"Production order #{o.id} completed", recorded_by_id=user.id))
@@ -633,13 +669,18 @@ class SellUnitIn(BaseModel):
 
 @router.post("/property-units/{unit_id}/sell")
 def sell_unit(unit_id: int, payload: SellUnitIn, user: User = Depends(get_current_user),
-              db: Session = Depends(get_db)):
+              db: Session = Depends(get_db),
+              idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     """Sell a unit: creates a sales invoice (draft) and, when requested, a
     monthly installment plan for the balance after the downpayment."""
-    u = db.query(PropertyUnit).filter(PropertyUnit.id == unit_id).first()
+    u = db.query(PropertyUnit).filter(PropertyUnit.id == unit_id).with_for_update().first()
     if not u:
         raise HTTPException(404, "Unit not found")
     bu_scope(user, u.business_unit_id)
+    endpoint = "POST /api/modules/property-units/{unit_id}/sell"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
     if u.status not in ("available", "reserved"):
         raise HTTPException(400, f"Unit is {u.status}")
     cust = db.query(Customer).filter(Customer.id == payload.customer_id,
@@ -649,6 +690,18 @@ def sell_unit(unit_id: int, payload: SellUnitIn, user: User = Depends(get_curren
     price = Decimal(str(payload.price)) if payload.price else Decimal(str(u.asking_price or 0))
     if price <= 0:
         raise HTTPException(400, "A sale price is required")
+    if payload.downpayment_pct > 0 and payload.installments == 0:
+        raise HTTPException(400, "A downpayment needs at least one installment to be recorded against")
+    # CC-2 conditional claim: on SQLite the FOR UPDATE load above is a
+    # no-op, so two concurrent sells of the same unit would both pass
+    # the status check and both create invoices — the loser gets a 409
+    # here instead of a second sale of the same unit.
+    claimed = db.query(PropertyUnit).filter(
+        PropertyUnit.id == unit_id, PropertyUnit.status == "available",
+    ).update({"status": "reserved"}, synchronize_session=False)
+    if claimed == 0:
+        db.refresh(u)
+        raise HTTPException(409, f"Unit {u.unit_no} has already been sold or reserved (status: {u.status})")
     from src.routers.ops import InvoiceIn, InvoiceLineIn, create_invoice
     inv = create_invoice(InvoiceIn(
         business_unit_id=u.business_unit_id, customer_id=cust.id,
@@ -657,11 +710,13 @@ def sell_unit(unit_id: int, payload: SellUnitIn, user: User = Depends(get_curren
         lines=[InvoiceLineIn(description=f"{u.development or ''} Unit {u.unit_no} ({u.unit_type})".strip(),
                              quantity=1, unit_price=float(price))],
     ), user=user, db=db)
-    if payload.downpayment_pct > 0 and payload.installments == 0:
-        raise HTTPException(400, "A downpayment needs at least one installment to be recorded against")
     u.status = "reserved"
     u.sale_invoice_id = inv["id"]
-    db.commit()
+    # Cm-2: compute the whole installment plan in memory and validate
+    # the sum against the invoice total BEFORE inserting any rows or
+    # committing — the old code inserted + committed the plan, then
+    # checked the sum and called db.rollback() on a committed
+    # transaction (a no-op), leaving a bad plan in place.
     plan = []
     if payload.installments > 0:
         total = Decimal(str(inv["total"]))
@@ -672,25 +727,28 @@ def sell_unit(unit_id: int, payload: SellUnitIn, user: User = Depends(get_curren
         seq = 0
         if down > 0:
             seq += 1
-            db.add(Installment(invoice_id=inv["id"], seq=seq, due_date=first, amount=down))
-            plan.append({"seq": seq, "due_date": first.isoformat(), "amount": fmt(down)})
+            plan.append({"seq": seq, "due_date": first, "amount": down})
         for i in range(payload.installments):
             seq += 1
             y = first.year + (first.month - 1 + i + (1 if down > 0 else 0)) // 12
             m = (first.month - 1 + i + (1 if down > 0 else 0)) % 12 + 1
             due = date(y, m, min(first.day, 28))
             amt = per if i < payload.installments - 1 else balance - per * (payload.installments - 1)
-            db.add(Installment(invoice_id=inv["id"], seq=seq, due_date=due, amount=amt))
-            plan.append({"seq": seq, "due_date": due.isoformat(), "amount": fmt(amt)})
-        db.commit()
-        # The plan (downpayment + installments) must sum to the invoice total.
+            plan.append({"seq": seq, "due_date": due, "amount": amt})
         planned = sum((Decimal(str(p["amount"])) for p in plan), Decimal("0"))
-        if planned != Decimal(str(inv["total"])):
+        if planned != total:
             db.rollback()
             raise HTTPException(500, f"Installment plan sums to {planned}, not the invoice total {inv['total']}")
+        for p in plan:
+            db.add(Installment(invoice_id=inv["id"], seq=p["seq"], due_date=p["due_date"], amount=p["amount"]))
+    db.commit()
+    out = {"unit": serialize_unit(u), "invoice_id": inv["id"], "invoice_no": inv["invoice_no"],
+           "total": inv["total"],
+           "installments": [{"seq": p["seq"], "due_date": p["due_date"].isoformat(),
+                             "amount": fmt(p["amount"])} for p in plan]}
     _log_audit(db, user, "SELL_UNIT", f"unit_id={unit_id}")
-    return {"unit": serialize_unit(u), "invoice_id": inv["id"], "invoice_no": inv["invoice_no"],
-            "total": inv["total"], "installments": plan}
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
+    return out
 
 
 @router.get("/invoices/{invoice_id}/installments")
@@ -767,43 +825,78 @@ def list_leases(business_unit_id: Optional[int] = None, user: User = Depends(get
 
 
 @router.post("/leases")
-def create_lease(payload: LeaseIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_lease(payload: LeaseIn, user: User = Depends(get_current_user), db: Session = Depends(get_db),
+                 idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     bu_id = bu_scope(user, payload.business_unit_id)
     if bu_id is None:
         raise HTTPException(400, "business_unit_id is required")
+    endpoint = "POST /api/modules/leases"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
     unit = db.query(PropertyUnit).filter(PropertyUnit.id == payload.unit_id,
-                                         PropertyUnit.business_unit_id == bu_id).first()
+                                         PropertyUnit.business_unit_id == bu_id).with_for_update().first()
     if not unit:
         raise HTTPException(404, "Unit not found in this BU")
+    # CM-4: the sequential 400 below is pinned by test_mc16 — keep it.
+    # The conditional claim is the concurrent backstop: on SQLite the
+    # FOR UPDATE load is a no-op, so two concurrent leases of the same
+    # unit would both pass the check — the loser gets a 409 here.
     if unit.status != "available":
         raise HTTPException(400, f"Unit is {unit.status}; only an available unit can be leased")
     tenant = db.query(Customer).filter(Customer.id == payload.tenant_id,
                                        Customer.business_unit_id == bu_id).first()
     if not tenant:
         raise HTTPException(404, "Tenant not found in this BU")
+    claimed = db.query(PropertyUnit).filter(
+        PropertyUnit.id == unit.id, PropertyUnit.status == "available",
+    ).update({"status": "rented"}, synchronize_session=False)
+    if claimed == 0:
+        db.refresh(unit)
+        raise HTTPException(409, f"Unit {unit.unit_no} has already been leased or moved (status: {unit.status})")
     l = LeaseContract(business_unit_id=bu_id, created_by_id=user.id,
                       **{k: v for k, v in payload.model_dump().items() if k != "business_unit_id"})
     db.add(l)
     unit.status = "rented"
     db.commit()
     db.refresh(l)
+    out = serialize_lease(l)
     _log_audit(db, user, "CREATE_LEASE", f"id={l.id}")
-    return serialize_lease(l)
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
+    return out
 
 
 @router.post("/leases/{lease_id}/bill")
 def bill_lease(lease_id: int, period: Optional[str] = None, user: User = Depends(get_current_user),
-               db: Session = Depends(get_db)):
+               db: Session = Depends(get_db),
+               idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     """Create this month's rent invoice (draft) for an active lease."""
-    l = db.query(LeaseContract).filter(LeaseContract.id == lease_id).first()
+    l = db.query(LeaseContract).filter(LeaseContract.id == lease_id).with_for_update().first()
     if not l:
         raise HTTPException(404, "Lease not found")
     bu_scope(user, l.business_unit_id)
+    endpoint = "POST /api/modules/leases/{lease_id}/bill"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
     if l.status != "active":
         raise HTTPException(400, "Lease is not active")
     period = validate_period(period or today_local().strftime("%Y-%m"))
     if l.last_billed_period == period:
         raise HTTPException(400, f"Rent already billed for {period}")
+    # CM-4 conditional claim on last_billed_period, flushed (executed)
+    # BEFORE create_invoice — which commits internally — so a second
+    # concurrent bill for the same period cannot slip past the check
+    # above on SQLite: the loser gets a 409 instead of a duplicate
+    # rent invoice.
+    claimed = db.query(LeaseContract).filter(
+        LeaseContract.id == lease_id,
+        or_(LeaseContract.last_billed_period.is_(None),
+            LeaseContract.last_billed_period != period),
+    ).update({"last_billed_period": period}, synchronize_session=False)
+    if claimed == 0:
+        db.refresh(l)
+        raise HTTPException(409, f"Rent already billed for {period} (last billed: {l.last_billed_period})")
     from src.routers.ops import InvoiceIn, InvoiceLineIn, create_invoice
     y, m = period.split("-")
     inv = create_invoice(InvoiceIn(
@@ -815,8 +908,10 @@ def bill_lease(lease_id: int, period: Optional[str] = None, user: User = Depends
     ), user=user, db=db)
     l.last_billed_period = period
     db.commit()
+    out = {"invoice_id": inv["id"], "invoice_no": inv["invoice_no"], "period": period}
     _log_audit(db, user, "BILL_LEASE", f"lease_id={lease_id}")
-    return {"invoice_id": inv["id"], "invoice_no": inv["invoice_no"], "period": period}
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
+    return out
 
 
 # ------------------------------------------------------------------ principal report
@@ -1017,93 +1112,136 @@ def create_stock_transfer(payload: StockTransferIn, user: User = Depends(get_cur
 
 @router.post("/stock-transfers/{transfer_id}/send")
 def send_stock_transfer(transfer_id: int, user: User = Depends(get_current_user),
-                        db: Session = Depends(get_db)):
+                        db: Session = Depends(get_db),
+                        idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     """Stock out of the source BU at moving-average cost; the source BU's
     books post Dr 1180 Intercompany Receivable / Cr 1140 Inventory."""
     from src.models import StockMovement as SM
     t = _transfer_or_404(db, transfer_id)
     bu_scope(user, t.from_business_unit_id)
+    endpoint = "POST /api/modules/stock-transfers/{transfer_id}/send"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
     if t.status != "draft":
         raise HTTPException(400, f"Cannot send a transfer in status {t.status}")
+    # Conditional claim (backstop on SQLite, where the FOR UPDATE load
+    # in _transfer_or_404 is a no-op): two concurrent sends must not
+    # both draw the same stock — the loser gets a 409.
+    from src.models import StockTransfer as _ST
+    _claimed = db.query(_ST).filter(
+        _ST.id == transfer_id, _ST.status == "draft",
+    ).update({"status": "in_transit"}, synchronize_session=False)
+    if _claimed == 0:
+        db.refresh(t)
+        raise HTTPException(409, f"Stock transfer {t.transfer_no} has already been sent or moved (status: {t.status})")
     # Aggregate duplicate lines per item before the stock check, so two
     # lines for the same item cannot jointly overdraw the stock.
     from collections import defaultdict
     wanted: dict[int, Decimal] = defaultdict(Decimal)
     for ln in t.lines:
         wanted[ln.inventory_item_id] += Decimal(str(ln.quantity))
-    for item_id, qty in wanted.items():
+    items = {}
+    # Cm-4: lock item rows in canonical (sorted id) order.
+    for item_id, qty in sorted(wanted.items()):
         item = db.query(InventoryItem).filter(InventoryItem.id == item_id).with_for_update().first()
         if item is None or Decimal(str(item.current_stock or 0)) < qty:
             raise HTTPException(400, f"Not enough stock of {item.name if item else item_id} in the source BU")
+        items[item_id] = item
     total_cost = Decimal("0")
     for ln in t.lines:
-        item = ln.inventory_item
+        item = items[ln.inventory_item_id]
         qty = Decimal(str(ln.quantity))
         cost = Decimal(str(item.unit_cost or 0))
         ln.unit_cost = cost
         total_cost += qty * cost
-        item.current_stock = Decimal(str(item.current_stock or 0)) - qty
+        if not _stock_sub(db, item, qty):
+            raise HTTPException(409, f"Stock for {item.name} changed while sending — please retry")
         item.updated_at = utcnow()
         db.add(SM(item_id=item.id, movement_type="out", quantity=qty,
                   reason=f"Stock transfer {t.transfer_no} to BU {t.to_business_unit_id}",
                   recorded_by_id=user.id))
-    for item_id, qty in wanted.items():
-        item = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
-        consume_batches_fefo(db, item, qty)
+    for item_id, qty in sorted(wanted.items()):
+        consume_batches_fefo(db, items[item_id], qty)
     t.status = "in_transit"
     t.sent_at = utcnow()
-    db.commit()
+    # SM-9 fail-hard: the source journal posts in this same transaction,
+    # before the single commit — a journal failure rolls the whole send
+    # back (500) instead of committing stock-out with journal_posted=false.
     journal_posted = None
     if total_cost > 0:
-        journal_posted = True
         try:
-            from src.routers.accounting import _ensure_intercompany_accounts, account_by_code
+            from src.routers.accounting import _ensure_intercompany_accounts, account_by_code, create_entry
             _ensure_intercompany_accounts(db, t.from_business_unit_id)
-            db.commit()
             recv = account_by_code(db, t.from_business_unit_id, "1180")
             inv_acc = account_by_code(db, t.from_business_unit_id, "1140")
             if not (recv and inv_acc):
-                journal_posted = False
-                logger.warning("Transfer journal skipped for %s: accounts 1180/1140 missing in BU %s",
-                               t.transfer_no, t.from_business_unit_id)
-            else:
-                journal_posted = _post_transfer_journal(
-                    db, t.from_business_unit_id,
-                    [{"account_id": recv.id, "debit": total_cost, "credit": 0},
-                     {"account_id": inv_acc.id, "debit": 0, "credit": total_cost}],
-                    user.id, t.id,
-                    f"Stock transfer {t.transfer_no} sent to {t.to_business_unit.name if t.to_business_unit else ''}")
+                raise HTTPException(500, "Intercompany accounts (1180/1140) are not configured for this BU")
+            create_entry(db, t.from_business_unit_id, today_local(),
+                         f"Stock transfer {t.transfer_no} sent to {t.to_business_unit.name if t.to_business_unit else ''}",
+                         "stock_transfer", user.id,
+                         [{"account_id": recv.id, "debit": total_cost, "credit": 0},
+                          {"account_id": inv_acc.id, "debit": 0, "credit": total_cost}],
+                         source_id=t.id, post=True)
+            journal_posted = True
+        except HTTPException:
+            db.rollback()
+            raise
         except Exception as exc:
             db.rollback()
-            journal_posted = False
-            logger.warning("Transfer journal failed for %s: %s", t.transfer_no, exc)
+            raise server_error("Transfer journal could not be posted; transfer left as draft",
+                               exc, logger, context=f"transfer {t.transfer_no}")
+    _commit_or_409(db, f"Stock transfer {t.transfer_no} send")
     db.refresh(t)
     out = serialize_transfer(db, t)
     out["journal_posted"] = journal_posted
     _log_audit(db, user, "SEND_STOCK_TRANSFER", f"transfer_id={transfer_id}")
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
     return out
 
 
 @router.post("/stock-transfers/{transfer_id}/receive")
 def receive_stock_transfer(transfer_id: int, user: User = Depends(get_current_user),
-                           db: Session = Depends(get_db)):
+                           db: Session = Depends(get_db),
+                           idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     """Stock into the destination BU at the transfer cost (moving average
     updated); destination books post Dr 1140 / Cr 2180."""
     from src.models import StockMovement as SM
     t = _transfer_or_404(db, transfer_id)
-    if user.role in ("CEO", "Accountant") and user.business_unit_id and user.business_unit_id not in (t.from_business_unit_id, t.to_business_unit_id):
-        raise HTTPException(403, "Not your business unit")
+    # SM-15: only the DESTINATION BU (or Chairman/HO) may receive a
+    # transfer — the source BU receiving its own in-transit stock back
+    # used to be allowed, which let a source-BU user silently complete
+    # a transfer the destination never saw.
+    if user.role in ("CEO", "Accountant") and user.business_unit_id \
+            and user.business_unit_id != t.to_business_unit_id:
+        raise HTTPException(403, "Only the destination business unit (or Chairman/HO) can receive this transfer")
+    endpoint = "POST /api/modules/stock-transfers/{transfer_id}/receive"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
     if t.status != "in_transit":
         raise HTTPException(400, f"Cannot receive a transfer in status {t.status}")
+    # Conditional claim (backstop on SQLite): two concurrent receives
+    # must not both stock the same goods in — the loser gets a 409.
+    from src.models import StockTransfer as _ST
+    _claimed = db.query(_ST).filter(
+        _ST.id == transfer_id, _ST.status == "in_transit",
+    ).update({"status": "received"}, synchronize_session=False)
+    if _claimed == 0:
+        db.refresh(t)
+        raise HTTPException(409, f"Stock transfer {t.transfer_no} has already been received or moved (status: {t.status})")
     total_cost = Decimal("0")
-    for ln in t.lines:
+    # Cm-4: process lines in canonical (source item name) order so two
+    # concurrent receives touching the same destination items lock them
+    # in the same order.
+    for ln in sorted(t.lines, key=lambda l: (l.inventory_item.name or "")):
         src_item = ln.inventory_item
         qty = Decimal(str(ln.quantity))
         cost = Decimal(str(ln.unit_cost or 0))
         total_cost += qty * cost
         dst = db.query(InventoryItem).filter(
             InventoryItem.business_unit_id == t.to_business_unit_id,
-            InventoryItem.name == src_item.name, InventoryItem.is_active == True).first()  # noqa: E712
+            InventoryItem.name == src_item.name, InventoryItem.is_active == True).with_for_update().first()  # noqa: E712
         if dst is None:
             dst = InventoryItem(business_unit_id=t.to_business_unit_id, name=src_item.name,
                                 sku=src_item.sku, category=src_item.category, unit=src_item.unit,
@@ -1117,7 +1255,7 @@ def receive_stock_transfer(transfer_id: int, user: User = Depends(get_current_us
         old_avg = Decimal(str(dst.unit_cost or 0))
         new_qty = old_qty + qty
         dst.unit_cost = ((old_qty * old_avg + qty * cost) / new_qty) if new_qty > 0 else cost
-        dst.current_stock = new_qty
+        _stock_add(db, dst, qty)
         dst.updated_at = utcnow()
         ln.dest_inventory_item_id = dst.id
         db.add(SM(item_id=dst.id, movement_type="in", quantity=qty,
@@ -1125,35 +1263,39 @@ def receive_stock_transfer(transfer_id: int, user: User = Depends(get_current_us
                   recorded_by_id=user.id))
     t.status = "received"
     t.received_at = utcnow()
-    db.commit()
+    # SM-9 fail-hard: the destination journal posts in this same
+    # transaction, before the single commit — a journal failure rolls
+    # the whole receipt back (500) instead of committing stock-in with
+    # journal_posted=false.
     journal_posted = None
     if total_cost > 0:
-        journal_posted = True
         try:
-            from src.routers.accounting import _ensure_intercompany_accounts, account_by_code
+            from src.routers.accounting import _ensure_intercompany_accounts, account_by_code, create_entry
             _ensure_intercompany_accounts(db, t.to_business_unit_id)
-            db.commit()
             inv_acc = account_by_code(db, t.to_business_unit_id, "1140")
             pay = account_by_code(db, t.to_business_unit_id, "2180")
             if not (inv_acc and pay):
-                journal_posted = False
-                logger.warning("Transfer journal skipped for %s: accounts 1140/2180 missing in BU %s",
-                               t.transfer_no, t.to_business_unit_id)
-            else:
-                journal_posted = _post_transfer_journal(
-                    db, t.to_business_unit_id,
-                    [{"account_id": inv_acc.id, "debit": total_cost, "credit": 0},
-                     {"account_id": pay.id, "debit": 0, "credit": total_cost}],
-                    user.id, t.id,
-                    f"Stock transfer {t.transfer_no} received from {t.from_business_unit.name if t.from_business_unit else ''}")
+                raise HTTPException(500, "Intercompany accounts (1140/2180) are not configured for this BU")
+            create_entry(db, t.to_business_unit_id, today_local(),
+                         f"Stock transfer {t.transfer_no} received from {t.from_business_unit.name if t.from_business_unit else ''}",
+                         "stock_transfer", user.id,
+                         [{"account_id": inv_acc.id, "debit": total_cost, "credit": 0},
+                          {"account_id": pay.id, "debit": 0, "credit": total_cost}],
+                         source_id=t.id, post=True)
+            journal_posted = True
+        except HTTPException:
+            db.rollback()
+            raise
         except Exception as exc:
             db.rollback()
-            journal_posted = False
-            logger.warning("Transfer journal failed for %s: %s", t.transfer_no, exc)
+            raise server_error("Transfer journal could not be posted; receipt rolled back",
+                               exc, logger, context=f"transfer {t.transfer_no}")
+    _commit_or_409(db, f"Stock transfer {t.transfer_no} receive")
     db.refresh(t)
     out = serialize_transfer(db, t)
     out["journal_posted"] = journal_posted
     _log_audit(db, user, "RECEIVE_STOCK_TRANSFER", f"transfer_id={transfer_id}")
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
     return out
 
 
@@ -1167,6 +1309,15 @@ def cancel_stock_transfer(transfer_id: int, user: User = Depends(get_current_use
     t = _transfer_or_404(db, transfer_id)
     bu_scope(user, t.from_business_unit_id)
     if t.status == "draft":
+        # Conditional claim — a concurrent send racing this cancel must
+        # not both succeed; the loser gets a 409.
+        from src.models import StockTransfer as _ST
+        _claimed = db.query(_ST).filter(
+            _ST.id == transfer_id, _ST.status == "draft",
+        ).update({"status": "cancelled"}, synchronize_session=False)
+        if _claimed == 0:
+            db.refresh(t)
+            raise HTTPException(409, f"Stock transfer {t.transfer_no} has already been sent or moved (status: {t.status})")
         t.status = "cancelled"
         db.commit()
         db.refresh(t)
@@ -1174,10 +1325,23 @@ def cancel_stock_transfer(transfer_id: int, user: User = Depends(get_current_use
         return serialize_transfer(db, t)
     if t.status != "in_transit":
         raise HTTPException(400, f"Cannot cancel a transfer in status {t.status}")
+    from src.models import StockTransfer as _ST
+    _claimed = db.query(_ST).filter(
+        _ST.id == transfer_id, _ST.status == "in_transit",
+    ).update({"status": "cancelled"}, synchronize_session=False)
+    if _claimed == 0:
+        db.refresh(t)
+        raise HTTPException(409, f"Stock transfer {t.transfer_no} has already been received or moved (status: {t.status})")
+    # CC-1: lock the restocked source items in canonical (sorted id) order.
+    _item_ids = sorted({ln.inventory_item_id for ln in t.lines})
+    _items = {}
+    for _iid in _item_ids:
+        _items[_iid] = db.query(InventoryItem).filter(
+            InventoryItem.id == _iid).with_for_update().first()
     for ln in t.lines:
-        item = ln.inventory_item
+        item = _items.get(ln.inventory_item_id) or ln.inventory_item
         qty = Decimal(str(ln.quantity))
-        item.current_stock = Decimal(str(item.current_stock or 0)) + qty
+        _stock_add(db, item, qty)
         item.updated_at = utcnow()
         db.add(SM(item_id=item.id, movement_type="in", quantity=qty,
                   reason=f"Stock transfer {t.transfer_no} cancelled",
@@ -1192,7 +1356,7 @@ def cancel_stock_transfer(transfer_id: int, user: User = Depends(get_current_use
     for e in entries:
         _reverse_entry(db, e, user.id)
     t.status = "cancelled"
-    db.commit()
+    _commit_or_409(db, f"Stock transfer {t.transfer_no} cancel")
     db.refresh(t)
     _log_audit(db, user, "CANCEL_STOCK_TRANSFER", f"transfer_id={transfer_id}")
     return serialize_transfer(db, t)
