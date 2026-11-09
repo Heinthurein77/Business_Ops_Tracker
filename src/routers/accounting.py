@@ -1677,11 +1677,30 @@ def export_report(report: str, format: str = "xlsx", business_unit_id: Optional[
 
     if format == "xlsx":
         from openpyxl import Workbook
+        from openpyxl.cell import WriteOnlyCell
         from openpyxl.styles import Font, PatternFill
+        from openpyxl.utils import get_column_letter
+        from starlette.background import BackgroundTask
+        import os
+        import tempfile
 
-        wb = Workbook()
+        # PM-4: write-only workbook streamed from a temp file in chunks —
+        # a large export no longer builds the whole document in RAM and
+        # the response is genuinely streamed instead of buffered into a
+        # single BytesIO. Column widths are computed from the rows up
+        # front (write-only sheets cannot be measured after appending).
+        widths = []
+        for i, h in enumerate(header):
+            w = max(len(str(h)), len(str(title)), len(str(subtitle))) if i == 0 else len(str(h))
+            for r in rows:
+                if i < len(r):
+                    w = max(w, len(str(r[i])) if r[i] is not None else 0)
+            widths.append(max(14, min(46, w + 2)))
+        wb = Workbook(write_only=True)
         ws = wb.active
         ws.title = title[:31]
+        for i, w in enumerate(widths, start=1):
+            ws.column_dimensions[get_column_letter(i)].width = w
         # P3-1: every string cell goes through _sanitize_excel_cell so a
         # journal description / account name starting with "=", "+", "-"
         # or "@" is written as literal text, never a live formula
@@ -1689,21 +1708,32 @@ def export_report(report: str, format: str = "xlsx", business_unit_id: Optional[
         ws.append([_sanitize_excel_cell(title)])
         ws.append([_sanitize_excel_cell(subtitle)])
         ws.append([])
-        ws.append([_sanitize_excel_cell(h) if isinstance(h, str) else h for h in header])
-        for cell in ws[4]:
+        header_row = []
+        for h in header:
+            cell = WriteOnlyCell(ws, value=_sanitize_excel_cell(h) if isinstance(h, str) else h)
             cell.font = Font(bold=True, color="FFFFFF")
             cell.fill = PatternFill("solid", fgColor="1F3864")
+            header_row.append(cell)
+        ws.append(header_row)
         for r in rows:
             ws.append([_sanitize_excel_cell(v) if isinstance(v, str) else v for v in r])
-        for col in ws.columns:
-            letter = col[0].column_letter
-            ws.column_dimensions[letter].width = max(14, min(46, max((len(str(c.value or "")) for c in col), default=14) + 2))
-        buf = BytesIO()
-        wb.save(buf)
-        buf.seek(0)
+        tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+        tmp_path = tmp.name
+        tmp.close()
+        wb.save(tmp_path)
+
+        def _iter_file():
+            with open(tmp_path, "rb") as fh:
+                while True:
+                    chunk = fh.read(64 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+
         return StreamingResponse(
-            buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f'attachment; filename="{fname_base}.xlsx"'})
+            _iter_file(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{fname_base}.xlsx"'},
+            background=BackgroundTask(os.unlink, tmp_path))
 
     if format == "pdf":
         from fpdf import FPDF

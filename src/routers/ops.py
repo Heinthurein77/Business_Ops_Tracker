@@ -1123,9 +1123,15 @@ def view_upload(key: str = Query(...), user: User = Depends(get_current_user),
 
 
 @router.post("/expenses/{expense_id}/receipt")
-async def upload_expense_receipt(expense_id: int, file: UploadFile = File(...),
-                                 user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Attach a receipt photo/file to an expense (R2 when configured)."""
+def upload_expense_receipt(expense_id: int, file: UploadFile = File(...),
+                           user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Attach a receipt photo/file to an expense (R2 when configured).
+
+    Plain def, like the CEO/HO daily-report submits (PM-6): FastAPI runs
+    it in the threadpool, so the blocking boto3 upload cannot stall the
+    single worker's event loop. UploadFile.file is a regular
+    SpooledTemporaryFile, safe to read from here.
+    """
     from src.r2_storage import upload_attachment_or_503
     from src.upload_validation import content_matches_extension
 
@@ -1137,7 +1143,7 @@ async def upload_expense_receipt(expense_id: int, file: UploadFile = File(...),
         raise HTTPException(404, "Expense not found")
     if user.role == "CEO" and e.submitted_by_id != user.id:
         raise HTTPException(403, "Not your expense")
-    data = await file.read()
+    data = file.file.read()
     if len(data) > 10 * 1024 * 1024:
         raise HTTPException(400, "Receipt file is too large (max 10 MB)")
     ext = (file.filename or "").rsplit(".", 1)[-1].lower()
