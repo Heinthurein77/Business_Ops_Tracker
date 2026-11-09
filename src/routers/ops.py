@@ -1550,10 +1550,24 @@ def monthly_report(month: Optional[str] = None, user: User = Depends(require_adm
 
 # ---------------------------------------------------------------- Excel export
 
+# PM-4: ops exports are bounded. Unbounded tabs used to load every row
+# into one workbook; now each tab is capped and the date-bearing tabs
+# default to the last 90 days (pass from_date/to_date for more).
+OPS_EXPORT_MAX_ROWS = 5000
+OPS_EXPORT_DEFAULT_DAYS = 90
+
+
 @router.get("/export-excel")
 def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
+                 from_date: Optional[date] = None, to_date: Optional[date] = None,
+                 limit: int = OPS_EXPORT_MAX_ROWS,
                  user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Download one Operations Center tab as an .xlsx workbook."""
+    """Download one Operations Center tab as an .xlsx workbook.
+
+    Row-capped at `limit` (max 5000); the actions/expenses tabs default
+    to the last 90 days unless from_date/to_date are given. Staff and
+    customers were already capped at 500 and stay that way.
+    """
     from io import BytesIO
 
     from fastapi.responses import StreamingResponse
@@ -1564,6 +1578,28 @@ def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
     bu_names = {bu.id: bu.name for bu in db.query(BusinessUnit).all()}
     header_fill = PatternFill(start_color="1F2937", end_color="1F2937", fill_type="solid")
     header_font = Font(bold=True, color="FFFFFF")
+    limit = max(1, min(limit, OPS_EXPORT_MAX_ROWS))
+
+    def date_bounds(default_days=None):
+        """(start, end) datetimes for a created_at filter, or (None, None).
+
+        default_days set → from_date defaults to today minus that many
+        days; to_date always defaults to open-ended.
+        """
+        frm = from_date
+        if frm is None and default_days is not None:
+            frm = today_local() - timedelta(days=default_days)
+        start = datetime.combine(frm, datetime.min.time()) if frm else None
+        end = datetime.combine(to_date, datetime.max.time()) if to_date else None
+        return start, end
+
+    def apply_date_filter(q, column, default_days=None):
+        start, end = date_bounds(default_days)
+        if start is not None:
+            q = q.filter(column >= start)
+        if end is not None:
+            q = q.filter(column <= end)
+        return q
 
     def build(title, headers, rows):
         wb = Workbook()
@@ -1599,7 +1635,9 @@ def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
                 db.query(User).filter(User.id.in_(ids)).all()}
 
     if tab == "actions":
-        q = db.query(ActionItem).order_by(ActionItem.created_at.desc())
+        q = apply_date_filter(
+            db.query(ActionItem).order_by(ActionItem.created_at.desc()),
+            ActionItem.created_at, OPS_EXPORT_DEFAULT_DAYS).limit(limit)
         rows = scoped(q, ActionItem)
         names = user_names([i.assigned_to_id for i in rows])
         return build("Action Items",
@@ -1610,7 +1648,7 @@ def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
                        i.created_at.strftime("%Y-%m-%d %H:%M") if i.created_at else ""] for i in rows])
 
     if tab == "inventory":
-        q = db.query(InventoryItem).filter(InventoryItem.is_active == True)  # noqa: E712
+        q = db.query(InventoryItem).filter(InventoryItem.is_active == True).limit(limit)  # noqa: E712
         rows = scoped(q, InventoryItem)
         return build("Inventory",
                      ["Item", "BU", "Stock", "Unit", "Reorder Level", "Low Stock"],
@@ -1619,7 +1657,9 @@ def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
                        "YES" if float(i.current_stock or 0) <= float(i.reorder_level or 0) and float(i.reorder_level or 0) > 0 else ""] for i in rows])
 
     if tab == "expenses":
-        q = db.query(ExpenseRequest).order_by(ExpenseRequest.created_at.desc())
+        q = apply_date_filter(
+            db.query(ExpenseRequest).order_by(ExpenseRequest.created_at.desc()),
+            ExpenseRequest.created_at, OPS_EXPORT_DEFAULT_DAYS).limit(limit)
         rows = scoped(q, ExpenseRequest)
         names = user_names([e.submitted_by_id for e in rows])
         return build("Expenses",
@@ -1630,7 +1670,9 @@ def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
                        e.created_at.strftime("%Y-%m-%d %H:%M") if e.created_at else ""] for e in rows])
 
     if tab == "documents":
-        q = db.query(LicenseDocument).order_by(LicenseDocument.expiry_date.asc())
+        q = apply_date_filter(
+            db.query(LicenseDocument).order_by(LicenseDocument.expiry_date.asc()),
+            LicenseDocument.expiry_date).limit(limit)
         rows = scoped(q, LicenseDocument)
         return build("Documents",
                      ["Title", "Type", "BU", "Issue Date", "Expiry Date", "Days Left", "Notes"],
@@ -3335,12 +3377,18 @@ class PosSaleIn(BaseModel):
     lines: list[PosLineIn] = Field(min_length=1)
 
 
-def _post_pos_journals(db: Session, sale: PosSale, user_id: int) -> bool:
+def _post_pos_journals(db: Session, sale: PosSale, user_id: int, commit: bool = True) -> bool:
     """Sale: Dr 1110/1120 (by payment method) / Cr 4100 net / Cr 2130 tax.
     COGS: Dr 5100 / Cr 1140 at moving-average cost. Returns True when both
     journals posted. A failure is logged with the sale id and surfaced to
     the caller as journal_posted=false — the sale itself is already
-    committed, so it is flagged rather than silently lost (M-B1)."""
+    committed, so it is flagged rather than silently lost (M-B1).
+
+    With commit=False (the create_pos_sale fail-hard path, SM-9) the
+    journals are posted in the caller's transaction and the caller
+    commits once — a failure then rolls the sale back instead of
+    flagging it. The journal-retry endpoint uses the default commit=True
+    because the sale is already committed there."""
     try:
         from src.routers.accounting import account_by_code, create_entry
         a = _pos_amounts(sale)
@@ -3372,7 +3420,8 @@ def _post_pos_journals(db: Session, sale: PosSale, user_id: int) -> bool:
                          [{"account_id": cogs_acc.id, "debit": a["cogs"], "credit": 0},
                           {"account_id": inv_acc.id, "debit": 0, "credit": a["cogs"]}],
                          source_id=sale.id, post=True)
-        db.commit()
+        if commit:
+            db.commit()
         return True
     except Exception as exc:
         db.rollback()
@@ -3381,8 +3430,13 @@ def _post_pos_journals(db: Session, sale: PosSale, user_id: int) -> bool:
 
 
 @router.post("/pos-sales")
-def create_pos_sale(payload: PosSaleIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_pos_sale(payload: PosSaleIn, user: User = Depends(get_current_user), db: Session = Depends(get_db),
+                    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     bu_id = bu_scope(user, payload.business_unit_id)
+    endpoint = "POST /api/ops/pos-sales"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
     if payload.payment_method not in ("cash", "bank"):
         raise HTTPException(400, "payment_method must be cash or bank")
     if payload.customer_id is not None:
@@ -3407,7 +3461,9 @@ def create_pos_sale(payload: PosSaleIn, user: User = Depends(get_current_user), 
     for ln in payload.lines:
         wanted[ln.inventory_item_id] += Decimal(str(ln.quantity))
     items = {}
-    for item_id, qty in wanted.items():
+    # Cm-4: lock item rows in canonical (sorted id) order, never in
+    # payload line order.
+    for item_id, qty in sorted(wanted.items()):
         item = db.query(InventoryItem).filter(
             InventoryItem.id == item_id,
             InventoryItem.business_unit_id == bu_id,
@@ -3426,22 +3482,30 @@ def create_pos_sale(payload: PosSaleIn, user: User = Depends(get_current_user), 
             unit_cost=Decimal(str(item.unit_cost or 0)),
             serial_nos=_json.dumps(ln.serial_nos) if ln.serial_nos else None,
         ))
-        item.current_stock = Decimal(str(item.current_stock or 0)) - qty
+        if not _stock_sub(db, item, qty):
+            raise HTTPException(409, f"Stock for {item.name} changed while selling — please retry")
         item.updated_at = utcnow()
         db.add(StockMovement(item_id=item.id, movement_type="out", quantity=qty,
                              reason=f"POS sale #{sale.id}", recorded_by_id=user.id))
     # FEFO once per item, for the aggregated quantity, for every item that
     # has batches (not only requires_expiry ones).
-    for item_id, qty in wanted.items():
+    for item_id, qty in sorted(wanted.items()):
         consume_batches_fefo(db, items[item_id], qty)
     db.flush()
     _mark_line_serials_sold(db, bu_id, sale.lines, pos_sale_id=sale.id)
-    db.commit()
-    journal_posted = _post_pos_journals(db, sale, user.id)
+    # SM-9 fail-hard: the sale + COGS journals post in this same
+    # transaction, before the single commit — a journal failure rolls
+    # the whole sale back (500) instead of committing a sale with
+    # journal_posted=false.
+    if not _post_pos_journals(db, sale, user.id, commit=False):
+        db.rollback()
+        raise HTTPException(500, "POS journals could not be posted; sale rolled back")
+    _commit_or_409(db, f"POS sale #{sale.id}")
     db.refresh(sale)
     out = serialize_pos_sale(db, sale)
-    out["journal_posted"] = journal_posted
+    out["journal_posted"] = True
     _log_audit(db, user, "CREATE_POS_SALE", f"id={sale.id}")
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
     return out
 
 
@@ -3495,18 +3559,36 @@ def pos_daily_summary(business_unit_id: Optional[int] = None,
 
 
 @router.post("/pos-sales/{sale_id}/void")
-def void_pos_sale(sale_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    sale = db.query(PosSale).filter(PosSale.id == sale_id).first()
+def void_pos_sale(sale_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db),
+                  idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
+    sale = db.query(PosSale).filter(PosSale.id == sale_id).with_for_update().first()
     if not sale:
         raise HTTPException(404, "POS sale not found")
     bu_scope(user, sale.business_unit_id)
-    if sale.status != "completed":
-        raise HTTPException(400, f"Cannot void a sale in status {sale.status}")
+    endpoint = "POST /api/ops/pos-sales/{sale_id}/void"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
+    # CM-1 conditional claim: two concurrent voids must not both restock
+    # (the journal reversal already dedupes, so stock would be restored
+    # twice with only one reversal). The loser gets a 409.
+    claimed = db.query(PosSale).filter(
+        PosSale.id == sale_id, PosSale.status == "completed",
+    ).update({"status": "void"}, synchronize_session=False)
+    if claimed == 0:
+        db.refresh(sale)
+        raise HTTPException(409, f"POS sale #{sale_id} has already been voided or moved (status: {sale.status})")
+    # CC-1: lock the restocked items in canonical (sorted id) order.
+    item_ids = sorted({ln.inventory_item_id for ln in sale.lines})
+    items = {}
+    for item_id in item_ids:
+        items[item_id] = db.query(InventoryItem).filter(
+            InventoryItem.id == item_id).with_for_update().first()
     for ln in sale.lines:
-        item = db.query(InventoryItem).filter(InventoryItem.id == ln.inventory_item_id).first()
+        item = items.get(ln.inventory_item_id)
         if item:
             qty = Decimal(str(ln.quantity))
-            item.current_stock = Decimal(str(item.current_stock or 0)) + qty
+            _stock_add(db, item, qty)
             item.updated_at = utcnow()
             db.add(StockMovement(item_id=item.id, movement_type="in", quantity=qty,
                                  reason=f"POS sale #{sale.id} voided", recorded_by_id=user.id))
@@ -3518,6 +3600,8 @@ def void_pos_sale(sale_id: int, user: User = Depends(get_current_user), db: Sess
         s.pos_sale_id = None
         s.sold_at = None
     # Reverse both POS journals (sale + COGS) with proper reversal entries.
+    # Cm-6: a reversal into a closed period surfaces as a 409 naming the
+    # period and the reopen step (via create_entry), not a bare 400.
     from src.routers.accounting import _reverse_entry
     entries = db.query(JournalEntry).filter(
         JournalEntry.source == "pos_sale", JournalEntry.source_id == sale.id,
@@ -3526,10 +3610,12 @@ def void_pos_sale(sale_id: int, user: User = Depends(get_current_user), db: Sess
         _reverse_entry(db, e, user.id)
     sale.status = "void"
     sale.voided_at = utcnow()
-    db.commit()
+    _commit_or_409(db, f"POS sale #{sale_id} void")
     db.refresh(sale)
     _log_audit(db, user, "VOID_POS_SALE", f"sale_id={sale_id}")
-    return serialize_pos_sale(db, sale)
+    out = serialize_pos_sale(db, sale)
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
+    return out
 
 
 # ================================================================== quotations (ERP completion)
@@ -3770,10 +3856,14 @@ class SalesReturnIn(BaseModel):
     lines: list[SalesReturnLineIn] = Field(min_length=1)
 
 
-def _post_sales_return_journal(db: Session, r: SalesReturn, user_id: int) -> bool:
+def _post_sales_return_journal(db: Session, r: SalesReturn, user_id: int, commit: bool = True) -> bool:
     """Dr 4100 net / Dr 2130 tax / Cr 1130 gross (MMK at the invoice rate).
     Returns True when posted; failures are logged with the return id and
-    surfaced to the caller as journal_posted=false (M-B1)."""
+    surfaced to the caller as journal_posted=false (M-B1).
+
+    With commit=False (the create_sales_return fail-hard path, SM-9) the
+    journal posts in the caller's transaction and the caller commits
+    once — a failure then rolls the return back instead of flagging it."""
     try:
         from src.routers.accounting import account_by_code, create_entry
         inv = r.invoice
@@ -3794,7 +3884,8 @@ def _post_sales_return_journal(db: Session, r: SalesReturn, user_id: int) -> boo
         create_entry(db, r.business_unit_id, r.return_date or today_local(),
                      f"Sales return {r.return_no} — {inv.invoice_no}", "sales_return",
                      user_id, lines, source_id=r.id, post=True)
-        db.commit()
+        if commit:
+            db.commit()
         return True
     except Exception as exc:
         db.rollback()
@@ -3802,10 +3893,48 @@ def _post_sales_return_journal(db: Session, r: SalesReturn, user_id: int) -> boo
         return False
 
 
+def _post_purchase_return_journal(db: Session, r: PurchaseReturn, po, total_cost: Decimal,
+                                  user_id: int, commit: bool = True) -> bool:
+    """Dr 2110 AP / Cr 1140 Inventory for a purchase return (MMK at the
+    PO rate). Same commit=False fail-hard contract as
+    _post_sales_return_journal: the journal-retry endpoint uses the
+    default commit=True because the return is already committed there."""
+    try:
+        from src.routers.accounting import account_by_code, create_entry
+        ap = account_by_code(db, po.business_unit_id, "2110")
+        inv_acc = account_by_code(db, po.business_unit_id, "1140")
+        if not (ap and inv_acc):
+            logger.warning("Purchase return journal skipped for %s: accounts 2110/1140 missing in BU %s",
+                           r.return_no, po.business_unit_id)
+            return False
+        create_entry(db, po.business_unit_id, r.return_date or today_local(),
+                     f"Purchase return {r.return_no} — {po.po_no}", "purchase_return",
+                     user_id,
+                     [{"account_id": ap.id, "debit": total_cost, "credit": 0},
+                      {"account_id": inv_acc.id, "debit": 0, "credit": total_cost}],
+                     source_id=r.id, post=True)
+        if commit:
+            db.commit()
+        return True
+    except Exception as exc:
+        db.rollback()
+        logger.warning("Purchase return journal failed for %s: %s", r.return_no, exc)
+        return False
+
+
 @router.post("/sales-returns")
-def create_sales_return(payload: SalesReturnIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_sales_return(payload: SalesReturnIn, user: User = Depends(get_current_user), db: Session = Depends(get_db),
+                        idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
+    # Cm-1: the invoice is loaded through _invoice_or_404, which locks
+    # it FOR UPDATE — two concurrent returns against the same invoice
+    # serialise on Postgres (on SQLite the claim-style re-validation
+    # below is the backstop).
     inv = _invoice_or_404(db, payload.invoice_id)
     bu_scope(user, inv.business_unit_id)
+    endpoint = "POST /api/ops/sales-returns"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
     if inv.status not in ("sent", "partial", "paid"):
         raise HTTPException(400, f"Cannot return items against a {inv.status} invoice")
     line_by_id = {l.id: l for l in inv.lines}
@@ -3830,15 +3959,22 @@ def create_sales_return(payload: SalesReturnIn, user: User = Depends(get_current
         # concurrent create took this count+1 number first. 409, not a 500.
         db.rollback()
         raise HTTPException(409, f"Sales return number {r.return_no} already exists — please retry")
+    # CC-1: lock the restocked items in canonical (sorted id) order.
+    restock_ids = sorted({il.inventory_item_id for il in line_by_id.values()
+                          if il.inventory_item_id})
+    restock_items = {}
+    for item_id in restock_ids:
+        restock_items[item_id] = db.query(InventoryItem).filter(
+            InventoryItem.id == item_id).with_for_update().first()
     for ln in payload.lines:
         il = line_by_id[ln.invoice_line_id]
         qty = Decimal(str(ln.quantity))
         db.add(SalesReturnLine(return_id=r.id, invoice_line_id=il.id,
                                quantity=qty, unit_price=il.unit_price))
         if il.inventory_item_id:
-            item = db.query(InventoryItem).filter(InventoryItem.id == il.inventory_item_id).first()
+            item = restock_items.get(il.inventory_item_id)
             if item:
-                item.current_stock = Decimal(str(item.current_stock or 0)) + qty
+                _stock_add(db, item, qty)
                 item.updated_at = utcnow()
                 db.add(StockMovement(item_id=item.id, movement_type="in", quantity=qty,
                                      reason=f"Sales return {r.return_no} ({inv.invoice_no})",
@@ -3856,16 +3992,33 @@ def create_sales_return(payload: SalesReturnIn, user: User = Depends(get_current
                 s.sales_invoice_id = None
                 s.pos_sale_id = None
                 s.sold_at = None
-    db.commit()
-    journal_posted = _post_sales_return_journal(db, r, user.id)
-    # Recompute the invoice status from the reduced balance.
+    # Cm-1 backstop: re-validate the returned quantities (including this
+    # return) just before committing, so a concurrent return that slipped
+    # past the first check on SQLite still fails instead of returning
+    # more than was invoiced.
+    for ln in payload.lines:
+        il = line_by_id[ln.invoice_line_id]
+        if _returned_qty_for_invoice_line(db, il.id) > Decimal(str(il.quantity)):
+            db.rollback()
+            raise HTTPException(409, f"Return quantity for '{il.description}' exceeds the invoiced quantity")
+    # SM-9 fail-hard: the journal posts in this same transaction, before
+    # the single commit — a journal failure rolls the whole return back
+    # (500) instead of committing a return with journal_posted=false.
+    if not _post_sales_return_journal(db, r, user.id, commit=False):
+        db.rollback()
+        raise HTTPException(500, f"Sales return {r.return_no} journal could not be posted; return rolled back")
+    # Cm-1: the invoice-status recompute now runs in the SAME transaction
+    # as the return (it used to be a separate commit after the journal),
+    # so a concurrent record_payment cannot interleave and leave the
+    # status inconsistent with the balance.
     a = invoice_amounts(db, inv)
     if inv.status in ("sent", "partial", "paid"):
         if a["balance"] <= 0:
             inv.status = "paid"
         elif a["paid"] > 0:
             inv.status = "partial"
-        db.commit()
+        inv.version = (inv.version or 0) + 1
+    _commit_or_409(db, f"Sales return {r.return_no}")
     try:
         from src.routers.modules import allocate_installments
         allocate_installments(db, inv.id)
@@ -3879,9 +4032,10 @@ def create_sales_return(payload: SalesReturnIn, user: User = Depends(get_current
         installments_ok = False
     db.refresh(r)
     out = serialize_sales_return(db, r)
-    out["journal_posted"] = journal_posted
+    out["journal_posted"] = True
     out["installments_ok"] = installments_ok
     _log_audit(db, user, "CREATE_SALES_RETURN", f"id={r.id}")
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
     return out
 
 
@@ -3932,13 +4086,24 @@ class PurchaseReturnIn(BaseModel):
 
 
 @router.post("/purchase-returns")
-def create_purchase_return(payload: PurchaseReturnIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_purchase_return(payload: PurchaseReturnIn, user: User = Depends(get_current_user), db: Session = Depends(get_db),
+                           idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     po = _po_or_404(db, payload.po_id)
     bu_scope(user, po.business_unit_id)
+    endpoint = "POST /api/ops/purchase-returns"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
     if po.status not in ("received", "paid"):
         raise HTTPException(400, f"Cannot return items against a PO in status {po.status}")
     line_by_id = {l.id: l for l in po.lines}
-    items = {}
+    # CC-1: lock the decremented items in canonical (sorted id) order.
+    dec_ids = sorted({pl.inventory_item_id for pl in line_by_id.values()
+                      if pl.inventory_item_id})
+    dec_items = {}
+    for item_id in dec_ids:
+        dec_items[item_id] = db.query(InventoryItem).filter(
+            InventoryItem.id == item_id).with_for_update().first()
     for ln in payload.lines:
         pl = line_by_id.get(ln.po_line_id)
         if not pl:
@@ -3949,11 +4114,9 @@ def create_purchase_return(payload: PurchaseReturnIn, user: User = Depends(get_c
             raise HTTPException(400, f"Return quantity for '{pl.item_name}' exceeds the received "
                                      f"quantity minus previous returns")
         if pl.inventory_item_id:
-            item = db.query(InventoryItem).filter(InventoryItem.id == pl.inventory_item_id).first()
-            if item is not None:
-                if Decimal(str(item.current_stock or 0)) < qty:
-                    raise HTTPException(400, f"Not enough stock of {item.name} to return")
-                items[pl.id] = item
+            item = dec_items.get(pl.inventory_item_id)
+            if item is not None and Decimal(str(item.current_stock or 0)) < qty:
+                raise HTTPException(400, f"Not enough stock of {item.name} to return")
     count = db.query(PurchaseReturn).filter(PurchaseReturn.business_unit_id == po.business_unit_id).count()
     r = PurchaseReturn(business_unit_id=po.business_unit_id, po_id=po.id,
                        return_no=f"PR-{po.business_unit_id}-{count + 1:04d}", status="posted",
@@ -3975,40 +4138,28 @@ def create_purchase_return(payload: PurchaseReturnIn, user: User = Depends(get_c
         db.add(PurchaseReturnLine(return_id=r.id, po_line_id=pl.id,
                                   quantity=qty, unit_cost=pl.unit_cost))
         total_cost += qty * Decimal(str(pl.unit_cost)) * fx
-        item = items.get(pl.id)
+        item = dec_items.get(pl.inventory_item_id)
         if item is not None:
-            item.current_stock = Decimal(str(item.current_stock or 0)) - qty
+            if not _stock_sub(db, item, qty):
+                db.rollback()
+                raise HTTPException(409, f"Not enough stock of {item.name} to return — please retry")
             item.updated_at = utcnow()
             db.add(StockMovement(item_id=item.id, movement_type="out", quantity=qty,
                                  reason=f"Purchase return {r.return_no} ({po.po_no})",
                                  recorded_by_id=user.id))
-    db.commit()
-    journal_posted = True
+    # SM-9 fail-hard: the journal posts in this same transaction, before
+    # the single commit — a journal failure rolls the whole return back
+    # (500) instead of committing a return with journal_posted=false.
     if total_cost > 0:
-        journal_posted = False
-        try:
-            from src.routers.accounting import account_by_code, create_entry
-            ap = account_by_code(db, po.business_unit_id, "2110")
-            inv_acc = account_by_code(db, po.business_unit_id, "1140")
-            if not (ap and inv_acc):
-                logger.warning("Purchase return journal skipped for %s: accounts 2110/1140 missing in BU %s",
-                               r.return_no, po.business_unit_id)
-            else:
-                create_entry(db, po.business_unit_id, r.return_date or today_local(),
-                             f"Purchase return {r.return_no} — {po.po_no}", "purchase_return",
-                             user.id,
-                             [{"account_id": ap.id, "debit": total_cost, "credit": 0},
-                              {"account_id": inv_acc.id, "debit": 0, "credit": total_cost}],
-                             source_id=r.id, post=True)
-                db.commit()
-                journal_posted = True
-        except Exception as exc:
+        if not _post_purchase_return_journal(db, r, po, total_cost, user.id, commit=False):
             db.rollback()
-            logger.warning("Purchase return journal failed for %s: %s", r.return_no, exc)
+            raise HTTPException(500, f"Purchase return {r.return_no} journal could not be posted; return rolled back")
+    _commit_or_409(db, f"Purchase return {r.return_no}")
     db.refresh(r)
     out = serialize_purchase_return(db, r)
-    out["journal_posted"] = journal_posted
+    out["journal_posted"] = total_cost > 0
     _log_audit(db, user, "CREATE_PURCHASE_RETURN", f"id={r.id}")
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
     return out
 
 
@@ -4317,7 +4468,8 @@ def create_advance(payload: AdvanceIn, user: User = Depends(get_current_user), d
 
 
 @router.post("/staff-advances/{advance_id}/approve")
-def approve_advance(advance_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def approve_advance(advance_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db),
+                    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     """Approve + disburse: Dr 1240 Staff Advances / Cr 1110 Cash in the
     employee's BU (account 1240 is created on demand for older BUs). One
     failure policy for every journal error: the approval does NOT stand
@@ -4326,17 +4478,24 @@ def approve_advance(advance_id: int, user: User = Depends(require_admin), db: Se
     adv = db.query(StaffAdvance).filter(StaffAdvance.id == advance_id).with_for_update().first()
     if not adv:
         raise HTTPException(404, "Staff advance not found")
-    if adv.status != "pending":
-        raise HTTPException(400, f"Advance is {adv.status}")
-    # Atomic claim (T-1): with_for_update() alone does not serialise on
-    # SQLite (the dialect ignores it), so claim the row conditionally —
-    # the loser gets a 409 instead of disbursing twice.
+    endpoint = "POST /api/ops/staff-advances/{advance_id}/approve"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
+    # CM-3 claim contract: NO status pre-check returning 400 before the
+    # claim (on Postgres the FOR UPDATE load serialises, but on SQLite
+    # it is a no-op and two concurrent approves would both pass a
+    # pre-check). The conditional UPDATE is the arbiter — the loser
+    # gets a 409 with the already-moved status, on BOTH dialects.
     claimed = db.query(StaffAdvance).filter(
         StaffAdvance.id == advance_id, StaffAdvance.status == "pending",
-    ).update({"status": "approved"}, synchronize_session=False)
+    ).update({"status": "approved", "version": StaffAdvance.version + 1},
+             synchronize_session=False)
     if claimed == 0:
-        raise HTTPException(409, f"Advance {advance_id} has already been decided")
+        db.refresh(adv)
+        raise HTTPException(409, f"Staff advance {advance_id} has already been decided (status: {adv.status})")
     adv.status = "approved"
+    adv.version = (adv.version or 0) + 1
     adv.approved_by_id = user.id
     adv.approved_at = utcnow()
     try:
@@ -4363,21 +4522,29 @@ def approve_advance(advance_id: int, user: User = Depends(require_admin), db: Se
         db.rollback()
         raise server_error("Staff advance journal could not be posted; advance left as pending",
                            exc, logger, context=f"advance {advance_id}")
+    _assert_token_current(db, user)
     db.commit()
     db.refresh(adv)
     out = serialize_advance(db, adv)
     out["journal_posted"] = True
     _log_audit(db, user, "APPROVE_ADVANCE", f"advance_id={advance_id}")
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
     return out
 
 
 @router.post("/staff-advances/{advance_id}/reject")
 def reject_advance(advance_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    adv = db.query(StaffAdvance).filter(StaffAdvance.id == advance_id).first()
+    adv = db.query(StaffAdvance).filter(StaffAdvance.id == advance_id).with_for_update().first()
     if not adv:
         raise HTTPException(404, "Staff advance not found")
-    if adv.status != "pending":
-        raise HTTPException(400, f"Advance is {adv.status}")
+    # CM-4 conditional claim — the loser of a concurrent approve/reject
+    # race gets a 409, not a silent second decision.
+    claimed = db.query(StaffAdvance).filter(
+        StaffAdvance.id == advance_id, StaffAdvance.status == "pending",
+    ).update({"status": "rejected"}, synchronize_session=False)
+    if claimed == 0:
+        db.refresh(adv)
+        raise HTTPException(409, f"Staff advance {advance_id} has already been decided (status: {adv.status})")
     adv.status = "rejected"
     adv.approved_by_id = user.id
     adv.approved_at = utcnow()
@@ -4422,30 +4589,47 @@ class AttendanceBulkIn(BaseModel):
 @router.post("/attendance/bulk")
 def upsert_attendance(payload: AttendanceBulkIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Upsert one attendance record per (employee, date)."""
-    saved = []
-    for rec in payload.records:
-        day = rec.record_date or rec.date_
-        if day is None:
-            raise HTTPException(400, "Each record needs a date")
-        if rec.status not in ATTENDANCE_STATUSES:
-            raise HTTPException(400, f"status must be one of {ATTENDANCE_STATUSES}")
-        emp = db.query(Employee).filter(Employee.id == rec.employee_id).first()
-        if not emp:
-            raise HTTPException(404, f"Employee {rec.employee_id} not found")
-        bu_scope(user, emp.business_unit_id)
-        row = db.query(AttendanceRecord).filter(
-            AttendanceRecord.employee_id == emp.id,
-            AttendanceRecord.record_date == day).first()
-        if row is None:
-            row = AttendanceRecord(employee_id=emp.id, business_unit_id=emp.business_unit_id,
-                                   record_date=day)
-            db.add(row)
-        row.status = rec.status
-        row.note = rec.note
-        row.business_unit_id = emp.business_unit_id
-        row.recorded_by_id = user.id
-        saved.append(row)
-    db.commit()
+    def _apply() -> list:
+        saved = []
+        for rec in payload.records:
+            day = rec.record_date or rec.date_
+            if day is None:
+                raise HTTPException(400, "Each record needs a date")
+            if rec.status not in ATTENDANCE_STATUSES:
+                raise HTTPException(400, f"status must be one of {ATTENDANCE_STATUSES}")
+            emp = db.query(Employee).filter(Employee.id == rec.employee_id).first()
+            if not emp:
+                raise HTTPException(404, f"Employee {rec.employee_id} not found")
+            bu_scope(user, emp.business_unit_id)
+            row = db.query(AttendanceRecord).filter(
+                AttendanceRecord.employee_id == emp.id,
+                AttendanceRecord.record_date == day).first()
+            if row is None:
+                row = AttendanceRecord(employee_id=emp.id, business_unit_id=emp.business_unit_id,
+                                       record_date=day)
+                db.add(row)
+            row.status = rec.status
+            row.note = rec.note
+            row.business_unit_id = emp.business_unit_id
+            row.recorded_by_id = user.id
+            saved.append(row)
+        return saved
+    saved = _apply()
+    try:
+        db.commit()
+    except IntegrityError:
+        # CM-4: two concurrent bulk upserts for the same (employee,
+        # date) both saw no row and both inserted — the loser hits
+        # uq_attendance_emp_date as an unhandled 500. Roll back and
+        # re-apply as pure updates (the rows now exist); if it still
+        # collides, 409.
+        db.rollback()
+        saved = _apply()
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(409, "Attendance records changed concurrently — please retry")
     for row in saved:
         db.refresh(row)
     _log_audit(db, user, "UPSERT_ATTENDANCE", f"records={len(payload.records)}")
