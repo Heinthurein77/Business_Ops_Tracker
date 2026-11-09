@@ -1,5 +1,5 @@
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.exc import IntegrityError
@@ -8,8 +8,10 @@ from sqlalchemy.orm import Session
 from src.auth import (
     RESET_REQUEST_TTL_HOURS,
     InvalidPasswordError,
+    assert_token_current,
     bump_token_version,
     create_access_token,
+    decode_access_token,
     get_current_user,
     get_optional_user,
     hash_password,
@@ -17,6 +19,7 @@ from src.auth import (
     resolve_redirect_path,
     serialize_user,
     verify_password,
+    warn_null_bu_ceo,
 )
 from src.client_ip import get_client_ip
 from src.config import settings
@@ -75,10 +78,21 @@ def _too_many_requests(throttled: Throttled, detail: str) -> HTTPException:
 
 
 @router.get("/me")
-def me(user: User = Depends(get_current_user)):
+def me(request: Request, user: User = Depends(get_current_user)):
+    # SM-1: the session-expiry warning needs the real expiry, and the
+    # cookie is httponly so the frontend cannot read it itself. Decode the
+    # cookie's `exp` claim here (signature-verified, same as auth) and
+    # report it; the frontend shows "session expires in 15 min" from
+    # 7 h 45 m after login. None when the cookie cannot be decoded — the
+    # session itself was already validated by get_current_user.
+    expires_at = None
+    payload = decode_access_token(request.cookies.get(settings.COOKIE_NAME) or "")
+    if payload:
+        expires_at = datetime.fromtimestamp(payload["exp"], tz=timezone.utc).isoformat()
     return {
         "user": serialize_user(user),
         "redirect_to": resolve_redirect_path(user),
+        "session_expires_at": expires_at,
     }
 
 
@@ -116,6 +130,10 @@ def login(payload: LoginRequest, request: Request, response: Response, db: Sessi
 
     user.last_login_at = utcnow()
     db.commit()
+    # Sm-7: login is a session-establishment point — flag a CEO whose row
+    # has no BU (a data inconsistency that would also skip the upload
+    # owner check), the same warning get_current_user emits per request.
+    warn_null_bu_ceo(user)
     log_audit(db, user, "LOGIN_SUCCESS", "", request)
 
     _issue_session_cookie(response, user)
@@ -229,6 +247,11 @@ def force_password_change(
     throttled = check_password_change_throttle(db, user.username)
     if throttled:
         raise _too_many_requests(throttled, _TOO_MANY_PASSWORD_CHANGES_DETAIL)
+
+    # SM-1: re-check the session is still current before a commit that
+    # revokes every session (the bump below) — a logout landing mid-request
+    # must not be papered over by issuing a fresh cookie afterwards.
+    assert_token_current(db, user)
 
     if payload.new_password != payload.confirm_password:
         raise HTTPException(status_code=400, detail="Passwords do not match")

@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import logging
+
 import jwt
-from fastapi import Depends, Request
+from fastapi import Depends, HTTPException, Request
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
@@ -10,6 +12,8 @@ from src.config import settings
 from src.database import get_db
 from src.models import User
 from src.utils import utcnow
+
+logger = logging.getLogger(__name__)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -155,12 +159,31 @@ def decode_access_token(token: str) -> Optional[dict]:
         return None
 
 
+def warn_null_bu_ceo(user: User) -> None:
+    """Sm-7: a CEO row must always carry a business_unit_id (creation
+    requires one). A NULL BU here is a data inconsistency — and it would
+    silently skip the cross-BU owner check in /api/ops/uploads/view, the
+    same way legacy NULL-BU accountants skip it by design. Accountants
+    with a NULL BU are the settled legacy case and are not warned about;
+    CEOs are. Warning only — the request still proceeds so a data glitch
+    can never lock a CEO out of the whole system."""
+    if user.role == "CEO" and user.business_unit_id is None:
+        logger.warning(
+            "CEO user %s (id=%s) resolved with NULL business_unit_id — "
+            "expected every CEO to belong to a business unit",
+            user.username, user.id,
+        )
+
+
 def _user_from_token(request: Request, db: Session) -> Optional[User]:
     """The one place a session cookie becomes a User: valid token, account
     exists and is active, and the token's `tv` equals the user's current
     token_version. Tokens issued before a logout or password change carry the
     previous version and are rejected here even though they haven't expired
-    yet — see the column's comment in models.py."""
+    yet — see the column's comment in models.py. The token's `tv` is also
+    stashed on the returned user as `user._token_tv` so a handler can
+    re-check, immediately before committing, that the session has not been
+    revoked since the request started (see assert_token_current)."""
     token = request.cookies.get(settings.COOKIE_NAME)
     if not token:
         return None
@@ -175,7 +198,33 @@ def _user_from_token(request: Request, db: Session) -> Optional[User]:
         return None
     if token_version != user.token_version:
         return None
+    user._token_tv = token_version
+    warn_null_bu_ceo(user)
     return user
+
+
+def assert_token_current(db: Session, user: User) -> None:
+    """SM-1: re-check, immediately before a commit, that the session that
+    started this request is still current. Revocation is otherwise checked
+    only once, at request start (get_current_user): a logout or password
+    change landing mid-request — e.g. during a slow CEO submit with a 10 MB
+    attachment — would otherwise still commit afterwards.
+
+    Compares the live token_version in the database against the token `tv`
+    stashed on the user object by get_current_user (`user._token_tv`). The
+    live value is read with a scalar SELECT, never `db.refresh(user)`,
+    so uncommitted attribute changes the caller already set on the user
+    (or on other objects in the session) are not discarded. Raises 401 on
+    mismatch so the caller fails instead of committing on a revoked
+    session."""
+    token_tv = getattr(user, "_token_tv", None)
+    expected = token_tv if token_tv is not None else user.token_version
+    current = db.query(User.token_version).filter(User.id == user.id).scalar()
+    if current is None or current != expected:
+        raise HTTPException(
+            status_code=401,
+            detail="Your session was signed out on another device — please sign in again.",
+        )
 
 
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
