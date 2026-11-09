@@ -29,6 +29,18 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _today_local() -> date:
+    """Yangon calendar date (SM-12): date columns default to the app's
+    local day, not the server (UTC) day — between 00:00 and 06:30 Yangon
+    time the two differ, so a server-date default can stamp a row a day
+    early. Same clock as src.utils.today_local()."""
+    from zoneinfo import ZoneInfo
+
+    from src.config import settings
+
+    return datetime.now(ZoneInfo(settings.APP_TIMEZONE)).date()
+
+
 # Database-level integrity rules. The API validates all of this too
 # (schemas.py and the submit-report routes); these are the last line of
 # defence and are created by migration b1c5d9e3a7f2 (Postgres). They live here
@@ -149,7 +161,7 @@ class DailyFinancial(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
-    report_date = Column(Date, nullable=False, default=date.today, index=True)
+    report_date = Column(Date, nullable=False, default=_today_local, index=True)
     revenue = Column(Numeric(16, 2), nullable=False, default=0)
     expenses = Column(Numeric(16, 2), nullable=False, default=0)
     net_profit = Column(Numeric(16, 2), nullable=False, default=0)
@@ -186,7 +198,7 @@ class ActivityLog(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
-    report_date = Column(Date, nullable=False, default=date.today, index=True)
+    report_date = Column(Date, nullable=False, default=_today_local, index=True)
     meetings_attended = Column(Text, nullable=True)
     site_visits = Column(Text, nullable=True)
     key_decisions = Column(Text, nullable=True)
@@ -230,7 +242,7 @@ class HealthStatus(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
-    report_date = Column(Date, nullable=False, default=date.today, index=True)
+    report_date = Column(Date, nullable=False, default=_today_local, index=True)
     physical_health = Column(String(20), nullable=True)  # Healthy | Tired | Sick (legacy, no longer collected)
     stress_level = Column(String(20), nullable=True)  # Low | Medium | High (collected again as one-tap chips)
     energy_mood = Column(String(20), nullable=True)  # Energetic | Normal | Drained (collected again as one-tap chips)
@@ -266,7 +278,7 @@ class SocialLog(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
-    report_date = Column(Date, nullable=False, default=date.today, index=True)
+    report_date = Column(Date, nullable=False, default=_today_local, index=True)
     event_flag = Column(Boolean, default=False, nullable=False)
     meeting_flag = Column(Boolean, default=False, nullable=False)
     golf_flag = Column(Boolean, default=False, nullable=False)
@@ -291,7 +303,7 @@ class HeadOfficeActivityLog(Base):
     __table_args__ = (_pg_check(_PERCENT_RANGE, name="ck_ho_activity_logs_percent_range"),)
 
     id = Column(Integer, primary_key=True, index=True)
-    report_date = Column(Date, nullable=False, unique=True, index=True, default=date.today)
+    report_date = Column(Date, nullable=False, unique=True, index=True, default=_today_local)
     meetings_attended = Column(Text, nullable=True)
     site_visits = Column(Text, nullable=True)
     key_decisions = Column(Text, nullable=True)
@@ -323,7 +335,7 @@ class HeadOfficeDailyFinancial(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    report_date = Column(Date, nullable=False, unique=True, index=True, default=date.today)
+    report_date = Column(Date, nullable=False, unique=True, index=True, default=_today_local)
     revenue = Column(Numeric(16, 2), nullable=False, default=0)
     # Never collected from the form — build_financial_rows() (shared with
     # DailyFinancial) reads these unconditionally, so they exist here purely
@@ -350,7 +362,7 @@ class HeadOfficeHealthStatus(Base):
     __table_args__ = (_pg_check(_VITALS_RANGE, name="ck_ho_health_statuses_vitals_range"),)
 
     id = Column(Integer, primary_key=True, index=True)
-    report_date = Column(Date, nullable=False, unique=True, index=True, default=date.today)
+    report_date = Column(Date, nullable=False, unique=True, index=True, default=_today_local)
     physical_health = Column(String(20), nullable=True)  # legacy, no longer collected
     stress_level = Column(String(20), nullable=True)  # legacy, no longer collected
     energy_mood = Column(String(20), nullable=True)  # legacy, no longer collected
@@ -373,7 +385,7 @@ class HeadOfficeSocialLog(Base):
     __tablename__ = "ho_social_logs"
 
     id = Column(Integer, primary_key=True, index=True)
-    report_date = Column(Date, nullable=False, unique=True, index=True, default=date.today)
+    report_date = Column(Date, nullable=False, unique=True, index=True, default=_today_local)
     event_flag = Column(Boolean, default=False, nullable=False)
     meeting_flag = Column(Boolean, default=False, nullable=False)
     golf_flag = Column(Boolean, default=False, nullable=False)
@@ -445,7 +457,7 @@ class FinancialNote(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
-    note_date = Column(Date, nullable=False, default=date.today, index=True)
+    note_date = Column(Date, nullable=False, default=_today_local, index=True)
     note_text = Column(Text, nullable=False)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
@@ -581,6 +593,10 @@ class InventoryItem(Base):
     low_notified_at = Column(DateTime, nullable=True)  # last low-stock alert sent
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
+    # CM-8 optimistic locking: bumped on every mutation of the row;
+    # update endpoints accept an optional expected_version and 409 on
+    # mismatch. Starts at 0 for pre-existing rows (migration backfill).
+    version = Column(Integer, default=0, nullable=False)
 
     business_unit = relationship("BusinessUnit")
     movements = relationship("StockMovement", back_populates="item", cascade="all, delete-orphan")
@@ -622,6 +638,8 @@ class ExpenseRequest(Base):
     review_notes = Column(Text, nullable=True)
     reviewed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False, index=True)
+    # CM-8 optimistic locking (see InventoryItem.version).
+    version = Column(Integer, default=0, nullable=False)
 
     business_unit = relationship("BusinessUnit")
 
@@ -730,6 +748,14 @@ class JournalEntry(Base):
         # store the same number.
         UniqueConstraint("business_unit_id", "entry_no",
                          name="uq_journal_entries_bu_entry_no"),
+        # Cm-7: at most one closing journal per BU per year. The BU-row
+        # lock in year_close serialises this on Postgres, but the lock is
+        # a no-op on SQLite — this partial unique index is the backstop
+        # that makes a double close fail (409 via create_entry) on both
+        # dialects instead of moving retained earnings twice.
+        Index("uq_journal_year_close", "business_unit_id", "source", "source_id",
+              unique=True, postgresql_where=text("source = 'year_close'"),
+              sqlite_where=text("source = 'year_close'")),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -876,6 +902,8 @@ class PurchaseOrder(Base):
     paid_at = Column(DateTime, nullable=True)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
+    # CM-8 optimistic locking (see InventoryItem.version).
+    version = Column(Integer, default=0, nullable=False)
 
     business_unit = relationship("BusinessUnit")
     supplier = relationship("Supplier")
@@ -912,6 +940,8 @@ class Customer(Base):
     is_active = Column(Boolean, default=True, nullable=False)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
+    # CM-8 optimistic locking (see InventoryItem.version).
+    version = Column(Integer, default=0, nullable=False)
 
     business_unit = relationship("BusinessUnit")
 
@@ -943,6 +973,8 @@ class SalesInvoice(Base):
     sent_at = Column(DateTime, nullable=True)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
+    # CM-8 optimistic locking (see InventoryItem.version).
+    version = Column(Integer, default=0, nullable=False)
 
     business_unit = relationship("BusinessUnit")
     customer = relationship("Customer")
@@ -1044,6 +1076,8 @@ class PayrollRun(Base):
     approved_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     paid_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
+    # CM-8 optimistic locking (see InventoryItem.version).
+    version = Column(Integer, default=0, nullable=False)
 
     business_unit = relationship("BusinessUnit")
     lines = relationship("PayrollLine", back_populates="run", cascade="all, delete-orphan")
@@ -1196,6 +1230,17 @@ class StockBatch(Base):
     earliest-expiring batch first (FEFO).
     """
     __tablename__ = "stock_batches"
+    __table_args__ = (
+        # CM-4: the duplicate-batch check in receive_batch is check-then-
+        # act — two concurrent receives of the same batch number both
+        # passed it. The database now refuses the second insert (409).
+        UniqueConstraint("item_id", "batch_no",
+                         name="uq_stock_batches_item_batch_no"),
+        # CC-1 backstop: FEFO over-consumption must never drive a batch
+        # quantity negative silently. (Plain CHECK, not _pg_check, so it
+        # also fires on SQLite in dev/tests.)
+        CheckConstraint("quantity >= 0", name="ck_stock_batches_qty_non_negative"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     item_id = Column(Integer, ForeignKey("inventory_items.id"), nullable=False, index=True)
@@ -1381,7 +1426,7 @@ class PosSale(Base):
     payment_method = Column(String(20), default="cash", nullable=False)  # cash/bank
     tax_rate = Column(Numeric(5, 2), default=0, nullable=False)  # % commercial tax
     status = Column(String(20), default="completed", nullable=False, index=True)  # completed/void
-    sale_date = Column(Date, nullable=False, default=date.today, index=True)
+    sale_date = Column(Date, nullable=False, default=_today_local, index=True)
     sold_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     voided_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
@@ -1471,7 +1516,7 @@ class SalesReturn(Base):
     invoice_id = Column(Integer, ForeignKey("sales_invoices.id"), nullable=False, index=True)
     return_no = Column(String(30), nullable=False, index=True)
     status = Column(String(20), default="posted", nullable=False, index=True)
-    return_date = Column(Date, nullable=False, default=date.today)
+    return_date = Column(Date, nullable=False, default=_today_local)
     reason = Column(String(300), nullable=True)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
@@ -1510,7 +1555,7 @@ class PurchaseReturn(Base):
     po_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=False, index=True)
     return_no = Column(String(30), nullable=False, index=True)
     status = Column(String(20), default="posted", nullable=False, index=True)
-    return_date = Column(Date, nullable=False, default=date.today)
+    return_date = Column(Date, nullable=False, default=_today_local)
     reason = Column(String(300), nullable=True)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
@@ -1576,7 +1621,7 @@ class StaffAdvance(Base):
     amount = Column(Numeric(16, 2), nullable=False)
     remaining_amount = Column(Numeric(16, 2), nullable=False)
     monthly_deduction = Column(Numeric(16, 2), nullable=False)
-    advance_date = Column(Date, nullable=False, default=date.today)
+    advance_date = Column(Date, nullable=False, default=_today_local)
     reason = Column(String(300), nullable=True)
     status = Column(String(20), default="pending", nullable=False, index=True)  # pending/approved/rejected/settled
     journal_entry_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)
@@ -1667,3 +1712,30 @@ class JobHeartbeat(Base):
     job_name = Column(String(80), primary_key=True)
     last_run_at = Column(DateTime, nullable=False)
     last_status = Column(String(20), nullable=False)  # ok / failed
+
+
+class IdempotencyKey(Base):
+    """Server-side dedupe for POST money endpoints (CM-6).
+
+    The client sends `Idempotency-Key: <uuid>`; the first execution
+    stores its response here and a replay with the same (user, endpoint,
+    key) returns the stored response instead of re-executing. A key is
+    scoped to one user + one endpoint path so the same key reused on a
+    different endpoint (or by a different user) is a fresh request, not
+    a false replay. Rows expire after 24 h (expires_at); replays after
+    expiry re-execute. response_body is the JSON response as stored
+    (status is always 200 for the money endpoints, so it is not stored).
+    """
+    __tablename__ = "idempotency_keys"
+    __table_args__ = (
+        UniqueConstraint("user_id", "endpoint", "key",
+                         name="uq_idempotency_user_endpoint_key"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    endpoint = Column(String(120), nullable=False, index=True)
+    key = Column(String(120), nullable=False)
+    response_body = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
