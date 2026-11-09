@@ -1,3 +1,5 @@
+import logging
+import re
 import threading
 import time
 from collections import defaultdict, deque
@@ -20,7 +22,7 @@ from src.models import (
     HeadOfficeSocialLog,
     User,
 )
-from src.r2_storage import upload_attachment_or_503
+from src.r2_storage import delete_object, extract_r2_key, upload_attachment_or_503
 from src.schemas import MonthlyTargetRequest
 from src.upload_validation import content_matches_extension
 from src.utils import (
@@ -48,6 +50,7 @@ from src.utils import (
     log_audit,
     parse_bounded_decimal,
     parse_monthly_target_amounts,
+    server_error,
     today_local,
     todays_submission_events,
     validate_blood_pressure,
@@ -66,6 +69,18 @@ _report_submit_lock = threading.Lock()
 
 MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 ALLOWED_ATTACHMENT_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "gif", "webp", "doc", "docx", "xls", "xlsx", "csv", "txt"}
+
+logger = logging.getLogger(__name__)
+
+_ERROR_ID_RE = re.compile(r"\(error_id: ([0-9a-f]+)\)")
+
+
+def _error_id_of(detail: str) -> str:
+    """Pull the short error_id out of a server_error() detail string
+    ("<fixed message> (error_id: ab12cd34)") so the audit row can store the
+    id, not exception text (SM-13)."""
+    match = _ERROR_ID_RE.search(detail or "")
+    return match.group(1) if match else "unknown"
 
 
 def _is_rate_limited(user_id: int) -> bool:
@@ -380,8 +395,19 @@ def submit_report(
     health_other_notes = form_text(health_other_notes, "Health notes", MAX_NARRATIVE_TEXT_LEN)
     social_other_notes = form_text(social_other_notes, "Social notes", MAX_NARRATIVE_TEXT_LEN)
 
-    # The attachment is checked and uploaded here, before any row lock is
-    # taken below, so a slow upload never holds a lock on the day's rows.
+    # SM-7: take the row locks for the day's rows BEFORE uploading, so a
+    # concurrent resubmit cannot slip in between the upload and the write
+    # and orphan the uploaded file (or overwrite it). The full row loads
+    # below re-use these same locks (same transaction, same session). For
+    # a first submission the rows do not exist yet, so no lock is taken —
+    # the double-submit 409 at commit time is the guard there, and its
+    # handler deletes the orphaned upload (see below).
+    for _model in (HeadOfficeDailyFinancial, HeadOfficeActivityLog, HeadOfficeHealthStatus, HeadOfficeSocialLog):
+        db.query(_model).filter(_model.report_date == report_date).with_for_update().first()
+
+    # The attachment is checked and uploaded here, after the row locks
+    # above, so a slow upload no longer races a concurrent resubmit — the
+    # lock is held during the upload, but only on this HO day's rows.
     document_url = None
     if attachment is not None and attachment.filename:
         extension = attachment.filename.rsplit(".", 1)[-1].lower() if "." in attachment.filename else ""
@@ -457,6 +483,9 @@ def submit_report(
     if activity is None:
         activity = HeadOfficeActivityLog(report_date=report_date)
         db.add(activity)
+    # SM-7: captured before being overwritten below, so a resubmission that
+    # replaces the attachment can delete the previous R2 object afterwards.
+    previous_document_url = activity.document_url
     activity.meetings_attended = meetings_attended
     activity.site_visits = site_visits
     activity.key_decisions = key_decisions
@@ -527,11 +556,21 @@ def submit_report(
         db.commit()
     except IntegrityError:
         db.rollback()
+        if document_url:
+            # SM-7: the loser's upload is already in R2 with no DB row
+            # pointing at it — delete it instead of orphaning it (and its
+            # upload-budget slot) on every double-click.
+            delete_object(extract_r2_key(document_url))
         log_audit(db, user, "HO_REPORT_SUBMIT_CONFLICT", f"date={report_date.isoformat()}", request)
         raise HTTPException(
             status_code=409,
             detail="Another submission for today was saved at the same moment — please try again.",
         )
+
+    if document_url and previous_document_url and previous_document_url != document_url:
+        # SM-7: this resubmission replaced the previous attachment — delete
+        # the orphaned object instead of leaving it in R2 forever.
+        delete_object(extract_r2_key(previous_document_url))
 
     changes = None
     if previous_financial is not None:
@@ -598,9 +637,14 @@ def submit_report(
                                       source="ho_daily_financial")
         except Exception as exc:
             db.rollback()
-            auto_post_error = str(exc)[:300]
+            # SM-13: route through server_error() — the response and the
+            # audit row carry a fixed message + error_id, never the raw
+            # exception text (which can carry SQL fragments and
+            # table/column names).
+            err = server_error("Daily report journal could not be posted", exc, logger, context="ho auto-post")
+            auto_post_error = err.detail
             log_audit(db, user, "HO_DAILY_REPORT_AUTO_POST_FAILED",
-                      f"date={report_date.isoformat()} error={auto_post_error}", request)
+                      f"date={report_date.isoformat()} error_id={_error_id_of(err.detail)}", request)
 
     if auto_post_error is not None:
         return {"ok": True, "auto_post_failed": True, "auto_post_error": auto_post_error}
