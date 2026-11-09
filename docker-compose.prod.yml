@@ -165,7 +165,7 @@ services:
     container_name: bot_caddy
     restart: unless-stopped
     environment:
-      DOMAIN: ${DOMAIN:?DOMAIN must be set when using the tls profile (e.g. export DOMAIN=erp.example.com)}
+      DOMAIN: ${DOMAIN:?DOMAIN must be set (e.g. export DOMAIN=erp.example.com)}
     ports:
       - "80:80"
       - "443:443"
