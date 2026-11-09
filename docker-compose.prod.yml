@@ -15,6 +15,16 @@
 #      HISTCONTROL=ignorespace and prefix the command with a space.)
 #   4. docker compose -f docker-compose.prod.yml up -d --build
 #
+# TLS is the DEFAULT path, not opt-in (SM-2): the Caddy service below has
+# no `--profile tls` gate, and it requires DOMAIN — `up` fails loudly with
+# "DOMAIN must be set ..." when it is unset, instead of starting an
+# HTTP-only deploy whose login then silently breaks (production cookies
+# are Secure + __Host-, which browsers refuse over plain HTTP). There is
+# no supported HTTP-only production deploy: if the app is only ever
+# reached on 127.0.0.1 (e.g. over an SSH tunnel), set DOMAIN to the
+# machine's hostname anyway so Caddy can terminate TLS for it — do NOT
+# expose the app directly without TLS (see runbook §2C).
+#
 # Migrations do NOT run inside the web container. The one-shot `migrate`
 # service runs `alembic upgrade head` first (it uses MIGRATION_DATABASE_URL
 # when set, else DATABASE_URL — see alembic/env.py) and the web service
@@ -25,15 +35,12 @@
 # runbook; downgrades past e4f8a2b6d0c5 cannot restore scrubbed audit data,
 # so a forward-fix is preferred.
 #
-# TLS: by default this file is HTTP-only (the app listens on
-# 127.0.0.1:8123). For a public deployment add the `tls` profile and a
-# domain — Caddy then terminates HTTPS automatically:
-#   export DOMAIN=erp.example.com
-#   docker compose -f docker-compose.prod.yml --profile tls up -d --build
-# Caddy needs ports 80/443 free and the domain's DNS pointed at the
-# server. Without a domain, do NOT expose the app directly: production
-# cookies are Secure + __Host-, which browsers refuse over plain HTTP,
-# so login breaks (see runbook §2C).
+# TLS: this file is HTTPS by default — Caddy terminates TLS automatically
+# (see the caddy service below; DOMAIN is required, `up` refuses to start
+# without it). The app itself still listens on 127.0.0.1:8123 only and is
+# never exposed directly: production cookies are Secure + __Host-, which
+# browsers refuse over plain HTTP, so login breaks (see runbook §2C).
+# Caddy needs ports 80/443 free and the domain's DNS pointed at the server.
 #
 # The local postgres/pgadmin services from docker-compose.yml are NOT started here —
 # Neon is the database.
@@ -118,14 +125,12 @@ services:
       # (bot_app) cannot run DDL, so startup migrations would fail with
       # permission denied. Keep this "false".
       RUN_MIGRATIONS_ON_STARTUP: "false"
-      # Public host / origin. Derived from DOMAIN when set (tls profile);
-      # without a domain they fall back to localhost-only, which is the
-      # correct value for the HTTP-only default (the app is only reached
-      # on 127.0.0.1:8123). ALLOWED_HOSTS always includes localhost /
-      # 127.0.0.1 because the container HEALTHCHECK hits 127.0.0.1 and
-      # /healthz is exempt from the check anyway. When DOMAIN is set,
-      # ALLOWED_ORIGINS becomes https://<DOMAIN> — the origin the browser
-      # sends for state-changing requests.
+      # Public host / origin. Derived from DOMAIN (required — TLS is the
+      # default path, see the file header). ALLOWED_HOSTS always includes
+      # localhost / 127.0.0.1 because the container HEALTHCHECK hits
+      # 127.0.0.1 and /healthz is exempt from the check anyway. When DOMAIN
+      # is set, ALLOWED_ORIGINS becomes https://<DOMAIN> — the origin the
+      # browser sends for state-changing requests.
       # Host/CSRF (P3-8): Caddy forwards the Host header it received — it
       # does not rewrite it. The allowlist below is therefore the
       # enforcement point for the edge middleware's Host check
@@ -153,14 +158,12 @@ services:
       - "127.0.0.1:8123:8000"
 
   caddy:
-    # Reverse proxy with automatic HTTPS (R-2). Only started with the
-    # `tls` profile: `docker compose --profile tls up -d`. DOMAIN is
-    # required then and the Caddyfile fails to load without it.
+    # Reverse proxy with automatic HTTPS (R-2). Started by default with
+    # every `up` (SM-2) — there is no HTTP-only production path. DOMAIN is
+    # required and the Caddyfile fails to load without it.
     image: caddy:2-alpine
     container_name: bot_caddy
     restart: unless-stopped
-    profiles:
-      - tls
     environment:
       DOMAIN: ${DOMAIN:?DOMAIN must be set when using the tls profile (e.g. export DOMAIN=erp.example.com)}
     ports:
