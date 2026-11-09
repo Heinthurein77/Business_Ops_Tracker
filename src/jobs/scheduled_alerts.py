@@ -10,10 +10,24 @@ Both checks are idempotent/throttled in src/routers/ops.py:
 - Document expiry: one alert per document per 7 days.
 """
 import sys
+from datetime import datetime
 
 from src.database import SessionLocal
+from src.models import JobHeartbeat
 from src.routers.modules import run_check_batch_expiry
 from src.routers.ops import run_check_document_expiry, run_remind_missing_reports
+
+
+def _record_heartbeat(db, job_name: str, status: str) -> None:
+    """Upsert this run into job_heartbeats (R-6 dead-man check). Best
+    effort by design: a heartbeat write must never mask the job's own
+    result, so any failure here is logged and swallowed."""
+    try:
+        db.merge(JobHeartbeat(job_name=job_name, last_run_at=datetime.utcnow(), last_status=status))
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 - heartbeat must not fail the job
+        db.rollback()
+        print(f"heartbeat update failed for {job_name}: {exc}", file=sys.stderr)
 
 
 def main() -> int:
@@ -25,9 +39,11 @@ def main() -> int:
         print(f"documents expiring soon: {expiry['checked']} (notifications sent: {expiry['notified']})")
         batches = run_check_batch_expiry(db, days=30)
         print(f"stock batches expiring soon: {batches['checked']} (notifications sent: {batches['notified']})")
+        _record_heartbeat(db, "scheduled_alerts", "ok")
         return 0
     except Exception as exc:
         print(f"scheduled_alerts failed: {exc}", file=sys.stderr)
+        _record_heartbeat(db, "scheduled_alerts", "failed")
         return 1
     finally:
         db.close()
