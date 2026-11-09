@@ -118,6 +118,13 @@ def create_user(
         if not bu:
             raise HTTPException(status_code=404, detail="Business unit not found")
         business_unit_id = bu.id
+    if payload.role in ("Chairman", "HO") and payload.business_unit_id is not None:
+        # Chairman/HO are group-level: silently discarding a BU here
+        # would leave the creator believing the account was scoped.
+        raise HTTPException(
+            status_code=400,
+            detail=f"{payload.role} accounts are group-level and cannot be assigned to a business unit",
+        )
     if payload.role == "CEO":
         # Every dashboard query keys its CEO lookup by business_unit_id
         # assuming exactly one CEO per BU (see admin.py's ceo_by_bu, and
@@ -186,6 +193,8 @@ def reset_user_password(
         raise HTTPException(status_code=404, detail="User not found")
     if target.role == "Chairman":
         raise HTTPException(status_code=400, detail="The Chairman account cannot be reset from the app")
+    if not target.is_active:
+        raise HTTPException(status_code=400, detail="This account is deactivated — reactivate it before issuing a password")
 
     temporary_password = _apply_temporary_password(target, settings.TEMP_PASSWORD_TTL_HOURS_RESET)
 

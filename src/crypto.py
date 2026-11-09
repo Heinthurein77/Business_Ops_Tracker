@@ -151,4 +151,12 @@ class EncryptedDate(EncryptedText):
         if value is None:
             return None
         plain = decrypt_text(value)
-        return date.fromisoformat(plain[:10])
+        try:
+            return date.fromisoformat(plain[:10])
+        except ValueError as exc:
+            # A legacy plaintext value that is not ISO format: fail the
+            # same way the decrypt path does instead of 500ing every read
+            # of the row with an unhandled ValueError.
+            raise RuntimeError(
+                "Could not parse a stored date value — it is not a valid ISO-8601 date."
+            ) from exc

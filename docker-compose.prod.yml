@@ -24,6 +24,7 @@ services:
       APP_NAME: Business Operations & CEO Tracking System
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set to the Neon connection string}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?DATA_ENCRYPTION_KEY must be set}
       BOOTSTRAP_CHAIRMAN_PASSWORD: ${BOOTSTRAP_CHAIRMAN_PASSWORD:-}
       JWT_ALGORITHM: HS256
       JWT_EXPIRE_MINUTES: "480"

@@ -1315,12 +1315,21 @@ def submit_report(
     log_audit(db, user, "DAILY_REPORT_SUBMITTED", audit_detail, request)
 
     # ERP Phase 1: auto-post the day's revenue to the journal (no-op until
-    # the BU's chart of accounts is provisioned). Never break submission.
+    # the BU's chart of accounts is provisioned). Never break submission —
+    # but never hide a posting failure either: the report is saved, and the
+    # response says the books did not move (previously a bare except +
+    # {"ok": True} swallowed it entirely).
+    auto_post_error = None
     try:
         from src.routers.accounting import auto_post_daily_financial
         db.refresh(financial)
         auto_post_daily_financial(db, financial, user.id)
-    except Exception:
+    except Exception as exc:
         db.rollback()
+        auto_post_error = str(exc)[:300]
+        log_audit(db, user, "DAILY_REPORT_AUTO_POST_FAILED",
+                  f"date={report_date} error={auto_post_error}", request)
 
+    if auto_post_error is not None:
+        return {"ok": True, "auto_post_failed": True, "auto_post_error": auto_post_error}
     return {"ok": True}

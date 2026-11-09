@@ -962,11 +962,12 @@ def override_monthly_target(
 
 
 @router.get("/report-logs")
-def report_logs(user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    # No cap here — every report-submission audit entry ever recorded is
-    # returned, not just the most recent slice, since this page is the full
-    # historical record of report submissions (with client-side date/BU
-    # filters on top), not a rolling activity feed. Includes HO Staff's own
+def report_logs(limit: int = 200, offset: int = 0,
+                user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    # Capped (default 200, max 500): this used to return every
+    # report-submission audit entry ever recorded in one unbounded .all().
+    # The page is still the full historical record — paged, with client-side
+    # date/BU filters on top — not just a rolling activity feed. Includes HO Staff's own
     # daily report (HO_DAILY_REPORT_SUBMITTED) alongside the 23 BUs'
     # (DAILY_REPORT_SUBMITTED) — one unified log rather than a separate page,
     # since it's the same kind of event either way. HO's submitter has no
@@ -977,12 +978,17 @@ def report_logs(user: User = Depends(require_admin), db: Session = Depends(get_d
     # Outer join on users: an erased user's audit rows keep existing with
     # user_id = NULL (FK is ON DELETE SET NULL), and an inner join would make
     # those rows - the very history of what was submitted - vanish.
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    total = db.query(AuditLog).filter(
+        AuditLog.action.in_(["DAILY_REPORT_SUBMITTED", "HO_DAILY_REPORT_SUBMITTED"])).count()
     entries = (
         db.query(AuditLog, User, BusinessUnit)
         .outerjoin(User, AuditLog.user_id == User.id)
         .outerjoin(BusinessUnit, User.business_unit_id == BusinessUnit.id)
         .filter(AuditLog.action.in_(["DAILY_REPORT_SUBMITTED", "HO_DAILY_REPORT_SUBMITTED"]))
         .order_by(AuditLog.timestamp.desc())
+        .limit(limit).offset(offset)
         .all()
     )
 
@@ -1012,7 +1018,8 @@ def report_logs(user: User = Depends(require_admin), db: Session = Depends(get_d
             }
         )
 
-    return {"logs": logs, "total_logs": len(logs)}
+    return {"logs": logs, "total_logs": len(logs), "total": total,
+            "limit": limit, "offset": offset}
 
 
 # --- Security Log: sign-in/out, password, and account-management events.

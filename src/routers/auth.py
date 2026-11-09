@@ -22,7 +22,7 @@ from src.client_ip import get_client_ip
 from src.config import settings
 from src.database import get_db
 from src.models import PasswordResetRequest, User
-from src.schemas import ForcePasswordChangeRequest, ForgotPasswordRequest, LoginRequest, password_policy_error
+from src.schemas import ForcePasswordChangeRequest, ForgotPasswordRequest, LoginRequest, PASSWORD_MAX_BYTES, password_policy_error
 from src.throttle import (
     PASSWORD_CHANGE_FAILED,
     PASSWORD_RESET_REQUESTED,
@@ -96,6 +96,14 @@ def login(payload: LoginRequest, request: Request, response: Response, db: Sessi
         raise _too_many_requests(throttled, _TOO_MANY_LOGINS_DETAIL)
 
     user = db.query(User).filter(User.username == username).first()
+
+    # bcrypt silently ignores everything past byte 72: a longer password
+    # whose first 72 bytes match the stored hash would authenticate, so
+    # reject it here before any verification (creation already caps at
+    # 72 bytes, but the login path itself did not enforce the cap).
+    if len(payload.password.encode("utf-8")) > PASSWORD_MAX_BYTES:
+        log_audit(db, user, "LOGIN_FAILED", f"username={username}", request, username=username)
+        raise HTTPException(status_code=401, detail=_LOGIN_FAILED_DETAIL)
 
     password_ok = verify_password(payload.password, user.hashed_password if user else _DUMMY_HASH)
     # An expired Chairman-issued temporary password is a wrong password: same

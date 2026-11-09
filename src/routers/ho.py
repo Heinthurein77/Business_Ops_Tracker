@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from src.auth import require_roles
 from src.database import get_db
 from src.models import (
+    BusinessUnit,
     HeadOfficeActivityLog,
     HeadOfficeDailyFinancial,
     HeadOfficeHealthStatus,
@@ -577,4 +578,28 @@ def submit_report(
     audit_detail = build_resubmit_audit_detail(report_date, changes)
     log_audit(db, user, "HO_DAILY_REPORT_SUBMITTED", audit_detail, request)
 
+    # HO daily financials auto-post to journals, mirroring the CEO flow.
+    # HO has no BU of its own, so the books live in the designated Head
+    # Office business unit (code "HO", provisioned like any BU). Until
+    # such a BU exists this is a silent no-op, exactly like the CEO flow
+    # when a BU has no chart of accounts yet. A posting failure is
+    # surfaced on the response (and audit-logged) instead of swallowed,
+    # as in ceo.py — the report itself is already saved.
+    auto_post_error = None
+    ho_bu = db.query(BusinessUnit).filter(BusinessUnit.code == "HO").first()
+    if ho_bu is not None:
+        try:
+            from src.routers.accounting import auto_post_daily_financial
+            db.refresh(financial)
+            auto_post_daily_financial(db, financial, user.id,
+                                      business_unit_id=ho_bu.id,
+                                      source="ho_daily_financial")
+        except Exception as exc:
+            db.rollback()
+            auto_post_error = str(exc)[:300]
+            log_audit(db, user, "HO_DAILY_REPORT_AUTO_POST_FAILED",
+                      f"date={report_date.isoformat()} error={auto_post_error}", request)
+
+    if auto_post_error is not None:
+        return {"ok": True, "auto_post_failed": True, "auto_post_error": auto_post_error}
     return {"ok": True}

@@ -9,6 +9,7 @@ Rules enforced here:
 - Auto-posting (daily financials, approved expenses) goes through posting
   rules: BU rule → group rule → built-in defaults from accounting_templates.
 """
+import re
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
@@ -28,7 +29,7 @@ from src.models import (
     Account, BusinessUnit, FiscalPeriod, JournalEntry, JournalLine,
     PostingRule, User,
 )
-from src.utils import validate_period
+from src.utils import log_audit, today_local, validate_period
 
 router = APIRouter(prefix="/api/accounting", tags=["accounting"])
 require_accounting = require_roles("Chairman", "HO", "Accountant")
@@ -183,10 +184,14 @@ def create_entry(db: Session, bu_id: int, entry_date: date, description: str,
                  source: str, user_id: Optional[int], lines: list[dict],
                  reference: Optional[str] = None, source_id: Optional[int] = None,
                  post: bool = False, reversal_of_id: Optional[int] = None) -> JournalEntry:
-    """Create an entry (draft by default). Caller commits."""
+    """Create an entry (draft by default). Caller commits.
+
+    Lines are validated on every creation, draft or posted: a draft that
+    references another BU's accounts, a header/inactive account, negative
+    amounts, or an unbalanced total could never be posted, so storing it
+    only defers the failure to post time."""
     ensure_period_open(db, bu_id, entry_date)
-    if post:
-        validate_lines(db, bu_id, lines)
+    validate_lines(db, bu_id, lines)
     e = JournalEntry(
         business_unit_id=bu_id, entry_no=next_entry_no(db, bu_id, entry_date),
         entry_date=entry_date, description=description, reference=reference,
@@ -246,18 +251,28 @@ def _rule_lines(db: Session, bu_id: int, source_field: str, amount: Decimal,
     ]
 
 
-def auto_post_daily_financial(db: Session, df, user_id: Optional[int]) -> None:
+def auto_post_daily_financial(db: Session, df, user_id: Optional[int],
+                              business_unit_id: Optional[int] = None,
+                              source: str = "daily_financial") -> None:
     """Post journal entries for a DailyFinancial row (revenue + expenses).
 
     Cash flow / receivable / payable daily figures are position snapshots,
     not transactions — they are NOT posted here (AR/AP modules, Phase 4).
     Re-submitting a day reverses the previous auto entries and reposts.
+
+    `business_unit_id` defaults to the row's own BU (the CEO flow). HO
+    daily financials carry no BU, so ho.py passes the designated Head
+    Office BU explicitly, with source "ho_daily_financial": a distinct
+    source keeps HO entries — and their resubmission reversals — from
+    colliding with a BU's daily_financial rows of the same id.
     """
-    bu_id = df.business_unit_id
+    bu_id = business_unit_id if business_unit_id is not None else getattr(df, "business_unit_id", None)
+    if bu_id is None:
+        return  # no books to post into (HO with no Head Office BU yet)
     if not db.query(Account).filter(Account.business_unit_id == bu_id).first():
         return  # BU has no CoA yet
     old = db.query(JournalEntry).filter(
-        JournalEntry.source == "daily_financial", JournalEntry.source_id == df.id,
+        JournalEntry.source == source, JournalEntry.source_id == df.id,
         JournalEntry.status == "posted", JournalEntry.reversed_by_id == None).all()  # noqa: E711
     for e in old:
         _reverse_entry(db, e, user_id)
@@ -271,7 +286,7 @@ def auto_post_daily_financial(db: Session, df, user_id: Optional[int]) -> None:
             continue
         create_entry(db, bu_id, df.report_date,
                      f"Daily report {df.report_date.isoformat()} — {field.split('.')[-1]}",
-                     "daily_financial", user_id, lines, source_id=df.id, post=True)
+                     source, user_id, lines, source_id=df.id, post=True)
     db.commit()
 
 
@@ -296,7 +311,12 @@ def auto_post_expense(db: Session, expense, user_id: Optional[int]) -> None:
 def _reverse_entry(db: Session, entry: JournalEntry, user_id: Optional[int]) -> JournalEntry:
     lines = [{"account_id": l.account_id, "debit": l.credit, "credit": l.debit,
               "memo": l.memo} for l in entry.lines]
-    rev = create_entry(db, entry.business_unit_id, date.today(),
+    # The reversal belongs to the original entry's period, not today's: a
+    # resubmission of a prior-period day used to land its reversal in the
+    # current period while the repost landed on the report date, so the
+    # original month double-counted and the current month carried a
+    # spurious reversal.
+    rev = create_entry(db, entry.business_unit_id, entry.entry_date,
                        f"Reversal of {entry.entry_no}", "reversal", user_id,
                        lines, post=True, reversal_of_id=entry.id)
     entry.reversed_by_id = rev.id
@@ -344,11 +364,22 @@ def provision_bu(bu_id: int, template: str = "retail",
                  user: User = Depends(require_accounting), db: Session = Depends(get_db)):
     """Clone a CoA template into a BU + seed group posting rules. Idempotent."""
     check_bu_access(user, bu_id)
-    bu_or_404(db, bu_id)
+    bu = bu_or_404(db, bu_id)
     if template not in TEMPLATE_TYPES:
         raise HTTPException(400, f"template must be one of {TEMPLATE_TYPES}")
     existing = db.query(Account).filter(Account.business_unit_id == bu_id).count()
     if existing:
+        if bu.nature is None:
+            # Backfill the template a BU was provisioned with, but only
+            # when the books prove it: the stored codes must match this
+            # template's codes exactly, so a BU provisioned from a
+            # different template is never relabelled.
+            codes = {c for (c,) in db.query(Account.code).filter(
+                Account.business_unit_id == bu_id).all()}
+            template_codes = {c for c, _n, _t, _p, _h in template_accounts(template)}
+            if codes == template_codes:
+                bu.nature = template
+                db.commit()
         return {"ok": True, "created": 0, "message": "BU already has a chart of accounts"}
     id_by_code: dict[str, int] = {}
     created = 0
@@ -360,6 +391,9 @@ def provision_bu(bu_id: int, template: str = "retail",
         db.flush()
         id_by_code[code] = acc.id
         created += 1
+    # Remember which template this BU's books came from (the admin create
+    # endpoint sets it too; provisioning on its own used to leave it null).
+    bu.nature = template
     for field, dr, cr in DEFAULT_POSTING_RULES:
         if not db.query(PostingRule).filter(
                 PostingRule.business_unit_id == None,  # noqa: E711
@@ -395,9 +429,23 @@ def create_account(payload: AccountIn, user: User = Depends(require_accounting),
     bu_or_404(db, payload.business_unit_id)
     if payload.account_type not in ("asset", "liability", "equity", "income", "expense"):
         raise HTTPException(400, "Invalid account_type")
-    if account_by_code(db, payload.business_unit_id, payload.code):
-        raise HTTPException(400, f"Account code {payload.code} already exists in this BU")
-    acc = Account(business_unit_id=payload.business_unit_id, code=payload.code.strip(),
+    # The code is stored stripped, so the duplicate check must use the
+    # stripped form too (" 1110" used to pass the check and then collide).
+    # Codes follow the 1000–7900 group standard consolidation sums by.
+    code = payload.code.strip()
+    if not re.fullmatch(r"\d{4}", code) or not (1000 <= int(code) <= 7900):
+        raise HTTPException(400, "Account code must be a 4-digit group code between 1000 and 7900")
+    if account_by_code(db, payload.business_unit_id, code):
+        raise HTTPException(400, f"Account code {code} already exists in this BU")
+    if payload.parent_id is not None:
+        parent = db.query(Account).filter(Account.id == payload.parent_id).first()
+        if not parent:
+            raise HTTPException(404, "Parent account not found")
+        if parent.business_unit_id != payload.business_unit_id:
+            raise HTTPException(400, "Parent account belongs to a different business unit")
+        if not parent.is_header:
+            raise HTTPException(400, "Parent account must be a header account")
+    acc = Account(business_unit_id=payload.business_unit_id, code=code,
                   name=payload.name, account_type=payload.account_type,
                   parent_id=payload.parent_id, is_header=payload.is_header)
     db.add(acc)
@@ -407,7 +455,7 @@ def create_account(payload: AccountIn, user: User = Depends(require_accounting),
 
 
 class AccountUpdate(BaseModel):
-    name: Optional[str] = None
+    name: Optional[str] = Field(default=None, max_length=150)
     is_active: Optional[bool] = None
 
 
@@ -419,8 +467,20 @@ def update_account(account_id: int, payload: AccountUpdate,
         raise HTTPException(404, "Account not found")
     check_bu_access(user, acc.business_unit_id)
     if payload.name is not None:
-        acc.name = payload.name
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(400, "Account name cannot be empty")
+        acc.name = name
     if payload.is_active is not None:
+        if payload.is_active is False and acc.is_active:
+            # Deactivating an account with postings breaks historical
+            # lookups (account_by_code only returns active accounts).
+            posted = db.query(JournalLine).join(
+                JournalEntry, JournalLine.entry_id == JournalEntry.id).filter(
+                JournalLine.account_id == acc.id,
+                JournalEntry.status == "posted").first()
+            if posted:
+                raise HTTPException(400, "Cannot deactivate an account with posted journal lines")
         acc.is_active = payload.is_active
     db.commit()
     db.refresh(acc)
@@ -431,17 +491,17 @@ def update_account(account_id: int, payload: AccountUpdate,
 
 class JournalLineIn(BaseModel):
     account_id: int
-    debit: float = 0
-    credit: float = 0
-    memo: Optional[str] = None
+    debit: Decimal = Field(default=Decimal("0"), ge=0, le=10**13)
+    credit: Decimal = Field(default=Decimal("0"), ge=0, le=10**13)
+    memo: Optional[str] = Field(default=None, max_length=255)
 
 
 class JournalIn(BaseModel):
     business_unit_id: int
     entry_date: date
-    description: Optional[str] = None
-    reference: Optional[str] = None
-    lines: list[JournalLineIn]
+    description: Optional[str] = Field(default=None, max_length=500)
+    reference: Optional[str] = Field(default=None, max_length=100)
+    lines: list[JournalLineIn] = Field(min_length=2)
 
 
 @router.post("/journal")
@@ -468,18 +528,28 @@ def create_journal(payload: JournalIn, user: User = Depends(require_accounting),
 @router.get("/journal")
 def list_journal(business_unit_id: int, period: Optional[str] = None,
                  status: Optional[str] = None, source: Optional[str] = None,
+                 limit: int = 300, offset: int = 0,
                  user: User = Depends(require_accounting), db: Session = Depends(get_db)):
     period = validate_period(period)
     check_bu_access(user, business_unit_id)
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
     q = db.query(JournalEntry).filter(JournalEntry.business_unit_id == business_unit_id)
+    if period:
+        # Filter in SQL, before the limit: filtering the first 300 rows in
+        # Python used to return [] for any older period once the BU had
+        # more than 300 recent entries.
+        y, m = map(int, period.split("-"))
+        q = q.filter(JournalEntry.entry_date >= date(y, m, 1),
+                     JournalEntry.entry_date <= _period_end(period))
     if status:
         q = q.filter(JournalEntry.status == status)
     if source:
         q = q.filter(JournalEntry.source == source)
-    rows = q.order_by(JournalEntry.entry_date.desc(), JournalEntry.id.desc()).limit(300).all()
-    if period:
-        rows = [r for r in rows if period_of(r.entry_date) == period]
-    return {"items": [serialize_entry(db, r, with_lines=False) for r in rows]}
+    total = q.count()
+    rows = q.order_by(JournalEntry.entry_date.desc(), JournalEntry.id.desc()).offset(offset).limit(limit).all()
+    return {"items": [serialize_entry(db, r, with_lines=False) for r in rows],
+            "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/journal/{entry_id}")
@@ -740,13 +810,22 @@ def _all_posted_lines(db: Session, upto: Optional[date] = None):
 @router.get("/reports/consolidated-pl")
 def consolidated_pl(period: Optional[str] = None, user: User = Depends(require_accounting),
                     db: Session = Depends(get_db)):
-    """Group P&L: every BU summed by the shared account-code standard."""
+    """Group P&L: every BU summed by the shared account-code standard,
+    with intercompany sales/expenses eliminated (a seller's 4100 revenue
+    against the buyer's matching expense charge) and the eliminated amount
+    disclosed, like consolidated_bs does for 1180/2180."""
     period = validate_period(period)
     require_group_access(user)
     income: dict[str, Decimal] = {}
     expense: dict[str, Decimal] = {}
     names: dict[str, str] = {}
-    for line, acc, e in _all_posted_lines(db, _period_end(period)):
+    ic_income: dict[str, Decimal] = {}
+    ic_expense: dict[str, Decimal] = {}
+    posted = _all_posted_lines(db, _period_end(period))
+    # Reversals of intercompany entries carry source "reversal": they
+    # belong to the elimination too, via the entry they reverse.
+    ic_entry_ids = {e.id for _l, _a, e in posted if e.source == "intercompany"}
+    for line, acc, e in posted:
         names.setdefault(acc.code, acc.name)
         if period and period_of(e.entry_date) != period:
             continue
@@ -754,12 +833,37 @@ def consolidated_pl(period: Optional[str] = None, user: User = Depends(require_a
             income[acc.code] = income.get(acc.code, ZERO) + (line.credit or ZERO) - (line.debit or ZERO)
         elif acc.account_type == "expense":
             expense[acc.code] = expense.get(acc.code, ZERO) + (line.debit or ZERO) - (line.credit or ZERO)
+        if e.source == "intercompany" or (e.source == "reversal" and e.reversal_of_id in ic_entry_ids):
+            if acc.account_type == "income":
+                ic_income[acc.code] = ic_income.get(acc.code, ZERO) + (line.credit or ZERO) - (line.debit or ZERO)
+            elif acc.account_type == "expense":
+                ic_expense[acc.code] = ic_expense.get(acc.code, ZERO) + (line.debit or ZERO) - (line.credit or ZERO)
+    # Eliminate only up to the matched side: if the buyer capitalised the
+    # charge instead of expensing it, the unmatched revenue stays (its
+    # offset lives on the balance sheet, not in this P&L).
+    eliminated = min(sum(ic_income.values(), ZERO), sum(ic_expense.values(), ZERO))
+    if eliminated > 0:
+        remaining = eliminated
+        for code in sorted(ic_income, key=lambda c: -ic_income[c]):
+            take = min(ic_income[code], remaining)
+            income[code] = income.get(code, ZERO) - take
+            remaining -= take
+            if remaining <= 0:
+                break
+        remaining = eliminated
+        for code in sorted(ic_expense, key=lambda c: -ic_expense[c]):
+            take = min(ic_expense[code], remaining)
+            expense[code] = expense.get(code, ZERO) - take
+            remaining -= take
+            if remaining <= 0:
+                break
     ti = sum(income.values(), ZERO)
     te = sum(expense.values(), ZERO)
     return {
         "income": [{"code": c, "name": names.get(c, c), "amount": fmt(v)} for c, v in sorted(income.items())],
         "expenses": [{"code": c, "name": names.get(c, c), "amount": fmt(v)} for c, v in sorted(expense.items())],
         "total_income": fmt(ti), "total_expenses": fmt(te), "net_profit": fmt(ti - te),
+        "intercompany_eliminated": fmt(eliminated),
     }
 
 
@@ -858,12 +962,33 @@ class PeriodAction(BaseModel):
 
 
 @router.post("/periods/close")
-def close_period(payload: PeriodAction, user: User = Depends(require_accounting),
+def close_period(payload: PeriodAction, user: User = Depends(require_admin),
                  db: Session = Depends(get_db)):
+    # Closing is a control action, not bookkeeping: it blocks all further
+    # postings into the period, so only Chairman/HO may do it (reopen was
+    # already Chairman/HO-only). Enforced in-body as well as by the
+    # require_admin dependency, so direct callers get the same refusal.
+    if user.role not in ("Chairman", "HO"):
+        raise HTTPException(403, "Only Chairman/HO can close a fiscal period")
     check_bu_access(user, payload.business_unit_id)
+    if payload.period > today_local().strftime("%Y-%m"):
+        raise HTTPException(400, f"Cannot close future period {payload.period}")
     row = db.query(FiscalPeriod).filter(
         FiscalPeriod.business_unit_id == payload.business_unit_id,
         FiscalPeriod.period == payload.period).first()
+    if row and row.status == "closed":
+        return {"ok": True, "period": payload.period, "status": "closed"}
+    # Unposted drafts in the period could never be posted once it closes.
+    y, m = map(int, payload.period.split("-"))
+    drafts = db.query(JournalEntry).filter(
+        JournalEntry.business_unit_id == payload.business_unit_id,
+        JournalEntry.status == "draft",
+        JournalEntry.entry_date >= date(y, m, 1),
+        JournalEntry.entry_date <= _period_end(payload.period)).count()
+    if drafts:
+        raise HTTPException(
+            400, f"Cannot close {payload.period}: {drafts} unposted draft journal "
+            f"{'entry' if drafts == 1 else 'entries'} exist in this period — post or delete them first")
     if not row:
         row = FiscalPeriod(business_unit_id=payload.business_unit_id, period=payload.period)
         db.add(row)
@@ -871,6 +996,8 @@ def close_period(payload: PeriodAction, user: User = Depends(require_accounting)
     row.closed_by_id = user.id
     row.closed_at = datetime.utcnow()
     db.commit()
+    log_audit(db, user, "FISCAL_PERIOD_CLOSED",
+              f"business_unit_id={payload.business_unit_id} period={payload.period}", request=None)
     return {"ok": True, "period": payload.period, "status": "closed"}
 
 
@@ -919,6 +1046,33 @@ class PostingRuleIn(BaseModel):
     credit_account_code: str
 
 
+def _validate_postable_code(db: Session, bu_id: Optional[int], code: str) -> str:
+    """A code a budget or posting rule may point at: it must exist, be
+    active, and be postable (not a header). For a BU rule the BU's own
+    chart is checked; a group rule (bu_id None) has no BU, so it is
+    checked against the group template chart every BU is cloned from."""
+    code = (code or "").strip()
+    if not code:
+        raise HTTPException(400, "Account code cannot be empty")
+    if bu_id is not None:
+        acc = account_by_code(db, bu_id, code)
+        if not acc:
+            raise HTTPException(400, f"Account code {code} does not exist (or is inactive) in this BU")
+        if acc.is_header:
+            raise HTTPException(400, f"Account code {code} is a header account and cannot be posted to")
+        return code
+    found_postable = False
+    for template in TEMPLATE_TYPES:
+        for c, _n, _a, _p, is_header in template_accounts(template):
+            if c == code:
+                if is_header:
+                    raise HTTPException(400, f"Account code {code} is a header account and cannot be posted to")
+                found_postable = True
+    if not found_postable:
+        raise HTTPException(400, f"Account code {code} is not in the group chart of accounts")
+    return code
+
+
 @router.put("/posting-rules")
 def upsert_posting_rule(payload: PostingRuleIn, user: User = Depends(require_accounting),
                         db: Session = Depends(get_db)):
@@ -927,6 +1081,12 @@ def upsert_posting_rule(payload: PostingRuleIn, user: User = Depends(require_acc
         # Covers both another BU's override and the group rule (None):
         # either would reach beyond the accountant's own books.
         raise HTTPException(403, "Accountants can only change posting rules for their assigned business unit")
+    if payload.business_unit_id is not None:
+        bu_or_404(db, payload.business_unit_id)
+    debit = _validate_postable_code(db, payload.business_unit_id, payload.debit_account_code)
+    credit = _validate_postable_code(db, payload.business_unit_id, payload.credit_account_code)
+    if debit == credit:
+        raise HTTPException(400, "Debit and credit accounts must differ")
     row = db.query(PostingRule).filter(
         PostingRule.business_unit_id == payload.business_unit_id,
         PostingRule.source_field == payload.source_field).first()
@@ -934,8 +1094,8 @@ def upsert_posting_rule(payload: PostingRuleIn, user: User = Depends(require_acc
         row = PostingRule(business_unit_id=payload.business_unit_id,
                           source_field=payload.source_field)
         db.add(row)
-    row.debit_account_code = payload.debit_account_code
-    row.credit_account_code = payload.credit_account_code
+    row.debit_account_code = debit
+    row.credit_account_code = credit
     db.commit()
     return {"ok": True}
 
@@ -970,15 +1130,22 @@ async def opening_balance(business_unit_id: int, as_of: date,
     # (account_code|debit|credit) and the template layout
     # (account_code|account_name|debit|credit) work.
     header = [str(c or "").strip().lower() for c in (rows[0] if rows else [])]
+    header_recognised = True
     try:
         ci_code = header.index("account_code")
         ci_dr = header.index("debit")
         ci_cr = header.index("credit")
     except ValueError:
+        # No recognisable header: the sheet is headerless, so row 0 is
+        # data — skipping it used to silently drop the first balance row.
+        header_recognised = False
         ci_code, ci_dr, ci_cr = 0, 1, 2
+    data_rows = len(rows) - (1 if header_recognised else 0)
+    if data_rows > 500:
+        raise HTTPException(400, "Too many rows — at most 500 balance rows per upload")
     lines = []
     for i, row in enumerate(rows):
-        if i == 0:
+        if i == 0 and header_recognised:
             continue  # header
         if not row or not row[ci_code]:
             continue
@@ -993,6 +1160,8 @@ async def opening_balance(business_unit_id: int, as_of: date,
             cr = Decimal(str(row[ci_cr] or 0)) if len(row) > ci_cr else ZERO
         except Exception:
             raise HTTPException(400, f"Row {i + 1}: debit/credit must be numbers")
+        if dr < 0 or cr < 0:
+            raise HTTPException(400, f"Row {i + 1}: debit/credit cannot be negative")
         if dr == 0 and cr == 0:
             continue
         lines.append({"account_id": acc.id, "debit": dr, "credit": cr})
@@ -1037,7 +1206,7 @@ class FixedAssetIn(BaseModel):
     name: str = Field(min_length=1, max_length=150)
     category: Optional[str] = None
     purchase_date: date
-    cost: float = Field(gt=0)
+    cost: Decimal = Field(gt=0, le=10**13)
     salvage_value: float = 0
     useful_life_months: int = Field(gt=0)
 
@@ -1089,8 +1258,8 @@ def run_depreciation(payload: DepreciateIn, user: User = Depends(require_account
     assets = db.query(FixedAsset).filter(
         FixedAsset.business_unit_id == payload.business_unit_id,
         FixedAsset.status == "active").all()
+    planned: list[tuple] = []
     total = ZERO
-    count = 0
     for a in assets:
         if a.last_depreciated_period == payload.period:
             continue
@@ -1100,28 +1269,31 @@ def run_depreciation(payload: DepreciateIn, user: User = Depends(require_account
             continue
         monthly = depreciable / Decimal(a.useful_life_months)
         dep = min(monthly, remaining).quantize(Decimal("0.01"))
-        a.accumulated_depreciation = Decimal(str(a.accumulated_depreciation or 0)) + dep
-        a.last_depreciated_period = payload.period
+        planned.append((a, dep))
         total += dep
-        count += 1
-    db.commit()
     journal_posted = False
     if total > 0:
-        try:
-            dep_acc = account_by_code(db, payload.business_unit_id, "6900")
-            acc_acc = account_by_code(db, payload.business_unit_id, "1290")
-            if dep_acc and acc_acc:
-                y, m = payload.period.split("-")
-                create_entry(db, payload.business_unit_id, date(int(y), int(m), 1),
-                             f"Depreciation {payload.period}", "depreciation", user.id,
-                             [{"account_id": dep_acc.id, "debit": total, "credit": 0},
-                              {"account_id": acc_acc.id, "debit": 0, "credit": total}],
-                             post=True)
-                db.commit()
-                journal_posted = True
-        except Exception:
-            db.rollback()
-    return {"ok": True, "assets_depreciated": count, "total": fmt(total),
+        # Post the journal BEFORE marking anything depreciated: the old
+        # order committed the asset updates first, so a journal failure
+        # (e.g. closed period, missing 6900/1290) left assets permanently
+        # depreciated with no expense in the ledger. A failure here raises
+        # instead of returning ok: True with journal_posted False.
+        dep_acc = account_by_code(db, payload.business_unit_id, "6900")
+        acc_acc = account_by_code(db, payload.business_unit_id, "1290")
+        if not dep_acc or not acc_acc:
+            raise HTTPException(400, "Depreciation accounts 6900/1290 not found — provision a chart of accounts first")
+        y, m = payload.period.split("-")
+        create_entry(db, payload.business_unit_id, date(int(y), int(m), 1),
+                     f"Depreciation {payload.period}", "depreciation", user.id,
+                     [{"account_id": dep_acc.id, "debit": total, "credit": 0},
+                      {"account_id": acc_acc.id, "debit": 0, "credit": total}],
+                     post=True)
+        for a, dep in planned:
+            a.accumulated_depreciation = Decimal(str(a.accumulated_depreciation or 0)) + dep
+            a.last_depreciated_period = payload.period
+        db.commit()
+        journal_posted = True
+    return {"ok": True, "assets_depreciated": len(planned), "total": fmt(total),
             "journal_posted": journal_posted}
 
 
@@ -1171,8 +1343,8 @@ def create_bank_account(payload: BankAccountIn, user: User = Depends(require_acc
 class BankTxnIn(BaseModel):
     txn_date: date
     description: Optional[str] = None
-    deposit: float = 0
-    withdrawal: float = 0
+    deposit: Decimal = Field(default=Decimal("0"), ge=0, le=10**13)
+    withdrawal: Decimal = Field(default=Decimal("0"), ge=0, le=10**13)
 
 
 @router.get("/bank-accounts/{bank_id}/transactions")
@@ -1454,15 +1626,27 @@ def finance_summary(period: Optional[str] = None, user: User = Depends(require_a
             cash += (line.debit or ZERO) - (line.credit or ZERO)
         elif acc.code == "2130":
             tax_payable += (line.credit or ZERO) - (line.debit or ZERO)
-    from src.models import PurchaseOrder, SalesInvoice
+    from src.models import PurchaseOrder, PurchaseReturn, SalesInvoice
     from src.routers.ops import invoice_amounts, po_total
 
     ar = ZERO
     for inv in db.query(SalesInvoice).filter(SalesInvoice.status.in_(("sent", "partial"))).all():
         ar += invoice_amounts(db, inv)["balance"] * Decimal(str(getattr(inv, "exchange_rate", 1) or 1))
+    received_pos = db.query(PurchaseOrder).filter(PurchaseOrder.status == "received").all()
     ap = ZERO
-    for po in db.query(PurchaseOrder).filter(PurchaseOrder.status == "received").all():
+    for po in received_pos:
         ap += po_total(po) * Decimal(str(getattr(po, "exchange_rate", 1) or 1))
+    # Posted purchase returns reduce what is actually owed on a received
+    # PO: each return is valued at its PO line cost, converted at the PO's
+    # exchange rate exactly like po_total above.
+    received_by_id = {po.id: po for po in received_pos}
+    for r in db.query(PurchaseReturn).filter(PurchaseReturn.status == "posted").all():
+        po = received_by_id.get(r.po_id)
+        if not po:
+            continue
+        ret_total = sum((Decimal(str(l.quantity)) * Decimal(str(l.unit_cost))
+                         for l in r.lines), ZERO)
+        ap -= ret_total * Decimal(str(getattr(po, "exchange_rate", 1) or 1))
     return {
         "period": period, "has_books": len(provisioned) > 0,
         "income": fmt(income), "expenses": fmt(expense), "net_profit": fmt(income - expense),
@@ -1561,12 +1745,13 @@ def upsert_budget(payload: BudgetIn, user: User = Depends(require_accounting),
                   db: Session = Depends(get_db)):
     check_bu_access(user, payload.business_unit_id)
     bu_or_404(db, payload.business_unit_id)
+    code = _validate_postable_code(db, payload.business_unit_id, payload.account_code)
     row = db.query(Budget).filter(Budget.business_unit_id == payload.business_unit_id,
                                   Budget.period == payload.period,
-                                  Budget.account_code == payload.account_code).first()
+                                  Budget.account_code == code).first()
     if not row:
         row = Budget(business_unit_id=payload.business_unit_id, period=payload.period,
-                     account_code=payload.account_code, created_by_id=user.id)
+                     account_code=code, created_by_id=user.id)
         db.add(row)
     row.amount = Decimal(str(payload.amount))
     db.commit()
@@ -1623,7 +1808,14 @@ def latest_rate(db: Session, currency: str) -> Decimal:
         return Decimal("1")
     row = db.query(ExchangeRate).filter(ExchangeRate.currency == currency.upper()).order_by(
         ExchangeRate.rate_date.desc()).first()
-    return Decimal(str(row.rate)) if row else Decimal("1")
+    if not row:
+        # Never silently convert 1:1: a USD document created before any
+        # rate exists would be journalled as if USD == MMK. Callers must
+        # supply a rate or the document is blocked with this 400.
+        raise HTTPException(
+            400, f"No exchange rate on file for {currency.upper()} — enter one before "
+            "creating a document in this currency")
+    return Decimal(str(row.rate))
 
 
 # ------------------------------------------------------- C9: intercompany
@@ -1703,18 +1895,24 @@ def create_intercompany(payload: IntercompanyIn, user: User = Depends(require_ac
             raise HTTPException(400, "Both BUs need a chart of accounts first (Chart of Accounts tab)")
     _ensure_intercompany_accounts(db, payload.from_business_unit_id)
     _ensure_intercompany_accounts(db, payload.to_business_unit_id)
-    db.commit()
-    t = IntercompanyTransaction(**payload.model_dump(), created_by_id=user.id)
-    db.add(t)
-    db.commit()
-    db.refresh(t)
-    amt = Decimal(str(t.amount))
-    seller_recv = account_by_code(db, t.from_business_unit_id, "1180")
-    seller_sales = account_by_code(db, t.from_business_unit_id, "4100")
-    buyer_exp = account_by_code(db, t.to_business_unit_id, t.buyer_account_code)
-    buyer_pay = account_by_code(db, t.to_business_unit_id, "2180")
+    # Validate everything BEFORE creating anything: the required accounts
+    # must exist in both BUs and the period must be open in both, so a
+    # failure leaves no orphan transaction behind (the old order committed
+    # the transaction first and only then looked the accounts up).
+    seller_recv = account_by_code(db, payload.from_business_unit_id, "1180")
+    seller_sales = account_by_code(db, payload.from_business_unit_id, "4100")
+    buyer_exp = account_by_code(db, payload.to_business_unit_id, payload.buyer_account_code)
+    buyer_pay = account_by_code(db, payload.to_business_unit_id, "2180")
     if not (seller_recv and seller_sales and buyer_exp and buyer_pay):
         raise HTTPException(400, "Required accounts missing in one of the BUs")
+    if buyer_exp.is_header:
+        raise HTTPException(400, f"Buyer account {payload.buyer_account_code} is a header account")
+    for bu_id in (payload.from_business_unit_id, payload.to_business_unit_id):
+        ensure_period_open(db, bu_id, payload.txn_date)
+    t = IntercompanyTransaction(**payload.model_dump(), created_by_id=user.id)
+    db.add(t)
+    db.flush()
+    amt = Decimal(str(t.amount))
     create_entry(db, t.from_business_unit_id, t.txn_date,
                  f"Intercompany sale to {t.to_business_unit.name if t.to_business_unit else ''}: {t.description or ''}",
                  "intercompany", user.id,
@@ -1727,7 +1925,9 @@ def create_intercompany(payload: IntercompanyIn, user: User = Depends(require_ac
                  [{"account_id": buyer_exp.id, "debit": amt, "credit": 0},
                   {"account_id": buyer_pay.id, "debit": 0, "credit": amt}],
                  source_id=t.id, post=True)
+    # One commit for the transaction + both journals together.
     db.commit()
+    db.refresh(t)
     return serialize_intercompany(t)
 
 
@@ -1802,6 +2002,10 @@ def cash_flow_report(business_unit_id: int, period: str,
         JournalEntry.status == "posted",
         JournalEntry.entry_date >= start, JournalEntry.entry_date <= end).order_by(
         JournalEntry.entry_date, JournalEntry.id).all()
+    # One query for every account in the BU: the old code queried Account
+    # once per journal line (N+1).
+    accounts = {a.id: a for a in db.query(Account).filter(
+        Account.business_unit_id == business_unit_id).all()}
     sections = {"operating": ZERO, "investing": ZERO, "financing": ZERO}
     detail = []
     for e in entries:
@@ -1810,18 +2014,29 @@ def cash_flow_report(business_unit_id: int, period: str,
                     for l in lines if l.account_id in cash_ids)
         if delta == 0:
             continue
-        category = "operating"
+        # Classify by the DOMINANT counter-account, not the first one the
+        # DB happens to return: a compound entry (e.g. an asset purchase
+        # partly funded by a loan) used to be classified by whichever
+        # non-cash line came first, order unspecified.
+        scores = {"operating": ZERO, "investing": ZERO, "financing": ZERO}
         for l in lines:
             if l.account_id in cash_ids:
                 continue
-            acc = db.query(Account).filter(Account.id == l.account_id).first()
+            acc = accounts.get(l.account_id)
             if not acc:
                 continue
+            amt = abs(Decimal(str(l.debit or 0)) - Decimal(str(l.credit or 0)))
             if acc.code.startswith("12") or acc.code == "1530":
-                category = "investing"
-                break
-            if acc.code in ("2140", "2200") or acc.account_type == "equity":
-                category = "financing"
+                scores["investing"] += amt
+            elif acc.code in ("2140", "2200") or acc.account_type == "equity":
+                scores["financing"] += amt
+            else:
+                scores["operating"] += amt
+        category = "operating"
+        if scores["investing"] > scores["operating"] and scores["investing"] >= scores["financing"]:
+            category = "investing"
+        elif scores["financing"] > scores["operating"] and scores["financing"] > scores["investing"]:
+            category = "financing"
         sections[category] += delta
         detail.append({"date": e.entry_date.isoformat(), "entry_no": e.entry_no,
                        "description": e.description, "category": category,
@@ -1846,6 +2061,11 @@ def year_close(payload: YearCloseIn, user: User = Depends(require_roles("Chairma
     every period of the year. Run while December is still open."""
     bu_id = payload.business_unit_id
     bu = bu_or_404(db, bu_id)
+    # Serialize concurrent closes for this BU: the already-closed pre-check
+    # below is a read, so without a lock two requests could both pass it
+    # and both post a closing journal. Locking the BU row (a no-op on
+    # SQLite, SELECT ... FOR UPDATE on Postgres) closes that window.
+    db.query(BusinessUnit).filter(BusinessUnit.id == bu_id).with_for_update().first()
     if db.query(JournalEntry).filter(JournalEntry.business_unit_id == bu_id,
                                      JournalEntry.source == "year_close",
                                      JournalEntry.source_id == payload.year).first():

@@ -12,6 +12,11 @@ Deployment note: run uvicorn with --no-proxy-headers. Its own proxy-header
 handling rewrites request.client from X-Forwarded-For (with
 --forwarded-allow-ips='*' it picks the LEFT-most, client-controlled entry),
 which would make the "peer" fallback below spoofable too.
+
+CLIENT_IP_HEADER must name a single-IP authoritative header
+(do-connecting-ip, cf-connecting-ip, or similar): a header carrying a
+comma-separated list is never trusted — _from_named_header rejects such
+values outright instead of taking the first (client-controlled) entry.
 """
 import ipaddress
 from typing import Optional
@@ -38,10 +43,18 @@ def _peer_ip(request: Request) -> Optional[str]:
 
 
 def _from_named_header(request: Request, header: str) -> Optional[str]:
+    """The single-IP authoritative header named by CLIENT_IP_HEADER
+    (e.g. do-connecting-ip, cf-connecting-ip). It must carry exactly one
+    IP: a comma-separated value is rejected outright (falling through to
+    the TCP peer address) because a list means the header is a forwarding
+    chain — e.g. someone pointed CLIENT_IP_HEADER at X-Forwarded-For, where
+    the left-most, client-controlled entry would otherwise be trusted."""
     raw = request.headers.get(header)
     if not raw:
         return None
-    return _valid_ip(raw.split(",")[0])
+    if "," in raw:
+        return None
+    return _valid_ip(raw)
 
 
 def _from_forwarded_for(request: Request, hops: int) -> Optional[str]:

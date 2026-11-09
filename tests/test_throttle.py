@@ -298,9 +298,17 @@ class ClientIpTests(unittest.TestCase):
         request = make_request(peer="192.0.2.1", headers={"X-Forwarded-For": "6.6.6.6, not-an-ip"})
         self.assertEqual(self.ip(request), "192.0.2.1")
 
-    def test_named_header_wins_and_takes_first_entry(self):
-        request = make_request(headers={"CF-Connecting-IP": "198.51.100.4, 1.1.1.1", "X-Forwarded-For": "6.6.6.6"})
+    def test_named_header_wins(self):
+        request = make_request(headers={"CF-Connecting-IP": "198.51.100.4", "X-Forwarded-For": "6.6.6.6"})
         self.assertEqual(self.ip(request, header="cf-connecting-ip"), "198.51.100.4")
+
+    def test_named_header_with_comma_list_falls_back_to_peer(self):
+        # CLIENT_IP_HEADER must name a single-IP authoritative header: a
+        # comma-separated value is a forwarding chain, not one client IP,
+        # so it is rejected outright instead of trusting the first
+        # (client-controlled) entry.
+        request = make_request(peer="192.0.2.1", headers={"CF-Connecting-IP": "198.51.100.4, 1.1.1.1", "X-Forwarded-For": "6.6.6.6"})
+        self.assertEqual(self.ip(request, header="cf-connecting-ip"), "192.0.2.1")
 
     def test_named_header_missing_falls_back_to_peer_not_forwarded_for(self):
         request = make_request(peer="192.0.2.1", headers={"X-Forwarded-For": "6.6.6.6"})

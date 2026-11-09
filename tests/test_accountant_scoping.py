@@ -27,7 +27,7 @@ from src.routers.accounting import (
     provision_bu, upsert_budget, upsert_posting_rule,
 )
 
-CHAIRMAN = SimpleNamespace(id=1, role="Chairman", business_unit_id=None)
+CHAIRMAN = SimpleNamespace(id=1, role="Chairman", business_unit_id=None, username="boss")
 SCOPED = SimpleNamespace(id=3, role="Accountant", business_unit_id=1)
 LEGACY = SimpleNamespace(id=4, role="Accountant", business_unit_id=None)
 
@@ -106,8 +106,12 @@ def test_scoped_accountant_coa_and_periods(db):
     assert_403(list_periods, business_unit_id=2, user=SCOPED, db=db)
     assert_403(close_period, PeriodAction(business_unit_id=2, period="2026-10"),
                user=SCOPED, db=db)
+    # Closing is Chairman/HO-only (M-A1): even their own BU's close is
+    # refused for a BU-assigned accountant.
+    assert_403(close_period, PeriodAction(business_unit_id=1, period="2026-10"),
+               user=SCOPED, db=db)
     out = close_period(PeriodAction(business_unit_id=1, period="2026-10"),
-                       user=SCOPED, db=db)
+                       user=CHAIRMAN, db=db)
     assert out["status"] == "closed"
 
 

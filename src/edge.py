@@ -406,9 +406,16 @@ class EdgeMiddleware:
         cutoff = now - self._export_window
         while hits and hits[0] <= cutoff:
             hits.popleft()
+        if not hits:
+            # Evict the empty bucket so the map cannot grow without bound:
+            # a caller whose window has fully expired leaves no entry
+            # behind. (The current hit is recorded on the deque below, so
+            # the key returns with exactly one entry.)
+            self._export_hits.pop(key, None)
         if len(hits) >= self._export_limit:
             return max(1, int(hits[0] + self._export_window - now) + 1)
         hits.append(now)
+        self._export_hits.setdefault(key, hits)
         return None
 
     # -------------------------------------------------------------- headers
