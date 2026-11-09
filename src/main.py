@@ -205,7 +205,14 @@ def seed_business_units(db) -> None:
         if code in existing_codes:
             continue
         db.add(BusinessUnit(code=code, name=BUSINESS_UNIT_NAMES.get(i, f"Business Unit {i}")))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # D-m3: same race as the chairman seed below — two instances in a
+        # rolling deploy can both pass the existence check above and race
+        # the unique `code` constraint. The loser rolls back and moves on
+        # instead of crashing startup; the winner already seeded the BU.
+        db.rollback()
 
 
 def _ensure_user(db, username, password, role, require_password_change, business_unit_id=None, full_name=None) -> None:
@@ -318,6 +325,14 @@ def seed_users(db) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # D-m2: log the effective client-IP source at startup so a misconfigured
+    # proxy (wrong header / hop count) is visible in the logs instead of
+    # silently mis-attributing every throttle bucket and audit IP.
+    logger.info(
+        "Client-IP source: CLIENT_IP_HEADER=%r TRUSTED_PROXY_HOPS=%s",
+        settings.CLIENT_IP_HEADER or "(X-Forwarded-For, right-counted)",
+        settings.TRUSTED_PROXY_HOPS,
+    )
     if settings.RUN_MIGRATIONS_ON_STARTUP:
         _run_startup_step("migrations", run_migrations)
     else:

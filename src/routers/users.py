@@ -22,7 +22,7 @@ from src.database import get_db
 from src.models import AuditLog, BusinessUnit, PasswordResetRequest, User
 from src.schemas import CreateUserRequest, SetUserActiveRequest, UpdateUserRequest
 from src.throttle import LOGIN_UNLOCK, login_lockout_remaining
-from src.utils import format_local_datetime, log_audit
+from src.utils import format_local_datetime, log_audit, utcnow
 
 # One router for /api/admin/users/* and /api/admin/password-resets/* — main.py
 # includes this object as-is, so both families of paths hang off /api/admin.
@@ -41,7 +41,7 @@ def _apply_temporary_password(target: User, ttl_hours: int) -> str:
     temporary_password = _new_temporary_password()
     target.hashed_password = hash_password(temporary_password)
     target.require_password_change = True
-    target.temp_password_expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)
+    target.temp_password_expires_at = utcnow() + timedelta(hours=ttl_hours)
     return temporary_password
 
 
@@ -53,14 +53,14 @@ def _resolve_pending_requests(db: Session, user_id: int, status: str, resolved_b
         db.query(PasswordResetRequest)
         .filter(PasswordResetRequest.user_id == user_id, PasswordResetRequest.status == "Pending")
         .update(
-            {"status": status, "resolved_at": datetime.utcnow(), "resolved_by": resolved_by},
+            {"status": status, "resolved_at": utcnow(), "resolved_by": resolved_by},
             synchronize_session=False,
         )
     )
 
 
 def _is_stale(reset_request: PasswordResetRequest) -> bool:
-    return datetime.utcnow() - reset_request.requested_at > timedelta(hours=RESET_REQUEST_TTL_HOURS)
+    return utcnow() - reset_request.requested_at > timedelta(hours=RESET_REQUEST_TTL_HOURS)
 
 
 def _no_store(response: Response) -> None:
@@ -206,7 +206,7 @@ def reset_user_password(
                 user_id=target.id,
                 username=target.username,
                 status="Approved",
-                resolved_at=datetime.utcnow(),
+                resolved_at=utcnow(),
                 resolved_by=user.id,
             )
         )
@@ -432,7 +432,7 @@ def list_password_resets(user: User = Depends(require_chairman), db: Session = D
             }
         )
 
-    fresh_since = datetime.utcnow() - timedelta(hours=RESET_REQUEST_TTL_HOURS)
+    fresh_since = utcnow() - timedelta(hours=RESET_REQUEST_TTL_HOURS)
     pending_count = (
         db.query(PasswordResetRequest)
         .filter(PasswordResetRequest.status == "Pending", PasswordResetRequest.requested_at >= fresh_since)
@@ -475,7 +475,7 @@ def approve_password_reset(
 
     temporary_password = _apply_temporary_password(target, settings.TEMP_PASSWORD_TTL_HOURS_RESET)
     reset_request.status = "Approved"
-    reset_request.resolved_at = datetime.utcnow()
+    reset_request.resolved_at = utcnow()
     reset_request.resolved_by = user.id
     # Commits the password, the request's new status and the version bump
     # together, so a crash can't leave a working temporary password behind a
@@ -502,7 +502,7 @@ def reject_password_reset(
 ):
     reset_request = _load_pending_request(db, request_id)
     reset_request.status = "Rejected"
-    reset_request.resolved_at = datetime.utcnow()
+    reset_request.resolved_at = utcnow()
     reset_request.resolved_by = user.id
     db.commit()
 

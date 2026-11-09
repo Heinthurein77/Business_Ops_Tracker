@@ -227,6 +227,16 @@ class EdgeMiddleware:
         self._write_429_hits: dict[str, deque] = {}
         self._write_429_warned_at: dict[str, float] = {}
 
+        # Daily upload budget state (D-m7, see _upload_budget_retry): same
+        # in-process sliding-window mechanism as the D-10 write budget,
+        # keyed by the same caller key, but over a 24 h window on upload
+        # paths only. Each entry is (monotonic timestamp, Content-Length
+        # bytes) so both a count and a total-size budget are enforced.
+        self._upload_count_limit = settings.EDGE_UPLOAD_DAILY_COUNT_LIMIT
+        self._upload_bytes_limit = settings.EDGE_UPLOAD_DAILY_BYTES_LIMIT
+        self._upload_window = 24 * 60 * 60
+        self._upload_hits: dict[str, deque] = {}
+
     # ------------------------------------------------------------------ ASGI
 
     async def __call__(self, scope, receive, send) -> None:
@@ -301,6 +311,23 @@ class EdgeMiddleware:
                     path,
                     429,
                     "Too many write requests — please slow down",
+                    unread,
+                    extra_headers=[(b"retry-after", str(retry).encode("ascii"))],
+                )
+                return
+
+        # 4c. Daily upload budget (D-m7) — upload paths only, per caller.
+        # Checked after the origin/body/write checks so rejected requests
+        # don't consume upload budget; a request that passes the checks
+        # consumes one count slot and its Content-Length in bytes.
+        if method in _UNSAFE_METHODS and is_upload_path(path):
+            retry = self._upload_budget_retry(scope, headers)
+            if retry is not None:
+                await self._reject(
+                    send,
+                    path,
+                    429,
+                    "Daily upload budget exceeded — please slow down",
                     unread,
                     extra_headers=[(b"retry-after", str(retry).encode("ascii"))],
                 )
@@ -387,6 +414,20 @@ class EdgeMiddleware:
         # compared; the browser's origin host[:port] must be ours.
         host_header = headers.get(b"host", b"").decode("latin-1").strip()
         if not host_header:
+            return False
+        # P3-8: when ALLOWED_HOSTS is configured, the same-origin fallback
+        # must never trust a Host outside that list — Host is
+        # client-controlled unless the reverse proxy overwrites it. The
+        # step-1 host check already rejects a bad Host on API paths; this
+        # is the defence-in-depth copy inside the CSRF decision itself, so
+        # the origin comparison below can never be satisfied by a Host the
+        # deployment does not answer to.
+        if self._enforce_hosts and not _host_allowed(
+            _request_host(host_header),
+            self._exact_hosts,
+            self._wildcard_suffixes,
+            self._allow_any_host,
+        ):
             return False
         scheme = origin.partition("://")[0]
         own = _origin_of(f"{scheme}://{host_header}")
@@ -478,6 +519,42 @@ class EdgeMiddleware:
             return max(1, int(hits[0] + self._write_window - now) + 1)
         hits.append(now)
         self._write_hits.setdefault(key, hits)
+        return None
+
+    def _upload_budget_retry(self, scope, headers: dict[bytes, bytes]) -> int | None:
+        """Records one upload against the caller's daily upload budget
+        (D-m7); returns Retry-After seconds when over budget, else None.
+
+        Same sliding-window mechanism as the D-10 write budget
+        (_write_budget_retry), keyed by the same caller key, but over a
+        24 h window and enforcing both a count limit and a total-bytes
+        limit. Size is the request's Content-Length, which the body-cap
+        step already validated (absent/invalid counts as 0 — the cap step
+        rejects a non-numeric Content-Length before this runs). Empty
+        buckets are evicted so the map cannot grow without bound.
+        """
+        key = self._caller_key(scope, headers)
+
+        now = time.monotonic()
+        try:
+            size = int((headers.get(b"content-length") or b"0").decode("latin-1").strip())
+        except ValueError:
+            size = 0
+        if size < 0:
+            size = 0
+        hits = self._upload_hits.setdefault(key, deque())
+        cutoff = now - self._upload_window
+        while hits and hits[0][0] <= cutoff:
+            hits.popleft()
+        if not hits:
+            self._upload_hits.pop(key, None)
+        total_bytes = sum(entry[1] for entry in hits)
+        if len(hits) >= self._upload_count_limit or total_bytes + size > self._upload_bytes_limit:
+            if hits:
+                return max(1, int(hits[0][0] + self._upload_window - now) + 1)
+            return self._upload_window
+        hits.append((now, size))
+        self._upload_hits.setdefault(key, hits)
         return None
 
     # -------------------------------------------------------------- headers

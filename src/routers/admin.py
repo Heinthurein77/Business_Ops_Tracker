@@ -56,6 +56,7 @@ from src.utils import (
     format_local_time,
     health_risk_notes,
     log_audit,
+    utcnow,
     parse_monthly_target_amounts,
     parse_resubmit_changes,
     serialize_ceo_profile,
@@ -576,7 +577,7 @@ def admin_overview(user: User = Depends(require_admin), db: Session = Depends(ge
     else:
         greeting = "Good evening"
     ov["greeting"] = greeting
-    ov["generated_at"] = format_local_datetime(datetime.utcnow(), "%I:%M %p")
+    ov["generated_at"] = format_local_datetime(utcnow(), "%I:%M %p")
     return ov
 
 
@@ -1409,7 +1410,7 @@ def resolve_help_request(
         raise HTTPException(status_code=400, detail="This help request has already been resolved")
 
     business_unit = db.query(BusinessUnit).filter(BusinessUnit.id == log.business_unit_id).first()
-    log.help_resolved_at = datetime.utcnow()
+    log.help_resolved_at = utcnow()
     log.help_resolved_by = user.id
     log.help_response = response_text
 

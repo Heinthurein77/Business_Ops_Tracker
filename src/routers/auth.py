@@ -32,7 +32,7 @@ from src.throttle import (
     check_password_change_throttle,
     normalize_username,
 )
-from src.utils import log_audit
+from src.utils import log_audit, utcnow
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -114,7 +114,7 @@ def login(payload: LoginRequest, request: Request, response: Response, db: Sessi
         log_audit(db, user, "LOGIN_FAILED", f"username={username}", request, username=username)
         raise HTTPException(status_code=401, detail=_LOGIN_FAILED_DETAIL)
 
-    user.last_login_at = datetime.utcnow()
+    user.last_login_at = utcnow()
     db.commit()
     log_audit(db, user, "LOGIN_SUCCESS", "", request)
 
@@ -174,10 +174,10 @@ def _open_reset_request(db: Session, user: User, pending) -> bool:
     A Pending request older than the approval window is closed first, otherwise
     it would sit in the way of the one-Pending-per-user index forever."""
     if pending is not None:
-        if datetime.utcnow() - pending.requested_at <= timedelta(hours=RESET_REQUEST_TTL_HOURS):
+        if utcnow() - pending.requested_at <= timedelta(hours=RESET_REQUEST_TTL_HOURS):
             return False
         pending.status = "Rejected"
-        pending.resolved_at = datetime.utcnow()
+        pending.resolved_at = utcnow()
         db.flush()
     db.add(PasswordResetRequest(user_id=user.id, username=user.username, status="Pending"))
     return True

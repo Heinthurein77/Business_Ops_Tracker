@@ -30,7 +30,7 @@ from src.models import (
     Account, BusinessUnit, FiscalPeriod, JournalEntry, JournalLine,
     PostingRule, User,
 )
-from src.utils import log_audit, today_local, validate_period
+from src.utils import _sanitize_excel_cell, log_audit, today_local, utcnow, validate_period
 
 router = APIRouter(prefix="/api/accounting", tags=["accounting"])
 require_accounting = require_roles("Chairman", "HO", "Accountant")
@@ -225,7 +225,7 @@ def create_entry(db: Session, bu_id: int, entry_date: date, description: str,
         status="posted" if post else "draft",
         reversal_of_id=reversal_of_id, created_by_id=user_id,
         posted_by_id=user_id if post else None,
-        posted_at=datetime.utcnow() if post else None,
+        posted_at=utcnow() if post else None,
     )
     db.add(e)
     try:
@@ -621,7 +621,7 @@ def post_journal(entry_id: int, user: User = Depends(require_accounting),
     validate_lines(db, e.business_unit_id, lines)
     e.status = "posted"
     e.posted_by_id = user.id
-    e.posted_at = datetime.utcnow()
+    e.posted_at = utcnow()
     db.commit()
     db.refresh(e)
     _log_audit(db, user, "POST_JOURNAL", f"entry_id={entry_id}")
@@ -691,6 +691,19 @@ def delete_journal(entry_id: int, user: User = Depends(require_accounting),
     check_bu_access(user, e.business_unit_id)
     if e.status == "posted":
         raise HTTPException(400, "Posted entries cannot be deleted — reverse instead")
+    # D-m4: no ON DELETE policy exists in the models, so a referenced row
+    # would fail at the DB with IntegrityError → 500. Pre-check the rows
+    # that can reference a journal entry and return a clean 400 ("in use")
+    # instead. Lines are covered by the ORM cascade="all, delete-orphan"
+    # on JournalEntry.lines, so they delete with the entry; reversals and
+    # staff advances point at entries from other rows and have no cascade.
+    from src.models import StaffAdvance
+    if db.query(JournalEntry).filter(
+            (JournalEntry.reversal_of_id == entry_id)
+            | (JournalEntry.reversed_by_id == entry_id)).first():
+        raise HTTPException(400, "Journal entry is in use (referenced by a reversal entry) and cannot be deleted")
+    if db.query(StaffAdvance).filter(StaffAdvance.journal_entry_id == entry_id).first():
+        raise HTTPException(400, "Journal entry is in use (referenced by a staff advance) and cannot be deleted")
     db.delete(e)
     db.commit()
     _log_audit(db, user, "DELETE_JOURNAL", f"entry_id={entry_id}")
@@ -1038,7 +1051,7 @@ def close_period(payload: PeriodAction, user: User = Depends(require_admin),
         db.add(row)
     row.status = "closed"
     row.closed_by_id = user.id
-    row.closed_at = datetime.utcnow()
+    row.closed_at = utcnow()
     db.commit()
     log_audit(db, user, "FISCAL_PERIOD_CLOSED",
               f"business_unit_id={payload.business_unit_id} period={payload.period}", request=None)
@@ -1495,7 +1508,10 @@ def opening_balance_template(business_unit_id: int, user: User = Depends(require
         Account.business_unit_id == business_unit_id,
         Account.is_active == True, Account.is_header == False).order_by(Account.code).all()  # noqa: E712
     for a in accounts:
-        ws.append([a.code, a.name, None, None])
+        # P3-1: account names are free text — neutralise formula injection
+        # (CWE-1236) exactly as the ops exports do, before openpyxl writes
+        # the cell (a leading "=" would otherwise become a live formula).
+        ws.append([a.code, _sanitize_excel_cell(a.name), None, None])
     ws.column_dimensions["A"].width = 14
     ws.column_dimensions["B"].width = 40
     ws.column_dimensions["C"].width = 18
@@ -1599,15 +1615,19 @@ def export_report(report: str, format: str = "xlsx", business_unit_id: Optional[
         wb = Workbook()
         ws = wb.active
         ws.title = title[:31]
-        ws.append([title])
-        ws.append([subtitle])
+        # P3-1: every string cell goes through _sanitize_excel_cell so a
+        # journal description / account name starting with "=", "+", "-"
+        # or "@" is written as literal text, never a live formula
+        # (CWE-1236). The subtitle carries the BU name (free text) too.
+        ws.append([_sanitize_excel_cell(title)])
+        ws.append([_sanitize_excel_cell(subtitle)])
         ws.append([])
-        ws.append(header)
+        ws.append([_sanitize_excel_cell(h) if isinstance(h, str) else h for h in header])
         for cell in ws[4]:
             cell.font = Font(bold=True, color="FFFFFF")
             cell.fill = PatternFill("solid", fgColor="1F3864")
         for r in rows:
-            ws.append(r)
+            ws.append([_sanitize_excel_cell(v) if isinstance(v, str) else v for v in r])
         for col in ws.columns:
             letter = col[0].column_letter
             ws.column_dimensions[letter].width = max(14, min(46, max((len(str(c.value or "")) for c in col), default=14) + 2))
@@ -2016,7 +2036,7 @@ def settle_intercompany(txn_id: int, user: User = Depends(require_accounting),
                   {"account_id": seller_recv.id, "debit": 0, "credit": amt}],
                  source_id=t.id, post=True)
     t.status = "settled"
-    t.settled_at = datetime.utcnow()
+    t.settled_at = utcnow()
     db.commit()
     _log_audit(db, user, "SETTLE_INTERCOMPANY", f"txn_id={txn_id}")
     return serialize_intercompany(t)
@@ -2182,7 +2202,7 @@ def year_close(payload: YearCloseIn, user: User = Depends(require_roles("Chairma
             db.add(prow)
         prow.status = "closed"
         prow.closed_by_id = user.id
-        prow.closed_at = datetime.utcnow()
+        prow.closed_at = utcnow()
     db.commit()
     _log_audit(db, user, "YEAR_CLOSE", f"business_unit_id={payload.business_unit_id} year={payload.year}")
     return {"year": payload.year, "entry_no": entry.entry_no,

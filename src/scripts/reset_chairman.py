@@ -24,7 +24,7 @@ from src.auth import bump_token_version, hash_password
 from src.config import settings
 from src.database import SessionLocal
 from src.models import User
-from src.utils import log_audit
+from src.utils import log_audit, utcnow
 
 
 def reset_chairman_password(db) -> tuple[str, str]:
@@ -41,7 +41,7 @@ def reset_chairman_password(db) -> tuple[str, str]:
     temporary_password = secrets.token_urlsafe(12)
     chairman.hashed_password = hash_password(temporary_password)
     chairman.require_password_change = True
-    chairman.temp_password_expires_at = datetime.utcnow() + timedelta(hours=settings.TEMP_PASSWORD_TTL_HOURS_RESET)
+    chairman.temp_password_expires_at = utcnow() + timedelta(hours=settings.TEMP_PASSWORD_TTL_HOURS_RESET)
     # A locked-out owner can't fix a deactivated account from the app either.
     chairman.is_active = True
     # Attributes are set first, then the atomic UPDATE token_version + 1 and the

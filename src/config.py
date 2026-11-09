@@ -221,6 +221,19 @@ class Settings:
         # stops scripted abuse, never a human clicking through the app.
         self.EDGE_WRITE_RATE_LIMIT: int = int(os.getenv("EDGE_WRITE_RATE_LIMIT", "120"))
         self.EDGE_WRITE_RATE_WINDOW: int = int(os.getenv("EDGE_WRITE_RATE_WINDOW", "60"))
+        # Per-user/per-day upload budget, enforced by the edge middleware
+        # (D-m7). Same in-process sliding-window mechanism as the D-10
+        # write budget, but counted per calendar-day window on upload
+        # paths only (is_upload_path in src/edge.py): the 12 MB edge cap
+        # is per-request, so without this a compromised account could fill
+        # the R2 bucket (and the bill) with 10 MB files in a loop. 50
+        # uploads / 200 MB per caller per day is far above normal use
+        # (receipts, report attachments, profile photos) and only stops
+        # scripted abuse. Size is measured from Content-Length, which the
+        # edge already validates against the per-request cap.
+        self.EDGE_UPLOAD_DAILY_COUNT_LIMIT: int = int(os.getenv("EDGE_UPLOAD_DAILY_COUNT_LIMIT", "50"))
+        self.EDGE_UPLOAD_DAILY_BYTES_LIMIT: int = int(os.getenv(
+            "EDGE_UPLOAD_DAILY_BYTES_LIMIT", str(200 * 1024 * 1024)))
 
         # --- Cloudflare R2 ---
         self.R2_ACCOUNT_ID: str = os.getenv("R2_ACCOUNT_ID", "")

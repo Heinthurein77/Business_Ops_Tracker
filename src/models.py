@@ -1,4 +1,4 @@
-from datetime import datetime, date
+from datetime import date, datetime, timezone
 
 from sqlalchemy import (
     Boolean,
@@ -20,6 +20,14 @@ from sqlalchemy.orm import relationship
 
 from src.crypto import EncryptedDate, EncryptedText
 from src.database import Base
+
+def _utcnow() -> datetime:
+    """Naive UTC now — identical to src.utils.utcnow(), defined here
+    because models.py cannot import src.utils (utils imports models).
+    Replaces the deprecated _utcnow() as a column default /
+    onupdate callable; storage semantics are unchanged."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 
 # Database-level integrity rules. The API validates all of this too
 # (schemas.py and the submit-report routes); these are the last line of
@@ -61,7 +69,7 @@ class BusinessUnit(Base):
     code = Column(String(20), unique=True, nullable=False, index=True)
     name = Column(String(120), nullable=False)
     nature = Column(String(30), nullable=True, index=True)  # CoA template key, e.g. retail/production/real_estate
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     users = relationship("User", back_populates="business_unit")
     financials = relationship("DailyFinancial", back_populates="business_unit")
@@ -123,7 +131,7 @@ class User(Base):
     # unclaimed credential can't stay live indefinitely. Cleared as soon as
     # the owner sets their own password.
     temp_password_expires_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
     last_login_at = Column(DateTime, nullable=True)
 
     business_unit = relationship("BusinessUnit", back_populates="users")
@@ -163,8 +171,8 @@ class DailyFinancial(Base):
     revenue_anomaly = Column(Boolean, default=False, nullable=False)
     other_notes = Column(Text, nullable=True)
     submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit", back_populates="financials")
 
@@ -207,8 +215,8 @@ class ActivityLog(Base):
     # Free-text catch-all for anything not covered by the fields above.
     other_notes = Column(Text, nullable=True)
     submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit", back_populates="activity_logs")
 
@@ -244,8 +252,8 @@ class HealthStatus(Base):
     # Free-text catch-all for anything not covered by the fields above.
     other_notes = Column(EncryptedText, nullable=True)  # health free text — encrypted at rest
     submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit", back_populates="health_statuses")
 
@@ -265,8 +273,8 @@ class SocialLog(Base):
     # Free-text catch-all for anything not covered by the fields above.
     other_notes = Column(Text, nullable=True)
     submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit", back_populates="social_logs")
 
@@ -294,8 +302,8 @@ class HeadOfficeActivityLog(Base):
     cycle_percent = Column(Integer, nullable=True)  # 0-100
     other_notes = Column(Text, nullable=True)
     submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
 
 class HeadOfficeDailyFinancial(Base):
@@ -330,8 +338,8 @@ class HeadOfficeDailyFinancial(Base):
     other_amount = Column(Numeric(16, 2), nullable=True)
     other_notes = Column(Text, nullable=True)
     submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
 
 class HeadOfficeHealthStatus(Base):
@@ -354,8 +362,8 @@ class HeadOfficeHealthStatus(Base):
     bp_diastolic = Column(Integer, nullable=True)
     other_notes = Column(EncryptedText, nullable=True)  # health free text — encrypted at rest
     submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
 
 class HeadOfficeSocialLog(Base):
@@ -371,8 +379,8 @@ class HeadOfficeSocialLog(Base):
     golf_flag = Column(Boolean, default=False, nullable=False)
     other_notes = Column(Text, nullable=True)
     submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
 
 class HeadOfficeMonthlyTarget(Base):
@@ -394,8 +402,8 @@ class HeadOfficeMonthlyTarget(Base):
     monthly_max_receivable = Column(Numeric(16, 2), nullable=False)
     monthly_max_payable = Column(Numeric(16, 2), nullable=False)
     set_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
 
 class MonthlyTarget(Base):
@@ -414,8 +422,8 @@ class MonthlyTarget(Base):
     monthly_max_receivable = Column(Numeric(16, 2), nullable=False)
     monthly_max_payable = Column(Numeric(16, 2), nullable=False)
     set_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
 
@@ -440,7 +448,7 @@ class FinancialNote(Base):
     note_date = Column(Date, nullable=False, default=date.today, index=True)
     note_text = Column(Text, nullable=False)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
 
@@ -465,8 +473,8 @@ class CeoProfile(Base):
     # mandatory fields, so it doesn't block profile completion for CEOs who
     # already finished setup before this existed.
     business_details = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
     user = relationship("User")
 
@@ -490,7 +498,7 @@ class PasswordResetRequest(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     username = Column(String(80), nullable=False)
     status = Column(String(20), default="Pending", nullable=False)  # Pending | Approved | Rejected
-    requested_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    requested_at = Column(DateTime, default=_utcnow, nullable=False)
     resolved_at = Column(DateTime, nullable=True)
     resolved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
 
@@ -512,7 +520,7 @@ class AuditLog(Base):
     action = Column(String(120), nullable=False)
     details = Column(Text, nullable=True)
     ip_address = Column(String(64), nullable=True)
-    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    timestamp = Column(DateTime, default=_utcnow, nullable=False, index=True)
 
 
 class ActionItem(Base):
@@ -528,7 +536,7 @@ class ActionItem(Base):
     status = Column(String(20), default="pending", nullable=False, index=True)  # pending/in_progress/done
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     completed_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
 
@@ -544,7 +552,7 @@ class Notification(Base):
     message = Column(Text, nullable=True)
     link = Column(String(300), nullable=True)
     is_read = Column(Boolean, default=False, nullable=False, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    created_at = Column(DateTime, default=_utcnow, nullable=False, index=True)
 
 
 class InventoryItem(Base):
@@ -571,8 +579,8 @@ class InventoryItem(Base):
     requires_expiry = Column(Boolean, default=False, nullable=False)  # cosmetics/food/telecom
     is_active = Column(Boolean, default=True, nullable=False)
     low_notified_at = Column(DateTime, nullable=True)  # last low-stock alert sent
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
     movements = relationship("StockMovement", back_populates="item", cascade="all, delete-orphan")
@@ -588,7 +596,7 @@ class StockMovement(Base):
     quantity = Column(Numeric(14, 2), nullable=False)
     reason = Column(String(200), nullable=True)
     recorded_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    created_at = Column(DateTime, default=_utcnow, nullable=False, index=True)
 
     item = relationship("InventoryItem", back_populates="movements")
 
@@ -613,7 +621,7 @@ class ExpenseRequest(Base):
     reviewed_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     review_notes = Column(Text, nullable=True)
     reviewed_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    created_at = Column(DateTime, default=_utcnow, nullable=False, index=True)
 
     business_unit = relationship("BusinessUnit")
 
@@ -635,7 +643,7 @@ class StaffRecord(Base):
     resignations = Column(Integer, default=0, nullable=False)
     notes = Column(Text, nullable=True)
     submitted_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
 
@@ -656,7 +664,7 @@ class CustomerMetric(Base):
     satisfaction_score = Column(Numeric(3, 1), nullable=True)  # 1.0 - 5.0
     notes = Column(Text, nullable=True)
     submitted_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
 
@@ -674,7 +682,7 @@ class LicenseDocument(Base):
     notes = Column(Text, nullable=True)
     expiry_notified_at = Column(DateTime, nullable=True)  # last expiry alert sent
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
 
@@ -706,7 +714,7 @@ class Account(Base):
     is_header = Column(Boolean, default=False, nullable=False)
     is_system = Column(Boolean, default=False, nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
     parent = relationship("Account", remote_side=[id])
@@ -744,7 +752,7 @@ class JournalEntry(Base):
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     posted_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     posted_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
     lines = relationship("JournalLine", back_populates="entry", cascade="all, delete-orphan")
@@ -833,7 +841,7 @@ class Supplier(Base):
     address = Column(String(300), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
 
@@ -867,7 +875,7 @@ class PurchaseOrder(Base):
     received_at = Column(DateTime, nullable=True)
     paid_at = Column(DateTime, nullable=True)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
     supplier = relationship("Supplier")
@@ -903,7 +911,7 @@ class Customer(Base):
     credit_limit = Column(Numeric(16, 2), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
 
@@ -934,7 +942,7 @@ class SalesInvoice(Base):
     notes = Column(String(500), nullable=True)
     sent_at = Column(DateTime, nullable=True)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
     customer = relationship("Customer")
@@ -973,7 +981,7 @@ class InvoicePayment(Base):
     currency = Column(String(3), default="MMK", nullable=False)
     notes = Column(String(255), nullable=True)
     received_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     invoice = relationship("SalesInvoice", back_populates="payments")
 
@@ -993,7 +1001,7 @@ class Employee(Base):
     joined_date = Column(Date, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
 
@@ -1011,7 +1019,7 @@ class LeaveRequest(Base):
     status = Column(String(20), default="pending", nullable=False, index=True)
     reviewed_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     reviewed_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
     employee = relationship("Employee")
@@ -1035,7 +1043,7 @@ class PayrollRun(Base):
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     approved_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     paid_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
     lines = relationship("PayrollLine", back_populates="run", cascade="all, delete-orphan")
@@ -1079,7 +1087,7 @@ class FixedAsset(Base):
     last_depreciated_period = Column(String(7), nullable=True)  # YYYY-MM
     status = Column(String(20), default="active", nullable=False)  # active/disposed
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
 
@@ -1096,7 +1104,7 @@ class BankAccount(Base):
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
     account = relationship("Account")
@@ -1115,7 +1123,7 @@ class BankTransaction(Base):
     withdrawal = Column(Numeric(16, 2), default=0, nullable=False)
     is_reconciled = Column(Boolean, default=False, nullable=False)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     bank_account = relationship("BankAccount", back_populates="transactions")
 
@@ -1135,7 +1143,7 @@ class Budget(Base):
     account_code = Column(String(20), nullable=False)
     amount = Column(Numeric(16, 2), default=0, nullable=False)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
 
@@ -1149,7 +1157,7 @@ class ExchangeRate(Base):
     rate_date = Column(Date, nullable=False, index=True)
     rate = Column(Numeric(14, 4), nullable=False)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
 
 class IntercompanyTransaction(Base):
@@ -1172,7 +1180,7 @@ class IntercompanyTransaction(Base):
     status = Column(String(20), default="open", nullable=False, index=True)  # open/settled
     settled_at = Column(DateTime, nullable=True)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     from_business_unit = relationship("BusinessUnit", foreign_keys=[from_business_unit_id])
     to_business_unit = relationship("BusinessUnit", foreign_keys=[to_business_unit_id])
@@ -1196,7 +1204,7 @@ class StockBatch(Base):
     quantity = Column(Numeric(14, 2), default=0, nullable=False)  # remaining
     unit_cost = Column(Numeric(14, 2), nullable=True)
     expiry_notified_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     item = relationship("InventoryItem")
 
@@ -1217,7 +1225,7 @@ class Project(Base):
     end_date = Column(Date, nullable=True)
     notes = Column(Text, nullable=True)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
     customer = relationship("Customer")
@@ -1245,7 +1253,7 @@ class Shipment(Base):
     other_costs = Column(Numeric(16, 2), default=0, nullable=False)
     invoice_id = Column(Integer, ForeignKey("sales_invoices.id"), nullable=True)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
     customer = relationship("Customer")
@@ -1260,7 +1268,7 @@ class ManufacturingBom(Base):
     finished_item_id = Column(Integer, ForeignKey("inventory_items.id"), nullable=False, index=True)
     name = Column(String(200), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     finished_item = relationship("InventoryItem", foreign_keys=[finished_item_id])
     components = relationship("BomComponent", back_populates="bom", cascade="all, delete-orphan")
@@ -1295,7 +1303,7 @@ class ProductionOrder(Base):
     status = Column(String(20), default="planned", nullable=False, index=True)  # planned/completed/cancelled
     production_date = Column(Date, nullable=True)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     bom = relationship("ManufacturingBom")
 
@@ -1314,7 +1322,7 @@ class PropertyUnit(Base):
     status = Column(String(20), default="available", nullable=False, index=True)  # available/reserved/sold/rented
     sale_invoice_id = Column(Integer, ForeignKey("sales_invoices.id"), nullable=True)
     notes = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
 
@@ -1349,7 +1357,7 @@ class LeaseContract(Base):
     status = Column(String(20), default="active", nullable=False, index=True)  # active/ended
     last_billed_period = Column(String(7), nullable=True)  # YYYY-MM
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     unit = relationship("PropertyUnit")
     tenant = relationship("Customer")
@@ -1376,7 +1384,7 @@ class PosSale(Base):
     sale_date = Column(Date, nullable=False, default=date.today, index=True)
     sold_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     voided_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
     customer = relationship("Customer")
@@ -1425,7 +1433,7 @@ class Quotation(Base):
     notes = Column(String(500), nullable=True)
     converted_invoice_id = Column(Integer, ForeignKey("sales_invoices.id"), nullable=True)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
     customer = relationship("Customer")
@@ -1466,7 +1474,7 @@ class SalesReturn(Base):
     return_date = Column(Date, nullable=False, default=date.today)
     reason = Column(String(300), nullable=True)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
     invoice = relationship("SalesInvoice")
@@ -1505,7 +1513,7 @@ class PurchaseReturn(Base):
     return_date = Column(Date, nullable=False, default=date.today)
     reason = Column(String(300), nullable=True)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
     po = relationship("PurchaseOrder")
@@ -1547,7 +1555,7 @@ class ItemSerial(Base):
     pos_sale_id = Column(Integer, ForeignKey("pos_sales.id"), nullable=True)
     warranty_until = Column(Date, nullable=True)
     sold_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     inventory_item = relationship("InventoryItem")
     business_unit = relationship("BusinessUnit")
@@ -1575,7 +1583,7 @@ class StaffAdvance(Base):
     requested_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     approved_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     approved_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     employee = relationship("Employee")
     business_unit = relationship("BusinessUnit")
@@ -1603,7 +1611,7 @@ class StockTransfer(Base):
     sent_at = Column(DateTime, nullable=True)
     received_at = Column(DateTime, nullable=True)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     from_business_unit = relationship("BusinessUnit", foreign_keys=[from_business_unit_id])
     to_business_unit = relationship("BusinessUnit", foreign_keys=[to_business_unit_id])
@@ -1639,7 +1647,7 @@ class AttendanceRecord(Base):
     status = Column(String(20), nullable=False)  # present/absent/late/leave/half_day
     note = Column(String(300), nullable=True)
     recorded_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     employee = relationship("Employee")
     business_unit = relationship("BusinessUnit")

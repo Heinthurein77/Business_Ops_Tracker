@@ -33,6 +33,7 @@ from typing import Iterable
 
 from src.database import SessionLocal
 from src.models import JobHeartbeat, Notification, User
+from src.utils import utcnow
 
 # A job whose heartbeat is older than this is presumed dead.
 STALE_AFTER_HOURS = 36
@@ -103,7 +104,7 @@ def stale_jobs(heartbeats, now=None, max_age_hours: int = STALE_AFTER_HOURS) -> 
     ran is stale: a dead-man check that only watches rows that exist
     cannot see a cron that was never installed.
     """
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     seen = {}
     for job_name, last_run_at in heartbeats:
         seen[job_name] = last_run_at
@@ -126,7 +127,7 @@ def check_heartbeats(db, now=None) -> list[str]:
 def _record_heartbeat(db, job_name: str, status: str) -> None:
     """Best effort: a heartbeat write must not fail the scan itself."""
     try:
-        db.merge(JobHeartbeat(job_name=job_name, last_run_at=datetime.utcnow(), last_status=status))
+        db.merge(JobHeartbeat(job_name=job_name, last_run_at=utcnow(), last_status=status))
         db.commit()
     except Exception as exc:  # noqa: BLE001 - heartbeat must not fail the job
         db.rollback()
@@ -170,7 +171,7 @@ def main(argv=None) -> int:
         print(f"log_scan: cannot read log file {log_file!r}: {exc}", file=sys.stderr)
         return 1
 
-    since = datetime.utcnow() - timedelta(hours=args.hours)
+    since = utcnow() - timedelta(hours=args.hours)
     counts = count_signals(lines_in_window(raw_lines, since))
 
     # Dead-man check + own heartbeat. A DB failure here must not kill the

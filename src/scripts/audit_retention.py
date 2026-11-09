@@ -23,13 +23,14 @@ from datetime import datetime, timedelta
 import sqlalchemy as sa
 
 from src.config import settings
+from src.utils import utcnow
 
 SHORT_LIVED_ACTIONS = ("LOGIN_SUCCESS", "LOGIN_FAILED", "LOGOUT")
 
 
 def run(login_days: int, ip_days: int, dry_run: bool) -> tuple[int, int]:
     """Returns (rows deleted, IP addresses cleared)."""
-    now = datetime.utcnow()
+    now = utcnow()
     login_cutoff = now - timedelta(days=login_days)
     ip_cutoff = now - timedelta(days=ip_days)
     engine = sa.create_engine(settings.MIGRATION_DATABASE_URL, hide_parameters=True)

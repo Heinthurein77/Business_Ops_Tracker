@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from src.config import settings
 from src.database import get_db
 from src.models import User
+from src.utils import utcnow
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -128,7 +129,7 @@ def is_temp_password_expired(user: User, now: Optional[datetime] = None) -> bool
     whose lifetime has run out. Timestamps are naive UTC (see models.py)."""
     if user.temp_password_expires_at is None:
         return False
-    return user.temp_password_expires_at < (now or datetime.utcnow())
+    return user.temp_password_expires_at < (now or utcnow())
 
 
 def create_access_token(subject: str, token_version: int = 0, expires_minutes: Optional[int] = None) -> str:

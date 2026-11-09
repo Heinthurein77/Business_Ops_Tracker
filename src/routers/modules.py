@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from src.auth import get_current_user
 from src.database import get_db
-from src.utils import log_audit, today_local, validate_period
+from src.utils import log_audit, server_error, today_local, utcnow, validate_period
 from src.models import (
     BomComponent, BusinessUnit, Customer, ExpenseRequest, Installment,
     InventoryItem, LeaseContract, ManufacturingBom, ProductionOrder,
@@ -114,7 +114,7 @@ def receive_batch(item_id: int, payload: BatchIn, user: User = Depends(get_curre
     new_qty = old_qty + qty
     item.unit_cost = ((old_qty * old_cost) + (qty * cost)) / new_qty if new_qty else cost
     item.current_stock = new_qty
-    item.updated_at = datetime.utcnow()
+    item.updated_at = utcnow()
     b = StockBatch(item_id=item.id, batch_no=payload.batch_no.strip(),
                    expiry_date=payload.expiry_date, quantity=qty, unit_cost=cost)
     db.add(b)
@@ -527,7 +527,7 @@ def complete_production(order_id: int, user: User = Depends(get_current_user),
         needs.append((item, need))
     for item, need in needs:
         item.current_stock = Decimal(str(item.current_stock)) - need
-        item.updated_at = datetime.utcnow()
+        item.updated_at = utcnow()
         consume_batches_fefo(db, item, need)
         db.add(StockMovement(item_id=item.id, movement_type="out", quantity=need,
                              reason=f"Production order #{o.id}", recorded_by_id=user.id))
@@ -539,7 +539,7 @@ def complete_production(order_id: int, user: User = Depends(get_current_user),
     new_qty = old_qty + qty
     fin.unit_cost = ((old_qty * old_cost) + total_cost) / new_qty if new_qty else unit_cost
     fin.current_stock = new_qty
-    fin.updated_at = datetime.utcnow()
+    fin.updated_at = utcnow()
     db.add(StockMovement(item_id=fin.id, movement_type="in", quantity=qty,
                          reason=f"Production order #{o.id} completed", recorded_by_id=user.id))
     o.materials_cost = materials
@@ -566,8 +566,8 @@ def complete_production(order_id: int, user: User = Depends(get_current_user),
             raise
         except Exception as exc:
             db.rollback()
-            logger.warning("Production journal failed for order %s: %s", o.id, exc)
-            raise HTTPException(500, f"Production journal could not be posted; completion rolled back: {exc}")
+            raise server_error("Production journal could not be posted; completion rolled back",
+                               exc, logger, context=f"order {o.id}")
     db.commit()
     db.refresh(o)
     out = serialize_production(o)
@@ -871,7 +871,7 @@ def run_check_batch_expiry(db: Session, days: int = 30) -> dict:
                                           StockBatch.expiry_date <= cutoff).all()
     notified = 0
     for b in batches:
-        if b.expiry_notified_at and (datetime.utcnow() - b.expiry_notified_at).days < 7:
+        if b.expiry_notified_at and (utcnow() - b.expiry_notified_at).days < 7:
             continue
         item = b.item
         if not item:
@@ -889,7 +889,7 @@ def run_check_batch_expiry(db: Session, days: int = 30) -> dict:
                         f"({days_left} days), {float(b.quantity)} left",
                 link="/admin/operations-center"))
             notified += 1
-        b.expiry_notified_at = datetime.utcnow()
+        b.expiry_notified_at = utcnow()
     db.commit()
     return {"checked": len(batches), "notified": notified}
 
@@ -1043,7 +1043,7 @@ def send_stock_transfer(transfer_id: int, user: User = Depends(get_current_user)
         ln.unit_cost = cost
         total_cost += qty * cost
         item.current_stock = Decimal(str(item.current_stock or 0)) - qty
-        item.updated_at = datetime.utcnow()
+        item.updated_at = utcnow()
         db.add(SM(item_id=item.id, movement_type="out", quantity=qty,
                   reason=f"Stock transfer {t.transfer_no} to BU {t.to_business_unit_id}",
                   recorded_by_id=user.id))
@@ -1051,7 +1051,7 @@ def send_stock_transfer(transfer_id: int, user: User = Depends(get_current_user)
         item = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
         consume_batches_fefo(db, item, qty)
     t.status = "in_transit"
-    t.sent_at = datetime.utcnow()
+    t.sent_at = utcnow()
     db.commit()
     journal_posted = None
     if total_cost > 0:
@@ -1118,13 +1118,13 @@ def receive_stock_transfer(transfer_id: int, user: User = Depends(get_current_us
         new_qty = old_qty + qty
         dst.unit_cost = ((old_qty * old_avg + qty * cost) / new_qty) if new_qty > 0 else cost
         dst.current_stock = new_qty
-        dst.updated_at = datetime.utcnow()
+        dst.updated_at = utcnow()
         ln.dest_inventory_item_id = dst.id
         db.add(SM(item_id=dst.id, movement_type="in", quantity=qty,
                   reason=f"Stock transfer {t.transfer_no} from BU {t.from_business_unit_id}",
                   recorded_by_id=user.id))
     t.status = "received"
-    t.received_at = datetime.utcnow()
+    t.received_at = utcnow()
     db.commit()
     journal_posted = None
     if total_cost > 0:
@@ -1178,7 +1178,7 @@ def cancel_stock_transfer(transfer_id: int, user: User = Depends(get_current_use
         item = ln.inventory_item
         qty = Decimal(str(ln.quantity))
         item.current_stock = Decimal(str(item.current_stock or 0)) + qty
-        item.updated_at = datetime.utcnow()
+        item.updated_at = utcnow()
         db.add(SM(item_id=item.id, movement_type="in", quantity=qty,
                   reason=f"Stock transfer {t.transfer_no} cancelled",
                   recorded_by_id=user.id))

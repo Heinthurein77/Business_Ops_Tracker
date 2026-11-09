@@ -9,7 +9,8 @@ import calendar as calendar_module
 import json
 import logging
 import re
-from datetime import date, datetime
+import secrets
+from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -31,6 +32,34 @@ ENERGY_MOOD_OPTIONS = ["Energetic", "Normal", "Drained"]
 SLEEP_QUALITY_OPTIONS = ["Good", "Average", "Poor"]
 
 _RISK_RANK = {"green": 0, "yellow": 1, "red": 2}
+
+
+def utcnow() -> datetime:
+    """Naive UTC now — the replacement for the deprecated datetime.utcnow call.
+
+    Returns exactly what datetime.utcnow returned (a naive datetime in
+    UTC), so stored timestamps and naive-vs-naive comparisons are
+    unchanged; only the deprecated call is gone (P3-6). All src/ call
+    sites use this; src/models.py has its own identical local copy
+    (_utcnow) because models <-> utils would be a circular import.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def server_error(detail: str, exc: BaseException, logger: logging.Logger,
+                 context: str = "") -> "HTTPException":
+    """Build a 500 whose detail never embeds raw exception text (P3-4).
+
+    The raw exception (which can carry SQL fragments, constraint and
+    column names) is logged server-side only, keyed by a short error_id
+    that is included in the fixed generic detail — the same pattern the
+    edge middleware uses for unhandled exceptions (edge.py). Callers
+    raise the returned exception.
+    """
+    error_id = secrets.token_hex(4)
+    where = f" [{context}]" if context else ""
+    logger.warning("Internal error%s error_id=%s: %s", where, error_id, exc)
+    return HTTPException(500, f"{detail} (error_id: {error_id})")
 
 
 def today_local() -> date:
@@ -378,7 +407,7 @@ def compute_monthly_social_counts(db: Session, model, extra_filters: list, month
 
 
 def format_local_datetime(dt: Optional[datetime], fmt: str = "%d %b %Y, %I:%M %p") -> Optional[str]:
-    """Formats a naive UTC timestamp (as stored via datetime.utcnow()) into the
+    """Formats a naive UTC timestamp (as stored via utcnow()) into the
     configured local timezone for display."""
     if dt is None:
         return None

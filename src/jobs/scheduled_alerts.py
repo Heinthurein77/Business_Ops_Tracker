@@ -14,6 +14,7 @@ from datetime import datetime
 
 from src.database import SessionLocal
 from src.models import JobHeartbeat
+from src.utils import utcnow
 from src.routers.modules import run_check_batch_expiry
 from src.routers.ops import run_check_document_expiry, run_remind_missing_reports
 
@@ -23,7 +24,7 @@ def _record_heartbeat(db, job_name: str, status: str) -> None:
     effort by design: a heartbeat write must never mask the job's own
     result, so any failure here is logged and swallowed."""
     try:
-        db.merge(JobHeartbeat(job_name=job_name, last_run_at=datetime.utcnow(), last_status=status))
+        db.merge(JobHeartbeat(job_name=job_name, last_run_at=utcnow(), last_status=status))
         db.commit()
     except Exception as exc:  # noqa: BLE001 - heartbeat must not fail the job
         db.rollback()

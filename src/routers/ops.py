@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from src.auth import get_current_user, require_roles
 from src.database import get_db
-from src.utils import _sanitize_excel_cell, log_audit, today_local, validate_period
+from src.utils import _sanitize_excel_cell, log_audit, server_error, today_local, utcnow, validate_period
 from src.models import (
     ActionItem,
     ActivityLog,
@@ -110,7 +110,22 @@ def bu_scope(user: User, bu_id: Optional[int]) -> Optional[int]:
     return bu_id
 
 
-def _serial_list(raw) -> list:
+def _safe_filename(name: str) -> str:
+    """Make free-text names safe for a quoted Content-Disposition filename
+    (P3-2). Employee/customer names are max_length=150 with no charset
+    restriction, so a double-quote or control character could break out of
+    the quoted filename parameter and inject extra parameters (e.g. a
+    spoofed filename*=). Strip every control character plus double-quote,
+    slash and backslash; fall back to "file" so the filename is never empty.
+    """
+    cleaned = "".join(
+        ch for ch in str(name or "").replace(" ", "_")
+        if ord(ch) >= 32 and ord(ch) != 127 and ch not in '"\\/'
+    ).strip("._").strip("_")
+    return cleaned or "file"
+
+
+def _serial_list(raw, item_id=None) -> list:
     """Serial numbers are stored as a JSON list in a Text column."""
     if not raw:
         return []
@@ -118,7 +133,12 @@ def _serial_list(raw) -> list:
         import json
         val = json.loads(raw)
         return [str(s) for s in val] if isinstance(val, list) else []
-    except Exception:
+    except Exception as exc:
+        # P3-7: a corrupt serial_nos column used to be silently treated as
+        # "no serials", so _mark_line_serials_sold skipped validation for
+        # that line and the corruption was never surfaced. Log it (with the
+        # line/item id when known) instead of swallowing it.
+        logger.warning("_serial_list: corrupt serial_nos JSON for item %s: %s", item_id, exc)
         return []
 
 
@@ -129,10 +149,10 @@ def _mark_line_serials_sold(db: Session, bu_id: int, lines, invoice_id=None, pos
     stock. Lines without an inventory item or without serials are skipped.
     """
     for ln in lines:
-        serials = _serial_list(getattr(ln, "serial_nos", None))
+        item_id = getattr(ln, "inventory_item_id", None)
+        serials = _serial_list(getattr(ln, "serial_nos", None), item_id=item_id)
         if not serials:
             continue
-        item_id = getattr(ln, "inventory_item_id", None)
         if not item_id:
             raise HTTPException(400, "Serial numbers need a stock item on the line")
         for sn in serials:
@@ -147,7 +167,7 @@ def _mark_line_serials_sold(db: Session, bu_id: int, lines, invoice_id=None, pos
             row.status = "sold"
             row.sales_invoice_id = invoice_id
             row.pos_sale_id = pos_sale_id
-            row.sold_at = datetime.utcnow()
+            row.sold_at = utcnow()
 
 
 def restock_batches(db: Session, item: InventoryItem, qty: Decimal, batch_no: str = "RETURN") -> None:
@@ -263,7 +283,7 @@ def update_action_item(item_id: int, payload: ActionItemUpdate, user: User = Dep
         if payload.status not in ("pending", "in_progress", "done"):
             raise HTTPException(400, "Invalid status")
         item.status = payload.status
-        item.completed_at = datetime.utcnow() if payload.status == "done" else None
+        item.completed_at = utcnow() if payload.status == "done" else None
     if payload.title is not None:
         item.title = payload.title.strip()
     if payload.description is not None:
@@ -468,7 +488,7 @@ def record_movement(item_id: int, payload: MovementIn, user: User = Depends(get_
         consume_batches_fefo(db, item, qty)
     elif payload.movement_type == "adjustment":
         item.current_stock = qty
-    item.updated_at = datetime.utcnow()
+    item.updated_at = utcnow()
     db.add(StockMovement(item_id=item.id, movement_type=payload.movement_type,
                          quantity=qty, reason=payload.reason, recorded_by_id=user.id))
     _maybe_notify_low_stock(db, item)
@@ -496,8 +516,8 @@ def record_movement(item_id: int, payload: MovementIn, user: User = Depends(get_
             raise
         except Exception as exc:
             db.rollback()
-            logger.warning("COGS journal failed for item %s: %s", item.id, exc)
-            raise HTTPException(500, f"COGS journal could not be posted: {exc}")
+            raise server_error("COGS journal could not be posted", exc, logger,
+                               context=f"item {item.id}")
     db.commit()
     db.refresh(item)
     out = serialize_inventory_item(item)
@@ -554,7 +574,7 @@ def transfer_stock(item_id: int, payload: TransferIn, user: User = Depends(get_c
     has_batches = db.query(StockBatch).filter(StockBatch.item_id == src.id).first() is not None
     src.current_stock = (src.current_stock or 0) - qty
     dst.current_stock = (dst.current_stock or 0) + qty
-    src.updated_at = dst.updated_at = datetime.utcnow()
+    src.updated_at = dst.updated_at = utcnow()
     if has_batches:
         from src.routers.modules import consume_batches_fefo
         consume_batches_fefo(db, src, qty)
@@ -614,7 +634,7 @@ def _maybe_notify_low_stock(db: Session, item: InventoryItem) -> None:
     reorder = float(item.reorder_level or 0)
     if reorder <= 0 or stock > reorder:
         return
-    if item.low_notified_at and item.low_notified_at > datetime.utcnow() - timedelta(hours=24):
+    if item.low_notified_at and item.low_notified_at > utcnow() - timedelta(hours=24):
         return
     bu = db.query(BusinessUnit).filter(BusinessUnit.id == item.business_unit_id).first()
     bu_name = bu.name if bu else f"BU {item.business_unit_id}"
@@ -630,7 +650,7 @@ def _maybe_notify_low_stock(db: Session, item: InventoryItem) -> None:
         db.add(Notification(user_id=u.id, type="low_stock",
                             title=title, message=message,
                             link="/admin/operations-center"))
-    item.low_notified_at = datetime.utcnow()
+    item.low_notified_at = utcnow()
 
 
 @router.get("/inventory/{item_id}/movements")
@@ -790,7 +810,7 @@ def review_expense(expense_id: int, payload: ExpenseReviewIn, user: User = Depen
     e.status = payload.decision
     e.reviewed_by_id = user.id
     e.review_notes = payload.notes
-    e.reviewed_at = datetime.utcnow()
+    e.reviewed_at = utcnow()
     db.add(Notification(
         user_id=e.submitted_by_id, type="expense_decision",
         title=f"Expense {payload.decision}",
@@ -1135,7 +1155,7 @@ def run_check_document_expiry(db: Session, days: int = 30) -> dict:
     admins = db.query(User).filter(User.role.in_(["Chairman", "HO"]), User.is_active == True).all()  # noqa: E712
     sent = 0
     for d in docs:
-        if d.expiry_notified_at and d.expiry_notified_at > datetime.utcnow() - timedelta(days=7):
+        if d.expiry_notified_at and d.expiry_notified_at > utcnow() - timedelta(days=7):
             continue
         bu = db.query(BusinessUnit).filter(BusinessUnit.id == d.business_unit_id).first()
         bu_name = bu.name if bu else f"BU {d.business_unit_id}"
@@ -1151,7 +1171,7 @@ def run_check_document_expiry(db: Session, days: int = 30) -> dict:
             db.add(Notification(user_id=u.id, type="document_expiry",
                                 title=title, message=message, link="/admin/operations-center"))
             sent += 1
-        d.expiry_notified_at = datetime.utcnow()
+        d.expiry_notified_at = utcnow()
     db.commit()
     return {"checked": len(docs), "notified": sent}
 
@@ -1770,12 +1790,12 @@ def receive_po(po_id: int, user: User = Depends(get_current_user), db: Session =
         # Moving (weighted) average cost — the standard valuation formula.
         item.unit_cost = ((old_qty * old_avg + in_qty * in_cost) / new_qty) if new_qty > 0 else in_cost
         item.current_stock = new_qty
-        item.updated_at = datetime.utcnow()
+        item.updated_at = utcnow()
         db.add(StockMovement(item_id=item.id, movement_type="in", quantity=in_qty,
                              reason=f"PO {po.po_no} received", recorded_by_id=user.id))
         _maybe_notify_low_stock(db, item)
     po.status = "received"
-    po.received_at = datetime.utcnow()
+    po.received_at = utcnow()
     db.flush()
     if not _post_po_journal(db, po, user.id, "receive"):
         db.rollback()
@@ -1802,7 +1822,7 @@ def pay_po(po_id: int, user: User = Depends(get_current_user), db: Session = Dep
     if claimed == 0:
         raise HTTPException(409, f"PO {po.po_no} has already been paid or moved")
     po.status = "paid"
-    po.paid_at = datetime.utcnow()
+    po.paid_at = utcnow()
     db.flush()
     if not _post_po_journal(db, po, user.id, "pay"):
         db.rollback()
@@ -2123,12 +2143,12 @@ def send_invoice(invoice_id: int, user: User = Depends(get_current_user), db: Se
             raise HTTPException(400, f"Not enough stock for {item.name}: {float(item.current_stock or 0):g} available, {qty:g} needed")
         cogs_total += qty * Decimal(str(item.unit_cost or 0))
         item.current_stock = Decimal(str(item.current_stock or 0)) - qty
-        item.updated_at = datetime.utcnow()
+        item.updated_at = utcnow()
         consume_batches_fefo(db, item, qty)
         db.add(StockMovement(item_id=item.id, movement_type="out", quantity=qty,
                              reason=f"Invoice {inv.invoice_no} sent", recorded_by_id=user.id))
     inv.status = "sent"
-    inv.sent_at = datetime.utcnow()
+    inv.sent_at = utcnow()
     db.flush()
     if not _post_invoice_journal(db, inv, user.id, "send"):
         db.rollback()
@@ -2211,6 +2231,14 @@ def record_payment(invoice_id: int, payload: PaymentIn, user: User = Depends(get
         db.rollback()
         raise HTTPException(500, f"Payment journal for invoice {inv.invoice_no} could not be posted; payment rolled back")
     db.commit()
+    # P3-3: the installment allocation + unit reserved→sold marking used to
+    # run inside a bare `except Exception: db.rollback()` with no log line,
+    # while the response hardcoded journal_posted=True — a failed allocation
+    # left the invoice "paid" with stale installments and a fully-paid unit
+    # stuck "reserved", invisibly. Log the failure with the invoice id and
+    # surface it as installments_ok=False; the payment itself already
+    # committed above, so this must not raise.
+    installments_ok = True
     try:
         from src.models import PropertyUnit as _PU
         from src.routers.modules import allocate_installments
@@ -2220,11 +2248,14 @@ def record_payment(invoice_id: int, payload: PaymentIn, user: User = Depends(get
             if unit and unit.status == "reserved":
                 unit.status = "sold"
                 db.commit()
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - allocation failure is surfaced, not fatal
         db.rollback()
+        logger.warning("Installment allocation failed for invoice %s: %s", inv.id, exc)
+        installments_ok = False
     db.refresh(inv)
     out = serialize_invoice(db, inv)
     out["journal_posted"] = True
+    out["installments_ok"] = installments_ok
     _log_audit(db, user, "RECORD_PAYMENT", f"invoice_id={invoice_id}")
     return out
 
@@ -2445,7 +2476,7 @@ def review_leave(leave_id: int, payload: LeaveReview, user: User = Depends(requi
             raise HTTPException(400, "Leave overlaps an already-approved leave request")
     lv.status = payload.decision
     lv.reviewed_by_id = user.id
-    lv.reviewed_at = datetime.utcnow()
+    lv.reviewed_at = utcnow()
     db.commit()
     _log_audit(db, user, "REVIEW_LEAVE", f"leave_id={leave_id}")
     return serialize_leave(db, lv)
@@ -2652,7 +2683,7 @@ def pay_payroll(run_id: int, user: User = Depends(require_roles("Chairman", "HO"
                 raise HTTPException(500, "Staff advance account 1240 is not configured for this BU")
             lines.append({"account_id": adv_acc.id, "debit": 0, "credit": adv_total})
     run.status = "paid"
-    run.paid_at = datetime.utcnow()
+    run.paid_at = utcnow()
     db.flush()
     try:
         create_entry(db, bu, date(int(y), int(m), 1), f"Payroll {run.period} — {run.business_unit.name if run.business_unit else ''}",
@@ -2662,8 +2693,8 @@ def pay_payroll(run_id: int, user: User = Depends(require_roles("Chairman", "HO"
         raise
     except Exception as exc:
         db.rollback()
-        logger.warning("Payroll journal failed for run %s: %s", run.id, exc)
-        raise HTTPException(500, f"Payroll journal could not be posted; run left as approved: {exc}")
+        raise server_error("Payroll journal could not be posted; run left as approved",
+                           exc, logger, context=f"run {run.id}")
     db.commit()
     db.refresh(run)
     out = serialize_payroll(db, run)
@@ -2725,7 +2756,7 @@ def payslip_pdf(run_id: int, line_id: int, user: User = Depends(require_admin),
         pdf.cell(0, 7, _pdf_safe(value), new_x="LMARGIN", new_y="NEXT")
     buf = BytesIO(pdf.output())
     return StreamingResponse(buf, media_type="application/pdf", headers={
-        "Content-Disposition": f'attachment; filename="payslip_{run.period}_{emp.name.replace(" ", "_")}.pdf"'})
+        "Content-Disposition": f'attachment; filename="payslip_{run.period}_{_safe_filename(emp.name)}.pdf"'})
 
 
 @router.get("/sales-customers/{customer_id}/statement")
@@ -2778,7 +2809,7 @@ def customer_statement(customer_id: int, format: str = "pdf", limit: int = 500,
         wb.save(buf)
         buf.seek(0)
         return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                 headers={"Content-Disposition": f'attachment; filename="statement_{cust.name.replace(" ", "_")}.xlsx"'})
+                                 headers={"Content-Disposition": f'attachment; filename="statement_{_safe_filename(cust.name)}.xlsx"'})
     from fpdf import FPDF
     pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.add_page()
@@ -2805,7 +2836,7 @@ def customer_statement(customer_id: int, format: str = "pdf", limit: int = 500,
              new_x="LMARGIN", new_y="NEXT")
     buf = BytesIO(pdf.output())
     return StreamingResponse(buf, media_type="application/pdf", headers={
-        "Content-Disposition": f'attachment; filename="statement_{cust.name.replace(" ", "_")}.pdf"'})
+        "Content-Disposition": f'attachment; filename="statement_{_safe_filename(cust.name)}.pdf"'})
 
 
 # ================================================================== POS counter sales (ERP completion)
@@ -2947,7 +2978,7 @@ def create_pos_sale(payload: PosSaleIn, user: User = Depends(get_current_user), 
             serial_nos=_json.dumps(ln.serial_nos) if ln.serial_nos else None,
         ))
         item.current_stock = Decimal(str(item.current_stock or 0)) - qty
-        item.updated_at = datetime.utcnow()
+        item.updated_at = utcnow()
         db.add(StockMovement(item_id=item.id, movement_type="out", quantity=qty,
                              reason=f"POS sale #{sale.id}", recorded_by_id=user.id))
     # FEFO once per item, for the aggregated quantity, for every item that
@@ -3027,7 +3058,7 @@ def void_pos_sale(sale_id: int, user: User = Depends(get_current_user), db: Sess
         if item:
             qty = Decimal(str(ln.quantity))
             item.current_stock = Decimal(str(item.current_stock or 0)) + qty
-            item.updated_at = datetime.utcnow()
+            item.updated_at = utcnow()
             db.add(StockMovement(item_id=item.id, movement_type="in", quantity=qty,
                                  reason=f"POS sale #{sale.id} voided", recorded_by_id=user.id))
             if getattr(item, "requires_expiry", False):
@@ -3045,7 +3076,7 @@ def void_pos_sale(sale_id: int, user: User = Depends(get_current_user), db: Sess
     for e in entries:
         _reverse_entry(db, e, user.id)
     sale.status = "void"
-    sale.voided_at = datetime.utcnow()
+    sale.voided_at = utcnow()
     db.commit()
     db.refresh(sale)
     _log_audit(db, user, "VOID_POS_SALE", f"sale_id={sale_id}")
@@ -3359,7 +3390,7 @@ def create_sales_return(payload: SalesReturnIn, user: User = Depends(get_current
             item = db.query(InventoryItem).filter(InventoryItem.id == il.inventory_item_id).first()
             if item:
                 item.current_stock = Decimal(str(item.current_stock or 0)) + qty
-                item.updated_at = datetime.utcnow()
+                item.updated_at = utcnow()
                 db.add(StockMovement(item_id=item.id, movement_type="in", quantity=qty,
                                      reason=f"Sales return {r.return_no} ({inv.invoice_no})",
                                      recorded_by_id=user.id))
@@ -3389,11 +3420,18 @@ def create_sales_return(payload: SalesReturnIn, user: User = Depends(get_current
     try:
         from src.routers.modules import allocate_installments
         allocate_installments(db, inv.id)
-    except Exception:
+        installments_ok = True
+    except Exception as exc:  # noqa: BLE001 - allocation failure is surfaced, not fatal
+        # P3-3: same silent-swallow as record_payment — log it with the
+        # invoice id and surface installments_ok=False instead.
         db.rollback()
+        logger.warning("Installment allocation failed for invoice %s (sales return %s): %s",
+                       inv.id, r.id, exc)
+        installments_ok = False
     db.refresh(r)
     out = serialize_sales_return(db, r)
     out["journal_posted"] = journal_posted
+    out["installments_ok"] = installments_ok
     _log_audit(db, user, "CREATE_SALES_RETURN", f"id={r.id}")
     return out
 
@@ -3491,7 +3529,7 @@ def create_purchase_return(payload: PurchaseReturnIn, user: User = Depends(get_c
         item = items.get(pl.id)
         if item is not None:
             item.current_stock = Decimal(str(item.current_stock or 0)) - qty
-            item.updated_at = datetime.utcnow()
+            item.updated_at = utcnow()
             db.add(StockMovement(item_id=item.id, movement_type="out", quantity=qty,
                                  reason=f"Purchase return {r.return_no} ({po.po_no})",
                                  recorded_by_id=user.id))
@@ -3851,7 +3889,7 @@ def approve_advance(advance_id: int, user: User = Depends(require_admin), db: Se
         raise HTTPException(409, f"Advance {advance_id} has already been decided")
     adv.status = "approved"
     adv.approved_by_id = user.id
-    adv.approved_at = datetime.utcnow()
+    adv.approved_at = utcnow()
     try:
         from src.routers.accounting import (
             _ensure_advance_account, account_by_code, create_entry,
@@ -3874,8 +3912,8 @@ def approve_advance(advance_id: int, user: User = Depends(require_admin), db: Se
         raise
     except Exception as exc:
         db.rollback()
-        logger.warning("Staff advance journal failed for advance %s: %s", advance_id, exc)
-        raise HTTPException(500, f"Staff advance journal could not be posted; advance left as pending: {exc}")
+        raise server_error("Staff advance journal could not be posted; advance left as pending",
+                           exc, logger, context=f"advance {advance_id}")
     db.commit()
     db.refresh(adv)
     out = serialize_advance(db, adv)
@@ -3893,7 +3931,7 @@ def reject_advance(advance_id: int, user: User = Depends(require_admin), db: Ses
         raise HTTPException(400, f"Advance is {adv.status}")
     adv.status = "rejected"
     adv.approved_by_id = user.id
-    adv.approved_at = datetime.utcnow()
+    adv.approved_at = utcnow()
     db.commit()
     db.refresh(adv)
     _log_audit(db, user, "REJECT_ADVANCE", f"advance_id={advance_id}")

@@ -79,7 +79,15 @@ def _get_client():
         endpoint_url=settings.R2_ENDPOINT_URL,
         aws_access_key_id=settings.R2_ACCESS_KEY_ID,
         aws_secret_access_key=settings.R2_SECRET_ACCESS_KEY,
-        config=BotoConfig(signature_version="s3v4"),
+        # D-m1: explicit timeouts + retries — without them a hung R2
+        # endpoint can stall a uvicorn worker indefinitely (single
+        # worker, D-11), and a transient failure is never retried.
+        config=BotoConfig(
+            signature_version="s3v4",
+            connect_timeout=10,
+            read_timeout=30,
+            retries={"max_attempts": 2},
+        ),
         region_name="auto",
     )
 

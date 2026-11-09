@@ -28,7 +28,7 @@ import ipaddress
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import func
@@ -135,8 +135,9 @@ class Throttled:
 
 
 def _utcnow() -> datetime:
-    # audit_logs.timestamp is a naive UTC datetime (models.py: default=utcnow).
-    return datetime.utcnow()
+    # audit_logs.timestamp is a naive UTC datetime (models.py: default=_utcnow).
+    # Same value datetime.utcnow used to return, via the non-deprecated API.
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _rows(db: Session, action: str, since: datetime, username: Optional[str] = None, ip: Optional[str] = None) -> Query:
