@@ -5,6 +5,8 @@ only *incoming* request shapes are modeled here.
 """
 import re
 from datetime import date
+
+from src.utils import today_local
 from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
@@ -196,7 +198,9 @@ class CeoProfileRequest(BaseModel):
     @field_validator("date_of_birth")
     @classmethod
     def validate_date_of_birth(cls, value: date) -> date:
-        today = date.today()
+        # SM-12: Yangon date, not the server UTC date — a birthday at
+        # the day boundary used to flip validity by timezone.
+        today = today_local()
         if value >= today:
             raise ValueError("Date of birth must be in the past")
         age_years = (today - value).days / 365.25

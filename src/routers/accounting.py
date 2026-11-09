@@ -10,11 +10,11 @@ Rules enforced here:
   rules: BU rule → group rule → built-in defaults from accounting_templates.
 """
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, text
 from sqlalchemy.exc import IntegrityError
@@ -30,7 +30,7 @@ from src.models import (
     Account, BusinessUnit, FiscalPeriod, JournalEntry, JournalLine,
     PostingRule, User,
 )
-from src.utils import _sanitize_excel_cell, log_audit, today_local, utcnow, validate_period
+from src.utils import APP_TZ, _sanitize_excel_cell, log_audit, today_local, utcnow, validate_period
 
 router = APIRouter(prefix="/api/accounting", tags=["accounting"])
 require_accounting = require_roles("Chairman", "HO", "Accountant")
@@ -131,10 +131,19 @@ def require_group_access(user: User) -> None:
 
 
 def ensure_period_open(db: Session, bu_id: int, d: date) -> None:
+    """CM-5: the period row is locked FOR UPDATE, and created (open) if
+    absent — so a close racing a post contends on the same row instead
+    of the close checking drafts, the post passing its own check, and
+    both landing. On SQLite the lock is a no-op and the conditional
+    claims in the callers are the backstop."""
     p = period_of(d)
     row = db.query(FiscalPeriod).filter(
-        FiscalPeriod.business_unit_id == bu_id, FiscalPeriod.period == p).first()
-    if row and row.status == "closed":
+        FiscalPeriod.business_unit_id == bu_id, FiscalPeriod.period == p).with_for_update().first()
+    if row is None:
+        row = FiscalPeriod(business_unit_id=bu_id, period=p, status="open")
+        db.add(row)
+        db.flush()
+    elif row.status == "closed":
         raise HTTPException(400, f"Fiscal period {p} is closed for this business unit")
 
 
@@ -221,7 +230,19 @@ def create_entry(db: Session, bu_id: int, entry_date: date, description: str,
     references another BU's accounts, a header/inactive account, negative
     amounts, or an unbalanced total could never be posted, so storing it
     only defers the failure to post time."""
-    ensure_period_open(db, bu_id, entry_date)
+    try:
+        ensure_period_open(db, bu_id, entry_date)
+    except HTTPException:
+        # Cm-6: a reversal into a closed period is a state conflict, not
+        # a bad request — 409 naming the period and the reopen step, so
+        # the caller (void, cancel, resubmission) can tell the user what
+        # to do instead of surfacing a bare 400.
+        if source == "reversal":
+            raise HTTPException(
+                409, f"Cannot reverse into closed fiscal period {period_of(entry_date)} "
+                f"for this business unit — reopen the period first "
+                f"(POST /api/accounting/periods/reopen), then retry")
+        raise
     validate_lines(db, bu_id, lines)
     e = JournalEntry(
         business_unit_id=bu_id, entry_no=next_entry_no(db, bu_id, entry_date),
@@ -234,14 +255,24 @@ def create_entry(db: Session, bu_id: int, entry_date: date, description: str,
     )
     db.add(e)
     try:
-        db.flush()
+        # Cm-3: the number is count+1, so two concurrent creates can
+        # collide. Retry the computation once in-process inside a
+        # SAVEPOINT — only the failed flush rolls back, never the
+        # caller's whole transaction (the old db.rollback() here used
+        # to discard the caller's uncommitted business rows too).
+        with db.begin_nested():
+            db.flush()
     except IntegrityError:
-        # M-D5: the per-BU unique constraint on entry_no fired — a
-        # concurrent create took this count+1 number first. 409, not a 500.
-        # (Callers that swallow posting failures still surface this as a
-        # failed journal, never as a silent duplicate.)
-        db.rollback()
-        raise HTTPException(409, f"Journal entry number {e.entry_no} already exists — please retry")
+        e.entry_no = next_entry_no(db, bu_id, entry_date)
+        try:
+            with db.begin_nested():
+                db.flush()
+        except IntegrityError:
+            # M-D5: the per-BU unique constraint on entry_no fired, or
+            # the year-close partial unique index (a second concurrent
+            # year-close for the same BU+year). 409, not a 500.
+            db.rollback()
+            raise HTTPException(409, f"Journal entry number {e.entry_no} already exists — please retry")
     for ln in lines:
         db.add(JournalLine(
             entry_id=e.id, business_unit_id=bu_id, account_id=ln["account_id"],
@@ -341,7 +372,12 @@ def auto_post_expense(db: Session, expense, user_id: Optional[int]) -> None:
     lines = _rule_lines(db, bu_id, "expense_request", amt, debit_override=override)
     if not lines:
         return
-    create_entry(db, bu_id, expense.created_at.date() if expense.created_at else date.today(),
+    # SM-12: created_at is a naive UTC timestamp — take the Yangon date
+    # of it, not the UTC date (an expense approved after midnight UTC
+    # but before 06:30 Yangon used to land in the wrong fiscal day).
+    entry_date = (expense.created_at.replace(tzinfo=timezone.utc).astimezone(APP_TZ).date()
+                  if expense.created_at else today_local())
+    create_entry(db, bu_id, entry_date,
                  f"Expense approved: {expense.title}", "expense", user_id, lines,
                  source_id=expense.id, post=True)
     db.commit()
@@ -608,13 +644,17 @@ def get_journal(entry_id: int, user: User = Depends(require_accounting),
 
 @router.post("/journal/{entry_id}/post")
 def post_journal(entry_id: int, user: User = Depends(require_accounting),
-                 db: Session = Depends(get_db)):
-    e = db.query(JournalEntry).filter(JournalEntry.id == entry_id).first()
+                 db: Session = Depends(get_db),
+                 idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
+    from src.routers.ops import _idempotency_lookup, _idempotency_store
+    e = db.query(JournalEntry).filter(JournalEntry.id == entry_id).with_for_update().first()
     if not e:
         raise HTTPException(404, "Journal entry not found")
     check_bu_access(user, e.business_unit_id)
-    if e.status == "posted":
-        raise HTTPException(400, "Entry already posted")
+    endpoint = "POST /api/accounting/journal/{entry_id}/post"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
     approval = getattr(e, "approval_status", None) or "not_required"
     if approval == "pending":
         raise HTTPException(400, "Entry is awaiting approval — a Chairman/HO must approve it before posting")
@@ -624,49 +664,264 @@ def post_journal(entry_id: int, user: User = Depends(require_accounting),
     lines = [{"account_id": l.account_id, "debit": l.debit, "credit": l.credit}
              for l in e.lines]
     validate_lines(db, e.business_unit_id, lines)
+    # CM-4 conditional claim: on SQLite the FOR UPDATE load above is a
+    # no-op, so two concurrent posts could both pass the status check —
+    # the loser gets a 409 instead of a double post. The sequential
+    # already-posted case also lands here as a 409.
+    claimed = db.query(JournalEntry).filter(
+        JournalEntry.id == entry_id, JournalEntry.status != "posted",
+    ).update({"status": "posted", "posted_by_id": user.id, "posted_at": utcnow()},
+             synchronize_session=False)
+    if claimed == 0:
+        db.refresh(e)
+        raise HTTPException(409, f"Journal entry {e.entry_no} has already been posted (status: {e.status})")
     e.status = "posted"
     e.posted_by_id = user.id
     e.posted_at = utcnow()
     db.commit()
     db.refresh(e)
     _log_audit(db, user, "POST_JOURNAL", f"entry_id={entry_id}")
-    return serialize_entry(db, e)
+    out = serialize_entry(db, e)
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
+    return out
 
 
 @router.post("/journal/{entry_id}/approve")
 def approve_journal(entry_id: int, user: User = Depends(require_admin),
-                    db: Session = Depends(get_db)):
+                    db: Session = Depends(get_db),
+                    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     """Approve a large Accountant-created entry so it can be posted.
     Chairman/HO only, and never the entry's own creator."""
-    e = db.query(JournalEntry).filter(JournalEntry.id == entry_id).first()
+    from src.routers.ops import _idempotency_lookup, _idempotency_store
+    e = db.query(JournalEntry).filter(JournalEntry.id == entry_id).with_for_update().first()
     if not e:
         raise HTTPException(404, "Journal entry not found")
-    if (getattr(e, "approval_status", None) or "not_required") != "pending":
-        raise HTTPException(400, "Entry is not awaiting approval")
+    endpoint = "POST /api/accounting/journal/{entry_id}/approve"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
     if e.created_by_id is not None and e.created_by_id == user.id:
         raise HTTPException(403, "You cannot approve your own journal entry")
+    # CM-4 conditional claim on approval_status: the loser of a
+    # concurrent approve/reject race gets a 409, not a silent second
+    # decision. The sequential not-pending case also lands here as a 409.
+    claimed = db.query(JournalEntry).filter(
+        JournalEntry.id == entry_id, JournalEntry.approval_status == "pending",
+    ).update({"approval_status": "approved"}, synchronize_session=False)
+    if claimed == 0:
+        db.refresh(e)
+        raise HTTPException(409, f"Journal entry {e.entry_no} is not awaiting approval "
+                                 f"(approval_status: {getattr(e, 'approval_status', None) or 'not_required'})")
     e.approval_status = "approved"
     db.commit()
     db.refresh(e)
     _log_audit(db, user, "APPROVE_JOURNAL", f"entry_id={entry_id}")
-    return serialize_entry(db, e)
+    out = serialize_entry(db, e)
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
+    return out
 
 
 @router.post("/journal/{entry_id}/reject-approval")
 def reject_journal_approval(entry_id: int, user: User = Depends(require_admin),
-                            db: Session = Depends(get_db)):
-    e = db.query(JournalEntry).filter(JournalEntry.id == entry_id).first()
+                            db: Session = Depends(get_db),
+                            idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
+    from src.routers.ops import _idempotency_lookup, _idempotency_store
+    e = db.query(JournalEntry).filter(JournalEntry.id == entry_id).with_for_update().first()
     if not e:
         raise HTTPException(404, "Journal entry not found")
-    if (getattr(e, "approval_status", None) or "not_required") != "pending":
-        raise HTTPException(400, "Entry is not awaiting approval")
+    endpoint = "POST /api/accounting/journal/{entry_id}/reject-approval"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
     if e.created_by_id is not None and e.created_by_id == user.id:
         raise HTTPException(403, "You cannot reject your own journal entry")
+    claimed = db.query(JournalEntry).filter(
+        JournalEntry.id == entry_id, JournalEntry.approval_status == "pending",
+    ).update({"approval_status": "rejected"}, synchronize_session=False)
+    if claimed == 0:
+        db.refresh(e)
+        raise HTTPException(409, f"Journal entry {e.entry_no} is not awaiting approval "
+                                 f"(approval_status: {getattr(e, 'approval_status', None) or 'not_required'})")
     e.approval_status = "rejected"
     db.commit()
     db.refresh(e)
     _log_audit(db, user, "REJECT_JOURNAL_APPROVAL", f"entry_id={entry_id}")
-    return serialize_entry(db, e)
+    out = serialize_entry(db, e)
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
+    return out
+
+
+class JournalRetryIn(BaseModel):
+    source: str
+    source_id: int
+
+
+@router.post("/journal/retry")
+def retry_journal(payload: JournalRetryIn, user: User = Depends(require_accounting),
+                  db: Session = Depends(get_db),
+                  idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
+    """CM-7: re-post a journal for a business record whose original
+    posting failed (a legacy flag-only row, or a transient failure).
+    Idempotent: if a posted entry with this source/source_id already
+    exists, nothing is re-posted and already_posted=true is returned.
+    404 when the source record does not exist; 409 when it still cannot
+    be posted (no CoA, missing accounts, closed period).
+
+    Supported sources: pos_sale, expense, sales_return,
+    purchase_return, stock_transfer (formal transfer — both BU sides
+    are checked separately), daily_financial, ho_daily_financial.
+    Fail-hard sources (invoice, purchase, payroll, staff_advance)
+    never have a committed operation without a journal, so a missing
+    entry there is a 409 with an explanation, not something to re-post.
+    A quick transfer_stock journal (source_id = item id) cannot be
+    reconstructed from the item alone, so it is also a 409."""
+    import logging as _logging
+    _logger = _logging.getLogger(__name__)
+    from src.models import (DailyFinancial, ExpenseRequest,
+                            HeadOfficeDailyFinancial, InventoryItem, PosSale,
+                            PurchaseOrder, PurchaseReturn, SalesInvoice,
+                            SalesReturn, StaffAdvance)
+    from src.models import PayrollRun as _PayrollRun
+    from src.models import StockTransfer as _StockTransfer
+    from src.routers.ops import _idempotency_lookup, _idempotency_store
+    endpoint = "POST /api/accounting/journal/retry"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
+
+    def _posted(source: str, source_id: int, bu_id: Optional[int] = None):
+        q = db.query(JournalEntry).filter(
+            JournalEntry.source == source, JournalEntry.source_id == source_id,
+            JournalEntry.status == "posted", JournalEntry.reversed_by_id == None)  # noqa: E711
+        if bu_id is not None:
+            q = q.filter(JournalEntry.business_unit_id == bu_id)
+        return q.first()
+
+    source, sid = payload.source, payload.source_id
+    # stock_transfer is per-BU (one entry per side), so the generic
+    # already-posted check would wrongly skip a half-posted transfer.
+    if source != "stock_transfer":
+        existing = _posted(source, sid)
+        if existing:
+            out = {"ok": True, "source": source, "source_id": sid, "already_posted": True,
+                   "entry_no": existing.entry_no, "journal_posted": True}
+            _idempotency_store(db, user, endpoint, idempotency_key, out)
+            return out
+    try:
+        if source == "pos_sale":
+            sale = db.query(PosSale).filter(PosSale.id == sid).first()
+            if not sale:
+                raise HTTPException(404, f"POS sale {sid} not found")
+            check_bu_access(user, sale.business_unit_id)
+            from src.routers.ops import _post_pos_journals
+            if not _post_pos_journals(db, sale, user.id):
+                raise HTTPException(409, f"POS sale {sid} journal still cannot be posted — check the BU chart of accounts")
+        elif source == "expense":
+            exp = db.query(ExpenseRequest).filter(ExpenseRequest.id == sid).first()
+            if not exp:
+                raise HTTPException(404, f"Expense {sid} not found")
+            check_bu_access(user, exp.business_unit_id)
+            auto_post_expense(db, exp, user.id)
+            if not _posted("expense", sid):
+                raise HTTPException(409, f"Expense {sid} journal still cannot be posted — BU may not be provisioned")
+        elif source == "sales_return":
+            r = db.query(SalesReturn).filter(SalesReturn.id == sid).first()
+            if not r:
+                raise HTTPException(404, f"Sales return {sid} not found")
+            check_bu_access(user, r.business_unit_id)
+            from src.routers.ops import _post_sales_return_journal
+            if not _post_sales_return_journal(db, r, user.id):
+                raise HTTPException(409, f"Sales return {sid} journal still cannot be posted — check the BU chart of accounts")
+        elif source == "purchase_return":
+            r = db.query(PurchaseReturn).filter(PurchaseReturn.id == sid).first()
+            if not r:
+                raise HTTPException(404, f"Purchase return {sid} not found")
+            check_bu_access(user, r.business_unit_id)
+            po = db.query(PurchaseOrder).filter(PurchaseOrder.id == r.po_id).first()
+            if not po:
+                raise HTTPException(404, f"Purchase order {r.po_id} for return {sid} not found")
+            fx = Decimal(str(getattr(po, "exchange_rate", 1) or 1))
+            total = sum((Decimal(str(l.quantity)) * Decimal(str(l.unit_cost or 0))
+                         for l in r.lines), Decimal("0")) * fx
+            from src.routers.ops import _post_purchase_return_journal
+            if not _post_purchase_return_journal(db, r, po, total, user.id):
+                raise HTTPException(409, f"Purchase return {sid} journal still cannot be posted — check the BU chart of accounts")
+        elif source == "stock_transfer":
+            t = db.query(_StockTransfer).filter(_StockTransfer.id == sid).first()
+            if not t:
+                if db.query(InventoryItem).filter(InventoryItem.id == sid).first():
+                    raise HTTPException(409, "Quick transfer_stock journals cannot be reconstructed from the item alone — re-enter the transfer")
+                raise HTTPException(404, f"Stock transfer {sid} not found")
+            check_bu_access(user, t.from_business_unit_id)
+            from src.routers.modules import _post_transfer_journal
+            total = sum((Decimal(str(l.quantity)) * Decimal(str(l.unit_cost or 0))
+                         for l in t.lines), Decimal("0"))
+            sides = [
+                (t.from_business_unit_id, "1180", "1140",
+                 f"Stock transfer {t.transfer_no} sent to {t.to_business_unit.name if t.to_business_unit else ''}",
+                 True),
+                (t.to_business_unit_id, "1140", "2180",
+                 f"Stock transfer {t.transfer_no} received from {t.from_business_unit.name if t.from_business_unit else ''}",
+                 False),
+            ]
+            for bu_id, dr_code, cr_code, desc, _is_source in sides:
+                if total <= 0 or _posted("stock_transfer", sid, bu_id):
+                    continue
+                _ensure_intercompany_accounts(db, bu_id)
+                dr_acc = account_by_code(db, bu_id, dr_code)
+                cr_acc = account_by_code(db, bu_id, cr_code)
+                if not (dr_acc and cr_acc):
+                    raise HTTPException(409, f"Intercompany accounts ({dr_code}/{cr_code}) are not configured for BU {bu_id}")
+                if not _post_transfer_journal(
+                        db, bu_id,
+                        [{"account_id": dr_acc.id, "debit": total, "credit": 0},
+                         {"account_id": cr_acc.id, "debit": 0, "credit": total}],
+                        user.id, sid, desc):
+                    raise HTTPException(409, f"Stock transfer {sid} journal still cannot be posted for BU {bu_id}")
+            if total > 0 and (not _posted("stock_transfer", sid, t.from_business_unit_id)
+                              or not _posted("stock_transfer", sid, t.to_business_unit_id)):
+                raise HTTPException(409, f"Stock transfer {sid} journal still cannot be posted for one side")
+        elif source == "daily_financial":
+            df = db.query(DailyFinancial).filter(DailyFinancial.id == sid).first()
+            if not df:
+                raise HTTPException(404, f"Daily financial report {sid} not found")
+            check_bu_access(user, df.business_unit_id)
+            auto_post_daily_financial(db, df, user.id)
+            if not _posted("daily_financial", sid):
+                raise HTTPException(409, f"Daily financial report {sid} journal still cannot be posted — BU may not be provisioned")
+        elif source == "ho_daily_financial":
+            df = db.query(HeadOfficeDailyFinancial).filter(HeadOfficeDailyFinancial.id == sid).first()
+            if not df:
+                raise HTTPException(404, f"HO daily financial report {sid} not found")
+            ho = db.query(BusinessUnit).filter(BusinessUnit.code == "HO").first()
+            if not ho:
+                raise HTTPException(409, "Head Office BU (code HO) is not provisioned — cannot determine where to post")
+            auto_post_daily_financial(db, df, user.id, business_unit_id=ho.id,
+                                      source="ho_daily_financial")
+            if not _posted("ho_daily_financial", sid):
+                raise HTTPException(409, f"HO daily financial report {sid} journal still cannot be posted — BU may not be provisioned")
+        elif source in ("invoice", "purchase", "payroll", "staff_advance"):
+            model = {"invoice": SalesInvoice, "purchase": PurchaseOrder,
+                     "payroll": _PayrollRun, "staff_advance": StaffAdvance}[source]
+            if not db.query(model).filter(model.id == sid).first():
+                raise HTTPException(404, f"{source} record {sid} not found")
+            raise HTTPException(409, f"{source} {sid} has no posted journal, but {source} operations are fail-hard — "
+                                     f"the operation never committed, so there is nothing to re-post")
+        else:
+            raise HTTPException(404, f"Unknown journal source: {source}")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        _logger.warning("Journal retry failed for %s %s: %s", source, sid, exc)
+        raise HTTPException(500, "Journal retry failed; see the server log")
+    entry = _posted(source, sid)
+    out = {"ok": True, "source": source, "source_id": sid, "already_posted": False,
+           "journal_posted": True,
+           "entry_no": entry.entry_no if entry else None}
+    _log_audit(db, user, "RETRY_JOURNAL", f"source={source} source_id={sid}")
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
+    return out
 
 
 @router.post("/journal/{entry_id}/reverse")
@@ -1104,11 +1359,20 @@ def close_period(payload: PeriodAction, user: User = Depends(require_admin),
     check_bu_access(user, payload.business_unit_id)
     if payload.period > today_local().strftime("%Y-%m"):
         raise HTTPException(400, f"Cannot close future period {payload.period}")
+    # CM-5: lock the period row FIRST (creating it open if absent, so a
+    # post racing this close contends on the same row), then re-check
+    # the draft count AFTER acquiring the lock — the old code counted
+    # drafts before any lock, so a draft created between the count and
+    # the close was sealed into a closed period.
     row = db.query(FiscalPeriod).filter(
         FiscalPeriod.business_unit_id == payload.business_unit_id,
-        FiscalPeriod.period == payload.period).first()
+        FiscalPeriod.period == payload.period).with_for_update().first()
     if row and row.status == "closed":
         return {"ok": True, "period": payload.period, "status": "closed"}
+    if not row:
+        row = FiscalPeriod(business_unit_id=payload.business_unit_id, period=payload.period)
+        db.add(row)
+        db.flush()
     # Unposted drafts in the period could never be posted once it closes.
     y, m = map(int, payload.period.split("-"))
     drafts = db.query(JournalEntry).filter(
@@ -1120,9 +1384,6 @@ def close_period(payload: PeriodAction, user: User = Depends(require_admin),
         raise HTTPException(
             400, f"Cannot close {payload.period}: {drafts} unposted draft journal "
             f"{'entry' if drafts == 1 else 'entries'} exist in this period — post or delete them first")
-    if not row:
-        row = FiscalPeriod(business_unit_id=payload.business_unit_id, period=payload.period)
-        db.add(row)
     row.status = "closed"
     row.closed_by_id = user.id
     row.closed_at = utcnow()
@@ -1135,9 +1396,11 @@ def close_period(payload: PeriodAction, user: User = Depends(require_admin),
 @router.post("/periods/reopen")
 def reopen_period(payload: PeriodAction, user: User = Depends(require_admin),
                   db: Session = Depends(get_db)):
+    # CM-5: lock the period row before reopening, so a close racing a
+    # reopen cannot interleave and leave the period in the wrong state.
     row = db.query(FiscalPeriod).filter(
         FiscalPeriod.business_unit_id == payload.business_unit_id,
-        FiscalPeriod.period == payload.period).first()
+        FiscalPeriod.period == payload.period).with_for_update().first()
     if row:
         row.status = "open"
         row.closed_by_id = None
@@ -1801,7 +2064,7 @@ def finance_summary(period: Optional[str] = None, user: User = Depends(require_a
     P&L, cash position (1110+1120), AR/AP outstanding, tax payable."""
     require_group_access(user)
     _long_report_timeout(db)  # Pm-3: 60 s for this group-wide snapshot
-    period = validate_period(period) or date.today().strftime("%Y-%m")
+    period = validate_period(period) or today_local().strftime("%Y-%m")
     start, end = _period_start(period), _period_end(period)
     income = ZERO
     expense = ZERO
@@ -2145,7 +2408,7 @@ def settle_intercompany(txn_id: int, user: User = Depends(require_accounting),
     if t.status != "open":
         raise HTTPException(400, "Already settled")
     amt = Decimal(str(t.amount))
-    today_d = date.today()
+    today_d = today_local()
     seller_recv = account_by_code(db, t.from_business_unit_id, "1180")
     seller_cash = account_by_code(db, t.from_business_unit_id, "1110")
     buyer_pay = account_by_code(db, t.to_business_unit_id, "2180")
@@ -2329,8 +2592,12 @@ def year_close(payload: YearCloseIn, user: User = Depends(require_roles("Chairma
     db.flush()
     for mth in range(1, 13):
         pstr = f"{payload.year}-{mth:02d}"
+        # Cm-7: lock each period row when fetching/creating it, so a
+        # normal post racing year_close contends on the same period row
+        # (ensure_period_open locks it too) instead of posting into a
+        # month this close is sealing.
         prow = db.query(FiscalPeriod).filter(FiscalPeriod.business_unit_id == bu_id,
-                                             FiscalPeriod.period == pstr).first()
+                                             FiscalPeriod.period == pstr).with_for_update().first()
         if not prow:
             prow = FiscalPeriod(business_unit_id=bu_id, period=pstr)
             db.add(prow)
