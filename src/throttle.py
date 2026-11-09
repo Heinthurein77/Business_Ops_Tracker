@@ -27,6 +27,7 @@ per trigger, and the lock is always visible and clearable in User Management.
 import ipaddress
 import logging
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -49,6 +50,15 @@ LOGIN_USER_LIMIT = 5
 LOGIN_TRUSTED_IP_DAYS = 30
 LOGIN_BREAKER_WINDOW_SECONDS = 60
 LOGIN_BREAKER_LIMIT = 300
+# SM-3: the global breaker must only trip on a *distributed* flood. One
+# attacker hammering from a single IP (or at a handful of usernames) is
+# already stopped by the per-IP limit and the per-username lockout — letting
+# that same flood trip the global breaker would hand the attacker a
+# deny-login-to-everyone button, re-triggerable every minute. The breaker
+# therefore also requires breadth: failures from at least this many distinct
+# IPs, or aimed at at least this many distinct usernames.
+LOGIN_BREAKER_MIN_DISTINCT_IPS = 10
+LOGIN_BREAKER_MIN_DISTINCT_USERNAMES = 50
 LOGIN_MAX_RETRY_SECONDS = 15 * 60
 
 # --- Forgot password ---
@@ -63,7 +73,9 @@ FORGOT_USER_WINDOW_SECONDS = 24 * 3600
 FORGOT_IP_AUDIT_CAP = 50
 # Global flood guard, for when no per-IP rule can apply (see ip_is_throttle_key):
 # past this many requests in a minute, from anyone, stop creating requests and
-# writing rows.
+# writing rows. Same SM-3 breadth gate as the login breaker (see
+# _breaker_tripped): a single-IP flood must not be able to deny the
+# forgot-password flow to everyone.
 FORGOT_BREAKER_WINDOW_SECONDS = 60
 FORGOT_BREAKER_LIMIT = 200
 
@@ -151,6 +163,113 @@ def _rows(db: Session, action: str, since: datetime, username: Optional[str] = N
 
 def _count(db: Session, action: str, since: datetime, username: Optional[str] = None, ip: Optional[str] = None) -> int:
     return _rows(db, action, since, username, ip).with_entities(func.count(AuditLog.id)).scalar() or 0
+
+
+def _breaker_tripped(db: Session, action: str, window_seconds: int, limit: int, now: datetime) -> tuple[bool, int, int, int]:
+    """SM-3: is the global breaker for `action` tripped? Returns
+    (tripped, total, distinct_ips, distinct_usernames).
+
+    The raw count alone is not enough: a single IP failing 300 logins in a
+    minute used to trip the breaker and refuse login to *everyone* for 60 s,
+    re-triggerable every minute by the same attacker. The per-IP limit
+    (20/15 min) and the per-username lockout (5 failures) already stop a
+    narrow flood, so the global breaker now only fires on a *distributed*
+    one — enough distinct IPs, or enough distinct usernames targeted, to
+    look like a botnet or a credential-spraying run rather than one bad
+    actor (or one misconfigured client) hammering away."""
+    since = now - timedelta(seconds=window_seconds)
+    total = _count(db, action, since)
+    if total <= limit:
+        return False, total, 0, 0
+    distinct_ips = (
+        db.query(func.count(func.distinct(AuditLog.ip_address)))
+        .filter(AuditLog.action == action, AuditLog.timestamp >= since)
+        .scalar()
+        or 0
+    )
+    distinct_usernames = (
+        db.query(func.count(func.distinct(AuditLog.username)))
+        .filter(AuditLog.action == action, AuditLog.timestamp >= since)
+        .scalar()
+        or 0
+    )
+    tripped = (
+        distinct_ips >= LOGIN_BREAKER_MIN_DISTINCT_IPS
+        or distinct_usernames >= LOGIN_BREAKER_MIN_DISTINCT_USERNAMES
+    )
+    return tripped, total, distinct_ips, distinct_usernames
+
+
+# Monotonic timestamp of the last breaker-trip alert, so a sustained flood
+# logs (and therefore alerts, via the log scan) at most once per breaker
+# window instead of once per refused request.
+_breaker_alerted_at = 0.0
+
+
+def _alert_breaker_trip(action: str, total: int, distinct_ips: int, distinct_usernames: int) -> None:
+    """SM-3: a breaker trip refuses logins to everyone, so it must be
+    visible — logged at ERROR (the daily log scan counts ERROR lines and
+    alerts the Chairman) and throttled to one alert per breaker window."""
+    global _breaker_alerted_at
+    now_mono = time.monotonic()
+    if now_mono - _breaker_alerted_at < LOGIN_BREAKER_WINDOW_SECONDS:
+        return
+    _breaker_alerted_at = now_mono
+    logger.error(
+        "Login breaker tripped for %s: %d failures in %ds from %d distinct IPs / %d distinct "
+        "usernames — legitimate logins are being refused. Investigate the flood; the breaker "
+        "resets automatically when the window passes.",
+        action, total, LOGIN_BREAKER_WINDOW_SECONDS, distinct_ips, distinct_usernames,
+    )
+
+
+def check_client_ip_configuration() -> None:
+    """SM-3 startup self-check: resolve the client IP for a synthetic
+    request shaped like the deployed proxy setup and verify it is not a
+    private address. When CLIENT_IP_HEADER / TRUSTED_PROXY_HOPS is
+    misconfigured the app sees the proxy's own (private) address for every
+    caller, per-IP throttling silently switches off, and only the
+    per-username lockout stands between a guessing run and the global
+    breaker. Best effort and never raises — a failed check must not stop
+    the app from starting; the ERROR log line (picked up by the log scan)
+    is the signal.
+
+    The synthetic request carries a public client IP (203.0.113.10, the
+    TEST-NET-3 documentation range) arriving through one private proxy hop,
+    which is the shape the production Caddy setup produces."""
+    try:
+        from starlette.requests import Request as StarletteRequest
+
+        from src.client_ip import get_client_ip
+        from src.config import settings
+
+        headers = [(b"x-forwarded-for", b"203.0.113.10, 10.0.0.5")]
+        if settings.CLIENT_IP_HEADER:
+            headers = [(settings.CLIENT_IP_HEADER.encode(), b"203.0.113.10")]
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "headers": headers,
+            "client": ("10.0.0.5", 1234),
+            "server": ("testserver", 80),
+        }
+        resolved = get_client_ip(StarletteRequest(scope))
+        if resolved is None:
+            logger.error(
+                "Startup client-IP self-check: could not resolve a client IP from a synthetic "
+                "proxied request — per-IP throttling may be off. Check CLIENT_IP_HEADER / "
+                "TRUSTED_PROXY_HOPS."
+            )
+        elif not ip_is_throttle_key(resolved):
+            logger.error(
+                "Startup client-IP self-check: resolved client IP %s is a private address — "
+                "per-IP throttling is disabled for such addresses. Check CLIENT_IP_HEADER / "
+                "TRUSTED_PROXY_HOPS (and run uvicorn with --no-proxy-headers).",
+                resolved,
+            )
+    except Exception as exc:  # noqa: BLE001 - self-check must never break startup
+        logger.warning("Startup client-IP self-check failed to run: %s", exc)
 
 
 def _seconds_until_below_limit(
@@ -276,8 +395,14 @@ def check_login_throttle(db: Session, username: str, ip: Optional[str], now: Opt
 
     # Global circuit breaker: a flood far beyond anything legitimate (a
     # distributed guessing run, or a bug) — refuse cheaply, write nothing.
-    breaker_since = now - timedelta(seconds=LOGIN_BREAKER_WINDOW_SECONDS)
-    if _count(db, LOGIN_FAILED, breaker_since) > LOGIN_BREAKER_LIMIT:
+    # SM-3: gated on breadth (see _breaker_tripped), so one IP hammering
+    # away can no longer deny login to everyone; the per-IP limit and the
+    # per-username lockout already stop that shape.
+    tripped, total, distinct_ips, distinct_usernames = _breaker_tripped(
+        db, LOGIN_FAILED, LOGIN_BREAKER_WINDOW_SECONDS, LOGIN_BREAKER_LIMIT, now
+    )
+    if tripped:
+        _alert_breaker_trip(LOGIN_FAILED, total, distinct_ips, distinct_usernames)
         return Throttled(LOGIN_BREAKER_WINDOW_SECONDS)
 
     since = now - timedelta(seconds=LOGIN_WINDOW_SECONDS)
@@ -333,7 +458,11 @@ def check_forgot_password_throttle(db: Session, username: str, ip: Optional[str]
     if ip is not None:
         n_ip = _count(db, PASSWORD_RESET_REQUESTED, now - timedelta(seconds=FORGOT_IP_WINDOW_SECONDS), ip=ip)
     n_user = _count(db, PASSWORD_RESET_REQUESTED, now - timedelta(seconds=FORGOT_USER_WINDOW_SECONDS), username=username)
-    flooded = _count(db, PASSWORD_RESET_REQUESTED, now - timedelta(seconds=FORGOT_BREAKER_WINDOW_SECONDS)) > FORGOT_BREAKER_LIMIT
+    # SM-3: same breadth gate as the login breaker — a single-IP flood must
+    # not deny the forgot-password flow to everyone.
+    flooded, _total, _ips, _users = _breaker_tripped(
+        db, PASSWORD_RESET_REQUESTED, FORGOT_BREAKER_WINDOW_SECONDS, FORGOT_BREAKER_LIMIT, now
+    )
     return ForgotPasswordState(
         throttled=flooded or n_ip >= FORGOT_IP_LIMIT or n_user >= FORGOT_USER_LIMIT,
         record_audit=not flooded and n_ip < FORGOT_IP_AUDIT_CAP,
