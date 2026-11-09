@@ -36,3 +36,6 @@ tzdata==2025.2
 # minor (PDF payslips/statements). Pin fpdf2 ONLY — see the sec-review
 # fix pass; other lines are owned by their own workstreams.
 fpdf2==2.8.9
+# httpx (test-only): HTTP-level smoke tests use httpx.AsyncClient with
+# ASGITransport (T-4). Not imported by application code.
+httpx==0.28.1

@@ -12,9 +12,9 @@
 # If you change a secret, re-run `up -d` before relying on these jobs.
 #
 # Heartbeat / dead-man check: the JobHeartbeat mechanism (alert if a job
-# has not run in > 36 h) is a separate workstream — until it lands, the
-# check is manual: the logs below must show a fresh line after each
-# scheduled time, and the Chairman reviews them (see runbook §2C).
+# has not run in > 36 h) is live — scheduled_alerts upserts its row after
+# each run and log_scan (09:00) alerts the Chairman when a row is stale.
+# The logs below must still show a fresh line after each scheduled time.
 #
 # Times are server time (Asia/Yangon on the VPS).
 
@@ -38,13 +38,14 @@
 0 3 * * 0 cd ~/business-ops-tracker && docker compose -f docker-compose.prod.yml exec -T app python -m src.scripts.audit_retention >> ~/bot-audit-retention.log 2>&1
 
 # --- log_scan: daily count of ERROR / journal-failure / lockout lines in
-# the last 24 h of app logs. Daily 09:00. This is the minimum-viable
-# monitoring until Sentry/a real alerting path exists: the Chairman
-# reviews ~/bot-log-scan.log daily. A non-empty file means something
-# needs the incident runbook. `|| true` because grep exits 1 when
-# nothing matches, which cron would otherwise report as a job failure.
-# Log: ~/bot-log-scan.log
-0 9 * * * cd ~/business-ops-tracker && docker compose -f docker-compose.prod.yml logs --since 24h app 2>&1 | grep -iE 'ERROR|journal failed|lockout' >> ~/bot-log-scan.log 2>&1 || true
+# the last 24 h of app logs + dead-man check on the JobHeartbeat table
+# (alerts the Chairman in-app if a job has not run in > 36 h). Daily
+# 09:00. The module reads the logs from stdin, counts the signals, checks
+# heartbeat staleness, and exits non-zero when the DB is unreachable.
+# This is the minimum-viable monitoring until Sentry/a real alerting path
+# exists.
+# Log: ~/bot-logscan.log
+0 9 * * * cd ~/business-ops-tracker && docker compose -f docker-compose.prod.yml logs --since 24h app 2>/dev/null | docker compose -f docker-compose.prod.yml exec -T app python -m src.jobs.log_scan >> ~/bot-logscan.log 2>&1
 
 # --- backup: weekly pg_dump to separate storage (R-4). Weekly, Sunday
 # 03:30. BACKUP_DIR must be off the app disk eventually (copy the dumps

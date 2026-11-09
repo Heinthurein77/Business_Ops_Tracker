@@ -54,6 +54,10 @@ ROOT = Path(__file__).resolve().parent.parent
 VERSIONS = ROOT / "alembic" / "versions"
 NEW_REVISION = "ee078d0716ad"
 PREV_HEAD = "c9ec96d6b1e5"
+# Current head after the 2026-11-09 sec-review fix pass linearised the
+# three new revisions (D-12 -> job heartbeats -> revenue anomaly flag).
+CURRENT_HEAD = "f58eca28a187"
+CURRENT_HEAD_DOWN = "73a8ede3c7c4"
 
 from types import SimpleNamespace
 
@@ -176,10 +180,10 @@ def test_new_migration_is_the_single_head():
 
     cfg = Config(str(ROOT / "alembic.ini"))
     script = ScriptDirectory.from_config(cfg)
-    assert script.get_heads() == [NEW_REVISION], (
-        f"expected single head {NEW_REVISION}, got {script.get_heads()}")
-    rev = script.get_revision(NEW_REVISION)
-    assert rev.down_revision == PREV_HEAD
+    assert script.get_heads() == [CURRENT_HEAD], (
+        f"expected single head {CURRENT_HEAD}, got {script.get_heads()}")
+    rev = script.get_revision(CURRENT_HEAD)
+    assert rev.down_revision == CURRENT_HEAD_DOWN
 
 
 def test_upgrade_head_then_downgrade_base_is_clean(tmp_path):
@@ -769,4 +773,4 @@ def test_bare_alembic_cli_requires_env_vars(tmp_path):
     url = f"sqlite:///{tmp_path / 'heads.db'}"
     with_vars = _run_alembic(url, "heads")
     assert with_vars.returncode == 0
-    assert NEW_REVISION in with_vars.stdout
+    assert CURRENT_HEAD in with_vars.stdout

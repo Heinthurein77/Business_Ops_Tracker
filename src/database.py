@@ -2,6 +2,7 @@ import time
 
 from fastapi import HTTPException
 from sqlalchemy import MetaData, create_engine, event, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.orm import declarative_base, sessionmaker
 

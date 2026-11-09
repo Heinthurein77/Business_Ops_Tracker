@@ -1,7 +1,7 @@
 """BOT sec review: job heartbeat table (R-6 / A-1)
 
 Revision ID: 73a8ede3c7c4
-Revises: ee078d0716ad
+Revises: 87d970971665
 Create Date: 2026-11-09
 
 Adds ``job_heartbeats``: one row per scheduled job, upserted by the job
@@ -22,7 +22,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = '73a8ede3c7c4'
-down_revision: Union[str, Sequence[str], None] = 'ee078d0716ad'
+down_revision: Union[str, Sequence[str], None] = '87d970971665'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

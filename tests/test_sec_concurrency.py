@@ -8,26 +8,18 @@ separate sessions against a file-backed SQLite DB (in-memory SQLite
 cannot be shared across threads) and assert exactly one call succeeds
 and exactly one journal set is posted.
 
-The loser, once a guard exists, should surface as a 400 (status
-already moved), a 500 (journal post failed and rolled back) or a raw
-IntegrityError/OperationalError from the commit — what matters is that
-it does NOT succeed and does NOT post a second journal.
+The loser surfaces as a 409 (already moved) — what matters is that it
+does NOT succeed and does NOT post a second journal.
 
-NOTE (finding, verified by running these tests): without a guard both
-calls succeed and the goods/payment are double-posted. The unique
-entry_no does NOT backstop this race, and no test-side synchronisation
-can make it do so: the transactions serialise at the FIRST flush (the
-PO-status/stock UPDATE takes the SQLite writer lock, and on Postgres
-the row lock), which happens BEFORE journal creation, so the loser
-always computes its count+1 number after the winner committed and gets
-a fresh number. A router-level guard is needed — e.g. a conditional
-status update (`... WHERE id=? AND status IN (...)`, loser aborts when
-the rowcount is 0) — and that guard lives in src/routers/ops.py, a
-follow-up for the ops workstream, not this test batch. Until it lands
-both tests are marked xfail (strict=False, so they go green
-automatically the day the guard lands) rather than red: the suite must
-stay green, and the tests stay in place as the regression guard for
-that fix.
+NOTE: these tests previously proved the race is real (both calls
+succeeded and double-posted; the unique entry_no does NOT backstop it,
+because the transactions serialise at the FIRST flush, which happens
+BEFORE journal creation). The guard has since landed in
+src/routers/ops.py — a conditional status claim (`UPDATE ... WHERE id=?
+AND status IN (...)`, loser aborts with 409 when the rowcount is 0) in
+receive_po / record_payment, and the same pattern in pay_po,
+send_invoice and approve_advance — so these tests now assert the guard
+holds instead of xfail-ing.
 """
 import threading
 from datetime import date
@@ -51,11 +43,6 @@ from src.routers.ops import (
 )
 
 CHAIRMAN = SimpleNamespace(id=1, role="Chairman", business_unit_id=None, username="chairman")
-
-XFAIL_RACE = pytest.mark.xfail(
-    reason="double-post race is real: no router-level guard yet (see module docstring)",
-    strict=False,
-)
 
 
 @pytest.fixture()
@@ -119,7 +106,6 @@ def _posted_journals(session, bu_id=1):
 
 
 class TestConcurrentReceivePo:
-    @XFAIL_RACE
     def test_two_simultaneous_receives_post_exactly_one_journal(self, file_db):
         db, engine = file_db, file_db.test_engine
         supplier = Supplier(name="Vendor", business_unit_id=1)
@@ -148,7 +134,6 @@ class TestConcurrentReceivePo:
         finally:
             fresh.close()
 
-    @XFAIL_RACE
     def test_two_simultaneous_payments_post_exactly_one_payment(self, file_db):
         db, engine = file_db, file_db.test_engine
         cust = create_sales_customer(CustomerIn(business_unit_id=1, name="Buyer"),

@@ -1,7 +1,7 @@
 """D-14(b): revenue anomaly flag on daily_financials
 
 Revision ID: f58eca28a187
-Revises: ee078d0716ad
+Revises: 73a8ede3c7c4
 Create Date: 2026-11-09
 
 Adds ``daily_financials.revenue_anomaly`` (Boolean, default false). At CEO
@@ -21,7 +21,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = 'f58eca28a187'
-down_revision: Union[str, Sequence[str], None] = 'ee078d0716ad'
+down_revision: Union[str, Sequence[str], None] = '73a8ede3c7c4'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

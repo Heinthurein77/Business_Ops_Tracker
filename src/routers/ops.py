@@ -1733,6 +1733,18 @@ def receive_po(po_id: int, user: User = Depends(get_current_user), db: Session =
         raise HTTPException(400, f"Cannot receive a PO in status {po.status}")
     if getattr(po, "approval_stage", None) in ("first", "final", "rejected"):
         raise HTTPException(400, "This PO is still awaiting approval and cannot be received")
+    # Atomic claim (T-1): two concurrent receives must not both stock-in
+    # and post. The conditional UPDATE serialises the writers (row lock on
+    # Postgres, writer lock on SQLite); the loser re-evaluates against the
+    # winner's committed state, sees status "received" and gets a 409
+    # instead of double-posting. The claim is in the same transaction as
+    # the stock-in and the journal, so a journal failure rolls it back.
+    claimed = db.query(PurchaseOrder).filter(
+        PurchaseOrder.id == po_id,
+        PurchaseOrder.status.in_(("draft", "ordered")),
+    ).update({"status": "received"}, synchronize_session=False)
+    if claimed == 0:
+        raise HTTPException(409, f"PO {po.po_no} has already been received or moved")
     fx = Decimal(str(getattr(po, "exchange_rate", 1) or 1))
     for ln in po.lines:
         item = None
@@ -1782,6 +1794,13 @@ def pay_po(po_id: int, user: User = Depends(get_current_user), db: Session = Dep
     bu_scope(user, po.business_unit_id)
     if po.status != "received":
         raise HTTPException(400, "Only received POs can be paid")
+    # Atomic claim (T-1): same pattern as receive_po — a concurrent second
+    # pay must get a 409, not a second payment journal.
+    claimed = db.query(PurchaseOrder).filter(
+        PurchaseOrder.id == po_id, PurchaseOrder.status == "received",
+    ).update({"status": "paid"}, synchronize_session=False)
+    if claimed == 0:
+        raise HTTPException(409, f"PO {po.po_no} has already been paid or moved")
     po.status = "paid"
     po.paid_at = datetime.utcnow()
     db.flush()
@@ -2072,6 +2091,17 @@ def send_invoice(invoice_id: int, user: User = Depends(get_current_user), db: Se
         if outstanding + this_total > limit:
             raise HTTPException(400, f"Credit limit exceeded for {cust.name}: limit Ks {float(limit):,.0f}, "
                                      f"outstanding Ks {float(outstanding):,.0f}, this invoice Ks {float(this_total):,.0f}")
+    # Atomic claim (T-1): same pattern as receive_po — a concurrent second
+    # send must get a 409, not a second stock decrement + send journal.
+    # Placed AFTER the credit-limit check on purpose: the check counts
+    # sent invoices as outstanding, so the claim (which flips this invoice
+    # to "sent") must not run before it, or the invoice would count its
+    # own balance against its own limit. This is the first mutation point.
+    claimed = db.query(SalesInvoice).filter(
+        SalesInvoice.id == invoice_id, SalesInvoice.status == "draft",
+    ).update({"status": "sent"}, synchronize_session=False)
+    if claimed == 0:
+        raise HTTPException(409, f"Invoice {inv.invoice_no} has already been sent or moved")
     # Serial-tracked lines: validate + mark the units sold with this invoice.
     _mark_line_serials_sold(db, inv.business_unit_id, inv.lines, invoice_id=inv.id)
     # Invoice lines sell physical goods (Q2): validate stock per item
@@ -2144,6 +2174,19 @@ def record_payment(invoice_id: int, payload: PaymentIn, user: User = Depends(get
     bu_scope(user, inv.business_unit_id)
     if inv.status not in ("sent", "partial"):
         raise HTTPException(400, f"Cannot take payment on a {inv.status} invoice")
+    # Atomic claim (T-1): serialise concurrent payments on this invoice.
+    # The conditional UPDATE takes the writer lock; the loser re-evaluates
+    # against the winner's committed state (paid -> 409), and the balance
+    # below is re-read after the claim, so two full payments cannot both
+    # post — and two partials are still both allowed while the balance
+    # covers them. (A plain status claim cannot work here: legitimate
+    # partial payments must both succeed.)
+    claimed = db.query(SalesInvoice).filter(
+        SalesInvoice.id == invoice_id,
+        SalesInvoice.status.in_(("sent", "partial")),
+    ).update({"status": "partial"}, synchronize_session=False)
+    if claimed == 0:
+        raise HTTPException(409, f"Invoice {inv.invoice_no} has already been paid or moved")
     # The payment amount is in the invoice's currency unless the caller
     # says otherwise — a mismatched currency is rejected rather than
     # applied 1:1 to the balance.
@@ -3798,6 +3841,14 @@ def approve_advance(advance_id: int, user: User = Depends(require_admin), db: Se
         raise HTTPException(404, "Staff advance not found")
     if adv.status != "pending":
         raise HTTPException(400, f"Advance is {adv.status}")
+    # Atomic claim (T-1): with_for_update() alone does not serialise on
+    # SQLite (the dialect ignores it), so claim the row conditionally —
+    # the loser gets a 409 instead of disbursing twice.
+    claimed = db.query(StaffAdvance).filter(
+        StaffAdvance.id == advance_id, StaffAdvance.status == "pending",
+    ).update({"status": "approved"}, synchronize_session=False)
+    if claimed == 0:
+        raise HTTPException(409, f"Advance {advance_id} has already been decided")
     adv.status = "approved"
     adv.approved_by_id = user.id
     adv.approved_at = datetime.utcnow()
