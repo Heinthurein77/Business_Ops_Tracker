@@ -5,12 +5,13 @@ Access model mirrors the rest of the app:
 - CEO: scoped to their own business unit
 - Chairman / HO ("admin"): all business units
 """
+import json
 import logging
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
@@ -31,6 +32,7 @@ from src.models import (
     Employee,
     ExpenseRequest,
     HeadOfficeActivityLog,
+    IdempotencyKey,
     InventoryItem,
     InvoicePayment,
     ItemSerial,
@@ -89,6 +91,139 @@ def _log_audit(db, user, action, details=""):
     except Exception as exc:  # noqa: BLE001 - audit must not break the op
         logger.warning("audit write failed for %s: %s", action, exc)
 
+
+# ---------------------------------------------------------------- RT concurrency
+# helpers (real-time risk review, Area A). Shared by the money endpoints
+# below and by src/routers/modules.py (which imports them from here).
+
+def _escape_like(value: str) -> str:
+    """Escape LIKE wildcards (Sm-1): `_` and `%` in a stored attachment
+    key must match literally, never as a single-/multi-char wildcard."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _assert_token_current(db, user) -> None:
+    """SM-1 backend re-check, called immediately before the commit of
+    every money endpoint: a session revoked mid-request (logout /
+    password change on another device) must not still commit afterwards.
+
+    Workstream B defines ``assert_token_current(db, user)`` in src/auth
+    (it compares user.token_version against ``user._token_tv`` stashed on
+    the user object by get_current_user, raising 401 on mismatch). When
+    that helper is present it is used; otherwise this falls back to an
+    inline re-read of token_version. Duck-typed test users carry no
+    token at all (no ``_token_tv``) and are left alone."""
+    tv = getattr(user, "_token_tv", None)
+    if tv is None:
+        return
+    try:
+        from src.auth import assert_token_current as _atc
+    except ImportError:
+        _atc = None
+    if _atc is not None:
+        _atc(db, user)
+        return
+    row = db.query(User).filter(User.id == user.id).first()
+    if row is not None and row.token_version != tv:
+        raise HTTPException(401, "Session has expired — please sign in again")
+
+
+_IDEMPOTENCY_TTL_HOURS = 24
+
+
+def _idempotency_lookup(db, user, endpoint: str, key: Optional[str]):
+    """CM-6: return the stored response for a replayed Idempotency-Key,
+    or None when this is a fresh request (no key, unknown key, expired)."""
+    if not key or user is None or getattr(user, "id", None) is None:
+        return None
+    row = db.query(IdempotencyKey).filter(
+        IdempotencyKey.user_id == user.id,
+        IdempotencyKey.endpoint == endpoint,
+        IdempotencyKey.key == key).first()
+    if not row:
+        return None
+    if row.expires_at is not None and row.expires_at < utcnow():
+        return None
+    try:
+        return json.loads(row.response_body)
+    except Exception:
+        return None
+
+
+def _idempotency_store(db, user, endpoint: str, key: Optional[str], body) -> None:
+    """CM-6: store the response of a first execution (own commit, after
+    the business transaction committed). A concurrent first execution
+    storing the same key wins the unique constraint; the loser just
+    drops its copy — the replay will read the winner's response."""
+    if not key or user is None or getattr(user, "id", None) is None:
+        return
+    try:
+        db.add(IdempotencyKey(
+            user_id=user.id, endpoint=endpoint, key=key,
+            response_body=json.dumps(body, default=str),
+            expires_at=utcnow() + timedelta(hours=_IDEMPOTENCY_TTL_HOURS)))
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 - dedupe must never fail the op
+        db.rollback()
+        logger.warning("Idempotency store failed for %s: %s", endpoint, exc)
+
+
+def _check_version(obj, expected_version, label: str) -> None:
+    """CM-8: an update that names the version it read must 409 when the
+    row has moved since. Absent expected_version = back-compat (no check)."""
+    if expected_version is None:
+        return
+    if (obj.version or 0) != expected_version:
+        raise HTTPException(
+            409, f"{label} has changed since you loaded it (version {obj.version}) — "
+                 f"reload and try again")
+
+
+def _stock_add(db, item: InventoryItem, qty: Decimal) -> None:
+    """CC-1 server-side increment: the database, not the Python read, is
+    the arbiter of the new quantity, so two concurrent receives cannot
+    lose one side's stock even where FOR UPDATE is a no-op (SQLite).
+    Mirrors the result onto the in-memory row (and bumps its version)
+    so later code in this transaction sees the new balance."""
+    qty = Decimal(str(qty))
+    db.query(InventoryItem).filter(InventoryItem.id == item.id).update(
+        {InventoryItem.current_stock: InventoryItem.current_stock + qty},
+        synchronize_session=False)
+    item.current_stock = Decimal(str(item.current_stock or 0)) + qty
+    item.version = (item.version or 0) + 1
+
+
+def _stock_sub(db, item: InventoryItem, qty: Decimal) -> bool:
+    """CC-1 conditional decrement: the UPDATE only fires while the
+    database balance still covers `qty`, so the database (not a stale
+    Python read) decides whether the stock is there. Returns False
+    when the balance no longer covers it — the caller raises 409."""
+    qty = Decimal(str(qty))
+    rows = db.query(InventoryItem).filter(
+        InventoryItem.id == item.id,
+        InventoryItem.current_stock >= qty).update(
+        {InventoryItem.current_stock: InventoryItem.current_stock - qty},
+        synchronize_session=False)
+    if rows == 0:
+        return False
+    item.current_stock = Decimal(str(item.current_stock or 0)) - qty
+    item.version = (item.version or 0) + 1
+    return True
+
+
+def _commit_or_409(db, what: str) -> None:
+    """CC-1: a CHECK violation (e.g. a batch quantity driven below zero)
+    is a retryable 409, not an unhandled 500. Other integrity errors
+    are re-raised unchanged."""
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        orig = str(getattr(exc, "orig", exc))
+        if "ck_" in orig or "check constraint" in orig.lower():
+            raise HTTPException(
+                409, f"{what} would violate a stock constraint — please retry")
+        raise
 
 
 # ---------------------------------------------------------------- helpers
@@ -164,6 +299,19 @@ def _mark_line_serials_sold(db: Session, bu_id: int, lines, invoice_id=None, pos
                 raise HTTPException(400, f"Serial {sn} is not registered for this item")
             if row.status != "in_stock":
                 raise HTTPException(400, f"Serial {sn} is not in stock (status: {row.status})")
+            # CM-9 conditional claim: the UPDATE only fires while the
+            # serial is still in stock, so two concurrent sends / POS
+            # sales listing the same serial cannot both mark it sold —
+            # the loser gets a 409 instead of a silently double-sold unit.
+            # (The plain read above is only the friendly error path; the
+            # claim is the arbiter, on both dialects.)
+            claimed = db.query(ItemSerial).filter(
+                ItemSerial.id == row.id, ItemSerial.status == "in_stock",
+            ).update({"status": "sold", "sales_invoice_id": invoice_id,
+                      "pos_sale_id": pos_sale_id, "sold_at": utcnow()},
+                     synchronize_session=False)
+            if claimed == 0:
+                raise HTTPException(409, f"Serial {sn} was already sold")
             row.status = "sold"
             row.sales_invoice_id = invoice_id
             row.pos_sale_id = pos_sale_id
@@ -180,7 +328,7 @@ def restock_batches(db: Session, item: InventoryItem, qty: Decimal, batch_no: st
     from src.models import StockBatch
     batch = (db.query(StockBatch).filter(StockBatch.item_id == item.id)
              .order_by(StockBatch.expiry_date.is_(None), StockBatch.expiry_date,
-                       StockBatch.id).first())
+                       StockBatch.id).with_for_update().first())
     if batch:
         batch.quantity = Decimal(str(batch.quantity or 0)) + qty
     else:
@@ -410,6 +558,7 @@ def serialize_inventory_item(item: InventoryItem) -> dict:
         "brand": getattr(item, "brand", None),
         "principal_id": getattr(item, "principal_id", None),
         "requires_expiry": bool(getattr(item, "requires_expiry", False)),
+        "version": getattr(item, "version", 0) or 0,
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,
     }
 
@@ -458,11 +607,24 @@ class MovementIn(BaseModel):
     # ERP Phase 3: for "out" movements that are sales, post COGS to the
     # journal at the item's moving-average cost (Dr 5100 / Cr 1140).
     post_cogs: bool = False
+    # CM-8: an adjustment is a DELTA, not an absolute value — a client
+    # working from a minutes-old stock figure must not overwrite every
+    # sale/receive/return that landed in between. When `delta` is given
+    # it is applied on top of the current (locked) balance instead of
+    # `quantity`. `expected_stock` is the alternative guard: the
+    # absolute set only applies when the balance still equals it (409
+    # otherwise). Both are optional; the plain absolute `quantity`
+    # behaviour is kept for back-compat when neither is given.
+    delta: Optional[float] = None
+    expected_stock: Optional[float] = None
 
 
 @router.post("/inventory/{item_id}/movements")
 def record_movement(item_id: int, payload: MovementIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    item = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
+    # CC-1: the item row is locked for the whole movement, so a
+    # concurrent sale/receive/movement on the same item serialises on
+    # Postgres; the conditional decrement below is the arbiter on SQLite.
+    item = db.query(InventoryItem).filter(InventoryItem.id == item_id).with_for_update().first()
     if not item:
         raise HTTPException(404, "Inventory item not found")
     bu_scope(user, item.business_unit_id)
@@ -474,23 +636,39 @@ def record_movement(item_id: int, payload: MovementIn, user: User = Depends(get_
     if payload.movement_type == "out" and qty > Decimal(str(item.current_stock or 0)):
         raise HTTPException(400, f"Cannot move out {qty:g}: only {float(item.current_stock or 0):g} in stock")
     if payload.movement_type == "adjustment":
-        if qty < 0:
+        if payload.delta is None and payload.expected_stock is None and qty < 0:
+            raise HTTPException(400, "adjustment cannot set stock below 0")
+        if payload.delta is not None and Decimal(str(item.current_stock or 0)) + Decimal(str(payload.delta)) < 0:
             raise HTTPException(400, "adjustment cannot set stock below 0")
         if not (payload.reason or "").strip():
             raise HTTPException(400, "adjustment needs a reason")
+        if payload.expected_stock is not None and Decimal(str(item.current_stock or 0)) != Decimal(str(payload.expected_stock)):
+            raise HTTPException(
+                409, f"Stock for {item.name} has changed since you loaded it "
+                     f"(now {float(item.current_stock or 0):g}, expected {payload.expected_stock:g}) — reload and try again")
     if payload.movement_type == "in":
-        item.current_stock = (item.current_stock or 0) + qty
+        _stock_add(db, item, qty)
     elif payload.movement_type == "out":
-        item.current_stock = (item.current_stock or 0) - qty
+        if not _stock_sub(db, item, qty):
+            raise HTTPException(409, f"Stock for {item.name} changed while moving out — please retry")
         # FEFO errors propagate: a batch shortfall / expired-only stock is a
         # real inconsistency, not something to swallow (M-C2).
         from src.routers.modules import consume_batches_fefo
         consume_batches_fefo(db, item, qty)
     elif payload.movement_type == "adjustment":
-        item.current_stock = qty
+        if payload.delta is not None:
+            delta = Decimal(str(payload.delta))
+            if delta >= 0:
+                _stock_add(db, item, delta)
+            elif not _stock_sub(db, item, -delta):
+                raise HTTPException(409, f"Stock for {item.name} changed while adjusting — please retry")
+        else:
+            item.current_stock = qty
+            item.version = (item.version or 0) + 1
     item.updated_at = utcnow()
     db.add(StockMovement(item_id=item.id, movement_type=payload.movement_type,
-                         quantity=qty, reason=payload.reason, recorded_by_id=user.id))
+                         quantity=qty if payload.movement_type != "adjustment" or payload.delta is None else Decimal(str(payload.delta)),
+                         reason=payload.reason, recorded_by_id=user.id))
     _maybe_notify_low_stock(db, item)
     db.flush()
     journal_posted = None
@@ -518,7 +696,7 @@ def record_movement(item_id: int, payload: MovementIn, user: User = Depends(get_
             db.rollback()
             raise server_error("COGS journal could not be posted", exc, logger,
                                context=f"item {item.id}")
-    db.commit()
+    _commit_or_409(db, f"Stock movement for item {item_id}")
     db.refresh(item)
     out = serialize_inventory_item(item)
     out["journal_posted"] = journal_posted
@@ -533,18 +711,28 @@ class TransferIn(BaseModel):
 
 @router.post("/inventory/{item_id}/transfer")
 def transfer_stock(item_id: int, payload: TransferIn, user: User = Depends(get_current_user),
-                   db: Session = Depends(get_db)):
+                   db: Session = Depends(get_db),
+                   idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     """Move stock to another BU, posting the same intercompany journals as
     the formal StockTransfer flow (source Dr 1180 / Cr 1140, destination
     Dr 1140 / Cr 2180) at moving-average cost. The destination item is
     matched by SKU when the source item has one — never by name alone when
-    a SKU exists — and batches move with the stock."""
+    a SKU exists — and batches move with the stock.
+
+    SM-9 fail-hard: the journals are posted in the SAME transaction as
+    the stock move (before the single commit), like receive_po — a
+    journal failure rolls the whole transfer back instead of leaving
+    stock moved with journal_posted=false and a 200."""
     from src.models import StockBatch
 
     src = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
     if not src:
         raise HTTPException(404, "Inventory item not found")
     bu_scope(user, src.business_unit_id)
+    endpoint = "POST /api/ops/inventory/{item_id}/transfer"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
     if payload.to_business_unit_id == src.business_unit_id:
         raise HTTPException(400, "Source and destination are the same BU")
     if not db.query(BusinessUnit).filter(BusinessUnit.id == payload.to_business_unit_id).first():
@@ -552,8 +740,6 @@ def transfer_stock(item_id: int, payload: TransferIn, user: User = Depends(get_c
     qty = Decimal(str(payload.quantity))
     if qty <= 0:
         raise HTTPException(400, "Quantity must be positive")
-    if (src.current_stock or 0) < qty:
-        raise HTTPException(400, "Not enough stock to transfer")
     if src.sku:
         dst = db.query(InventoryItem).filter(
             InventoryItem.business_unit_id == payload.to_business_unit_id,
@@ -562,6 +748,14 @@ def transfer_stock(item_id: int, payload: TransferIn, user: User = Depends(get_c
         dst = db.query(InventoryItem).filter(
             InventoryItem.business_unit_id == payload.to_business_unit_id,
             InventoryItem.name == src.name, InventoryItem.is_active == True).first()  # noqa: E712
+    # CC-1 + Cm-4: lock both item rows in canonical (id) order before
+    # touching either balance, so two transfers in opposite directions
+    # cannot deadlock and a concurrent sale cannot interleave.
+    lock_ids = sorted([src.id] + ([dst.id] if dst is not None else []))
+    for lock_id in lock_ids:
+        db.query(InventoryItem).filter(InventoryItem.id == lock_id).with_for_update().first()
+    if (src.current_stock or 0) < qty:
+        raise HTTPException(400, "Not enough stock to transfer")
     if not dst:
         dst = InventoryItem(business_unit_id=payload.to_business_unit_id, name=src.name,
                             sku=src.sku, category=src.category, unit=src.unit,
@@ -572,8 +766,9 @@ def transfer_stock(item_id: int, payload: TransferIn, user: User = Depends(get_c
     cost = Decimal(str(src.unit_cost or 0))
     total_cost = qty * cost
     has_batches = db.query(StockBatch).filter(StockBatch.item_id == src.id).first() is not None
-    src.current_stock = (src.current_stock or 0) - qty
-    dst.current_stock = (dst.current_stock or 0) + qty
+    if not _stock_sub(db, src, qty):
+        raise HTTPException(409, "Stock changed while transferring — please retry")
+    _stock_add(db, dst, qty)
     src.updated_at = dst.updated_at = utcnow()
     if has_batches:
         from src.routers.modules import consume_batches_fefo
@@ -583,10 +778,8 @@ def transfer_stock(item_id: int, payload: TransferIn, user: User = Depends(get_c
                          reason=f"Transfer to BU {payload.to_business_unit_id}", recorded_by_id=user.id))
     db.add(StockMovement(item_id=dst.id, movement_type="in", quantity=qty,
                          reason=f"Transfer from BU {src.business_unit_id}", recorded_by_id=user.id))
-    db.commit()
     journal_posted = None
     if total_cost > 0:
-        journal_posted = True
         try:
             from src.routers.accounting import (
                 _ensure_intercompany_accounts, account_by_code, create_entry,
@@ -611,17 +804,19 @@ def transfer_stock(item_id: int, payload: TransferIn, user: User = Depends(get_c
                     desc = f"Stock transfer from BU {src.business_unit_id} — {src.name}"
                 create_entry(db, bu_id, today_local(), desc, "stock_transfer",
                              user.id, spec, source_id=src.id, post=True)
-            db.commit()
+            journal_posted = True
         except Exception as exc:
             db.rollback()
-            journal_posted = False
-            logger.warning("Transfer journal failed for item %s (BU %s -> BU %s): %s",
-                           src.id, src.business_unit_id, payload.to_business_unit_id, exc)
+            raise server_error("Transfer journal could not be posted; transfer rolled back",
+                               exc, logger, context=f"item {item_id}")
+    _commit_or_409(db, f"Stock transfer for item {item_id}")
     db.refresh(dst)
     _log_audit(db, user, "TRANSFER_STOCK", f"item_id={item_id}")
-    return {"ok": True, "destination_item": serialize_inventory_item(dst),
-            "source_stock": float(src.current_stock),
-            "journal_posted": journal_posted}
+    out = {"ok": True, "destination_item": serialize_inventory_item(dst),
+           "source_stock": float(src.current_stock),
+           "journal_posted": journal_posted}
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
+    return out
 
 
 def _maybe_notify_low_stock(db: Session, item: InventoryItem) -> None:
@@ -712,6 +907,7 @@ def serialize_expense(db: Session, e: ExpenseRequest) -> dict:
         "review_notes": e.review_notes,
         "reviewed_at": e.reviewed_at.isoformat() if e.reviewed_at else None,
         "created_at": e.created_at.isoformat() if e.created_at else None,
+        "version": getattr(e, "version", 0) or 0,
     }
 
 
@@ -778,13 +974,21 @@ def submit_expense(payload: ExpenseIn, user: User = Depends(get_current_user), d
 class ExpenseReviewIn(BaseModel):
     decision: str  # approved/rejected
     notes: Optional[str] = None
+    # CM-8: optional optimistic-lock version the reviewer read.
+    expected_version: Optional[int] = None
 
 
 @router.post("/expenses/{expense_id}/review")
-def review_expense(expense_id: int, payload: ExpenseReviewIn, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def review_expense(expense_id: int, payload: ExpenseReviewIn, user: User = Depends(require_admin), db: Session = Depends(get_db),
+                   idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     e = db.query(ExpenseRequest).filter(ExpenseRequest.id == expense_id).with_for_update().first()
     if not e:
         raise HTTPException(404, "Expense not found")
+    endpoint = "POST /api/ops/expenses/{expense_id}/review"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
+    _check_version(e, payload.expected_version, f"Expense {expense_id}")
     if e.status != "pending":
         raise HTTPException(400, "Expense already reviewed")
     if payload.decision not in ("approved", "rejected"):
@@ -797,6 +1001,7 @@ def review_expense(expense_id: int, payload: ExpenseReviewIn, user: User = Depen
         if payload.decision == "approved":
             e.approval_stage = "final"
             e.review_notes = payload.notes
+            e.version = (e.version or 0) + 1
             for chairman in db.query(User).filter(User.role == "Chairman", User.is_active == True).all():  # noqa: E712
                 db.add(Notification(
                     user_id=chairman.id, type="expense_pending",
@@ -805,41 +1010,51 @@ def review_expense(expense_id: int, payload: ExpenseReviewIn, user: User = Depen
                 ))
             db.commit()
             _log_audit(db, user, "REVIEW_EXPENSE", f"expense_id={expense_id}")
-            return serialize_expense(db, e)
+            out = serialize_expense(db, e)
+            _idempotency_store(db, user, endpoint, idempotency_key, out)
+            return out
         # rejected at stage 1 falls through to the normal rejection below
     e.status = payload.decision
     e.reviewed_by_id = user.id
     e.review_notes = payload.notes
     e.reviewed_at = utcnow()
+    e.version = (e.version or 0) + 1
     db.add(Notification(
         user_id=e.submitted_by_id, type="expense_decision",
         title=f"Expense {payload.decision}",
         message=f"{e.title} — Ks {float(e.amount):,.0f}", link="/ceo",
     ))
-    db.commit()
     if payload.decision == "approved":
-        journal_posted = None
-        journal_error = None
+        # SM-9 fail-hard (was flag-only): the approval and its journal
+        # post in the SAME transaction — auto_post_expense commits, so a
+        # failure there rolls the approval back too, and the error is
+        # routed through server_error() (SM-13) instead of leaking the
+        # raw exception text to the approver as journal_error.
         try:
             from src.models import JournalEntry as _JE
             from src.routers.accounting import auto_post_expense
+            db.flush()
             auto_post_expense(db, e, user.id)
-            journal_posted = db.query(_JE).filter(
+            posted = db.query(_JE).filter(
                 _JE.source == "expense", _JE.source_id == e.id,
                 _JE.status == "posted").first() is not None
+            if not posted:
+                raise RuntimeError(
+                    "Expense journal was not posted (no posting rule or chart of accounts for this BU)")
         except Exception as exc:
             db.rollback()
-            journal_posted = False
-            journal_error = str(exc)
-            logger.warning("Expense %s auto-post failed: %s", e.id, exc)
+            raise server_error("Expense journal could not be posted; approval rolled back",
+                               exc, logger, context=f"expense {expense_id}")
         out = serialize_expense(db, e)
-        out["journal_posted"] = journal_posted
-        if journal_error:
-            out["journal_error"] = journal_error
+        out["journal_posted"] = True
         _log_audit(db, user, "REVIEW_EXPENSE", f"expense_id={expense_id}")
+        _idempotency_store(db, user, endpoint, idempotency_key, out)
         return out
+    db.commit()
     _log_audit(db, user, "REVIEW_EXPENSE", f"expense_id={expense_id}")
-    return serialize_expense(db, e)
+    out = serialize_expense(db, e)
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
+    return out
 
 
 @router.get("/uploads/view")
@@ -862,23 +1077,30 @@ def view_upload(key: str = Query(...), user: User = Depends(get_current_user),
         raise HTTPException(400, "Invalid attachment key")
     owner_bu_id = None
     is_profile_photo = key.startswith("profile-photos/")
+    # Sm-1: the key is matched with LIKE, so `_`/`%` in it must be
+    # escaped or a crafted key could match a different record's URL
+    # substring (and .first() with no order_by made the pick arbitrary).
+    like_key = _escape_like(key)
     if is_profile_photo:
-        profile = db.query(CeoProfile).filter(CeoProfile.profile_pic_url.like(f"%{key}%")).first()
+        profile = db.query(CeoProfile).filter(
+            CeoProfile.profile_pic_url.like(f"%{like_key}%", escape="\\")).first()
         if profile is None:
             raise HTTPException(404, "Attachment not found")
         if user.role not in ("Chairman", "HO") and profile.user_id != user.id:
             raise HTTPException(403, "Not your profile photo")
     else:
-        expense = db.query(ExpenseRequest).filter(ExpenseRequest.receipt_url.like(f"%{key}%")).first()
+        expense = db.query(ExpenseRequest).filter(
+            ExpenseRequest.receipt_url.like(f"%{like_key}%", escape="\\")).first()
         if expense is not None:
             owner_bu_id = expense.business_unit_id
         else:
-            activity = db.query(ActivityLog).filter(ActivityLog.document_url.like(f"%{key}%")).first()
+            activity = db.query(ActivityLog).filter(
+                ActivityLog.document_url.like(f"%{like_key}%", escape="\\")).first()
             if activity is not None:
                 owner_bu_id = activity.business_unit_id
             else:
                 ho_activity = db.query(HeadOfficeActivityLog).filter(
-                    HeadOfficeActivityLog.document_url.like(f"%{key}%")).first()
+                    HeadOfficeActivityLog.document_url.like(f"%{like_key}%", escape="\\")).first()
                 if ho_activity is not None:
                     if user.role not in ("Chairman", "HO"):
                         raise HTTPException(403, "Only Chairman/HO can view head-office attachments")
@@ -887,12 +1109,17 @@ def view_upload(key: str = Query(...), user: User = Depends(get_current_user),
         if owner_bu_id is not None and user.role in ("CEO", "Accountant") and user.business_unit_id:
             if owner_bu_id != user.business_unit_id:
                 raise HTTPException(403, "Attachment belongs to another business unit")
+    # Sm-9: the 302 target is a 15-minute bearer URL — Cache-Control:
+    # no-store so browsers never cache the resolved presigned URL (a
+    # cached copy would keep working as a bearer link past its purpose,
+    # or be shared from history).
+    no_store = {"Cache-Control": "no-store"}
     if not r2_is_configured():
-        return RedirectResponse(url=f"/uploads/{key}", status_code=302)
+        return RedirectResponse(url=f"/uploads/{key}", status_code=302, headers=no_store)
     url = presigned_url_for_key(key)
     if not url:
         raise HTTPException(503, "File storage is not available")
-    return RedirectResponse(url=url, status_code=302)
+    return RedirectResponse(url=url, status_code=302, headers=no_store)
 
 
 @router.post("/expenses/{expense_id}/receipt")
@@ -902,7 +1129,10 @@ async def upload_expense_receipt(expense_id: int, file: UploadFile = File(...),
     from src.r2_storage import upload_attachment_or_503
     from src.upload_validation import content_matches_extension
 
-    e = db.query(ExpenseRequest).filter(ExpenseRequest.id == expense_id).first()
+    # SM-7: take the row lock BEFORE uploading, so two concurrent
+    # uploads for the same expense serialise instead of last-writer-
+    # wins (the loser's file would otherwise stay orphaned in R2).
+    e = db.query(ExpenseRequest).filter(ExpenseRequest.id == expense_id).with_for_update().first()
     if not e:
         raise HTTPException(404, "Expense not found")
     if user.role == "CEO" and e.submitted_by_id != user.id:
@@ -919,7 +1149,9 @@ async def upload_expense_receipt(expense_id: int, file: UploadFile = File(...),
         raise HTTPException(400, "File content does not match its extension")
     bio.seek(0)
     # D-4: a failed receipt upload fails the request (503) — never save the
-    # expense as if the receipt were attached.
+    # expense as if the receipt were attached. The old receipt_url is
+    # only overwritten AFTER the new upload succeeds, so a failed upload
+    # keeps the previous receipt instead of orphaning it.
     url = upload_attachment_or_503(bio, file.filename, folder="expense-receipts")
     e.receipt_url = url
     db.commit()
