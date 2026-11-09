@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from src.accounting_templates import (
     DEFAULT_POSTING_RULES, EXPENSE_CATEGORY_ACCOUNTS, TEMPLATE_LABELS,
@@ -37,6 +37,11 @@ require_accounting = require_roles("Chairman", "HO", "Accountant")
 require_admin = require_roles("Chairman", "HO")
 
 ZERO = Decimal("0")
+
+# PM-2/PM-4: a journal export is bounded — one BU can hold far more
+# entries than a workbook should carry. Over the cap the caller narrows
+# the period instead of the server building an unbounded document.
+JOURNAL_EXPORT_MAX_ENTRIES = 5000
 
 def _log_audit(db, user, action, details=""):
     """Local wrapper around src.utils.log_audit (R-3 audit trail).
@@ -1619,12 +1624,23 @@ def _export_rows(report: str, db: Session, user: User, business_unit_id: Optiona
         rows.append(["", "GROUP NET PROFIT", d["net_profit"]])
         return "Consolidated Profit & Loss", ["Account", "", "Amount"], rows
     if report == "journal":
+        # PM-2: filter the period in SQL (was: load every posted entry
+        # for the BU, all periods, then filter in Python), eager-load
+        # lines + accounts (was: one lazy query per entry and per line),
+        # and cap the export (was: unbounded).
         q = db.query(JournalEntry).filter(
             JournalEntry.business_unit_id == business_unit_id,
             JournalEntry.status == "posted")
-        entries = q.order_by(JournalEntry.entry_date, JournalEntry.id).all()
         if period:
-            entries = [e for e in entries if period_of(e.entry_date) == period]
+            q = q.filter(JournalEntry.entry_date >= _period_start(period),
+                         JournalEntry.entry_date <= _period_end(period))
+        if q.count() > JOURNAL_EXPORT_MAX_ENTRIES:
+            raise HTTPException(
+                400, f"Journal export exceeds {JOURNAL_EXPORT_MAX_ENTRIES} entries — "
+                     "narrow the period and export again")
+        entries = q.options(
+            selectinload(JournalEntry.lines).selectinload(JournalLine.account)
+        ).order_by(JournalEntry.entry_date, JournalEntry.id).all()
         rows = []
         for e in entries:
             for l in e.lines:
@@ -2143,10 +2159,17 @@ def cash_flow_report(business_unit_id: int, period: str,
     # once per journal line (N+1).
     accounts = {a.id: a for a in db.query(Account).filter(
         Account.business_unit_id == business_unit_id).all()}
+    # PM-3: one query for every line of every entry in the period (was:
+    # one query per entry inside the loop below).
+    lines_by_entry: dict[int, list] = {}
+    entry_ids = [e.id for e in entries]
+    if entry_ids:
+        for l in db.query(JournalLine).filter(JournalLine.entry_id.in_(entry_ids)).all():
+            lines_by_entry.setdefault(l.entry_id, []).append(l)
     sections = {"operating": ZERO, "investing": ZERO, "financing": ZERO}
     detail = []
     for e in entries:
-        lines = db.query(JournalLine).filter(JournalLine.entry_id == e.id).all()
+        lines = lines_by_entry.get(e.id, [])
         delta = sum((Decimal(str(l.debit or 0)) - Decimal(str(l.credit or 0)))
                     for l in lines if l.account_id in cash_ids)
         if delta == 0:

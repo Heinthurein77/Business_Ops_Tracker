@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Uplo
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from src.auth import get_current_user, require_roles
 from src.database import get_db
@@ -1590,14 +1590,23 @@ def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
     def scoped(q, model):
         return q.filter(model.business_unit_id == bu_id).all() if bu_id is not None else q.all()
 
+    def user_names(ids):
+        """PM-3: one IN query for many user names (was: one query per row)."""
+        ids = [i for i in set(ids) if i]
+        if not ids:
+            return {}
+        return {u.id: (u.full_name or "") for u in
+                db.query(User).filter(User.id.in_(ids)).all()}
+
     if tab == "actions":
         q = db.query(ActionItem).order_by(ActionItem.created_at.desc())
         rows = scoped(q, ActionItem)
+        names = user_names([i.assigned_to_id for i in rows])
         return build("Action Items",
                      ["Title", "BU", "Status", "Due Date", "Assigned To", "Created"],
                      [[i.title, bu_names.get(i.business_unit_id, ""), i.status,
                        i.due_date.isoformat() if i.due_date else "",
-                       (db.query(User).get(i.assigned_to_id).full_name if i.assigned_to_id else "") or "",
+                       names.get(i.assigned_to_id, "") if i.assigned_to_id else "",
                        i.created_at.strftime("%Y-%m-%d %H:%M") if i.created_at else ""] for i in rows])
 
     if tab == "inventory":
@@ -1612,11 +1621,12 @@ def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
     if tab == "expenses":
         q = db.query(ExpenseRequest).order_by(ExpenseRequest.created_at.desc())
         rows = scoped(q, ExpenseRequest)
+        names = user_names([e.submitted_by_id for e in rows])
         return build("Expenses",
                      ["Title", "Amount (Ks)", "Category", "BU", "Status", "Submitted By", "Submitted"],
                      [[e.title, float(e.amount or 0), e.category or "", bu_names.get(e.business_unit_id, ""),
                        e.status,
-                       (db.query(User).get(e.submitted_by_id).full_name if e.submitted_by_id else "") or "",
+                       names.get(e.submitted_by_id, "") if e.submitted_by_id else "",
                        e.created_at.strftime("%Y-%m-%d %H:%M") if e.created_at else ""] for e in rows])
 
     if tab == "documents":
@@ -1771,8 +1781,13 @@ def list_pos(business_unit_id: Optional[int] = None, status: Optional[str] = Non
 
 
 @router.post("/purchase-orders")
-def create_po(payload: POIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_po(payload: POIn, user: User = Depends(get_current_user), db: Session = Depends(get_db),
+              idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     bu_scope(user, payload.business_unit_id)
+    endpoint = "POST /api/ops/purchase-orders"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
     supplier = db.query(Supplier).filter(Supplier.id == payload.supplier_id, Supplier.is_active == True).first()  # noqa: E712
     if not supplier:
         raise HTTPException(404, "Supplier not found")
@@ -1824,7 +1839,9 @@ def create_po(payload: POIn, user: User = Depends(get_current_user), db: Session
     db.commit()
     db.refresh(po)
     _log_audit(db, user, "CREATE_PO", f"id={po.id}")
-    return serialize_po(db, po)
+    out = serialize_po(db, po)
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
+    return out
 
 
 def _po_or_404(db: Session, po_id: int) -> PurchaseOrder:
@@ -1982,37 +1999,46 @@ def update_po(po_id: int, payload: POUpdate, user: User = Depends(get_current_us
 
 
 @router.post("/purchase-orders/{po_id}/receive")
-def receive_po(po_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def receive_po(po_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db),
+               idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     """Receive goods: stock-in each line at moving-average cost, post AP journal."""
     po = _po_or_404(db, po_id)
     bu_scope(user, po.business_unit_id)
-    if po.status not in ("draft", "ordered"):
-        raise HTTPException(400, f"Cannot receive a PO in status {po.status}")
-    if getattr(po, "approval_stage", None) in ("first", "final", "rejected"):
+    endpoint = "POST /api/ops/purchase-orders/{po_id}/receive"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
+    # The approval gate only applies while the PO is still receivable;
+    # a PO that already moved goes to the claim below and gets the 409.
+    if po.status in ("draft", "ordered") and getattr(po, "approval_stage", None) in ("first", "final", "rejected"):
         raise HTTPException(400, "This PO is still awaiting approval and cannot be received")
-    # Atomic claim (T-1): two concurrent receives must not both stock-in
-    # and post. The conditional UPDATE serialises the writers (row lock on
-    # Postgres, writer lock on SQLite); the loser re-evaluates against the
-    # winner's committed state, sees status "received" and gets a 409
-    # instead of double-posting. The claim is in the same transaction as
-    # the stock-in and the journal, so a journal failure rolls it back.
+    # CM-3 contract: the conditional UPDATE claim is the arbiter on BOTH
+    # dialects, and the loser gets a 409. There is deliberately NO status
+    # pre-check raising 400 before the claim: on Postgres the loser
+    # blocks on the FOR UPDATE load in _po_or_404, then re-reads the
+    # winner's committed status — a 400 there would be a misleading
+    # "cannot receive" for a routine double-click and the promised 409
+    # would never be produced. Status is only re-read AFTER the claim,
+    # to phrase the 409 message.
     claimed = db.query(PurchaseOrder).filter(
         PurchaseOrder.id == po_id,
         PurchaseOrder.status.in_(("draft", "ordered")),
-    ).update({"status": "received"}, synchronize_session=False)
+    ).update({"status": "received", "version": PurchaseOrder.version + 1},
+             synchronize_session=False)
     if claimed == 0:
-        raise HTTPException(409, f"PO {po.po_no} has already been received or moved")
+        db.refresh(po)
+        raise HTTPException(409, f"PO {po.po_no} has already been received or moved (status: {po.status})")
     fx = Decimal(str(getattr(po, "exchange_rate", 1) or 1))
     for ln in po.lines:
         item = None
         if ln.inventory_item_id:
-            item = db.query(InventoryItem).filter(InventoryItem.id == ln.inventory_item_id).first()
+            item = db.query(InventoryItem).filter(InventoryItem.id == ln.inventory_item_id).with_for_update().first()
             if item is not None and item.business_unit_id != po.business_unit_id:
                 raise HTTPException(400, f"PO line item {ln.inventory_item_id} does not belong to this BU")
         if item is None:
             item = db.query(InventoryItem).filter(
                 InventoryItem.business_unit_id == po.business_unit_id,
-                InventoryItem.name == ln.item_name, InventoryItem.is_active == True).first()  # noqa: E712
+                InventoryItem.name == ln.item_name, InventoryItem.is_active == True).with_for_update().first()  # noqa: E712
         if item is None:
             item = InventoryItem(business_unit_id=po.business_unit_id, name=ln.item_name,
                                  current_stock=0, unit_cost=ln.unit_cost * fx)
@@ -2026,49 +2052,60 @@ def receive_po(po_id: int, user: User = Depends(get_current_user), db: Session =
         new_qty = old_qty + in_qty
         # Moving (weighted) average cost — the standard valuation formula.
         item.unit_cost = ((old_qty * old_avg + in_qty * in_cost) / new_qty) if new_qty > 0 else in_cost
-        item.current_stock = new_qty
+        _stock_add(db, item, in_qty)
         item.updated_at = utcnow()
         db.add(StockMovement(item_id=item.id, movement_type="in", quantity=in_qty,
                              reason=f"PO {po.po_no} received", recorded_by_id=user.id))
         _maybe_notify_low_stock(db, item)
     po.status = "received"
+    po.version = (po.version or 0) + 1
     po.received_at = utcnow()
     db.flush()
     if not _post_po_journal(db, po, user.id, "receive"):
         db.rollback()
         raise HTTPException(500, f"PO {po.po_no} receive journal could not be posted; receipt rolled back")
+    _assert_token_current(db, user)
     db.commit()
     db.refresh(po)
     out = serialize_po(db, po)
     out["journal_posted"] = True
     _log_audit(db, user, "RECEIVE_PO", f"po_id={po_id}")
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
     return out
 
 
 @router.post("/purchase-orders/{po_id}/pay")
-def pay_po(po_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def pay_po(po_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db),
+           idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     po = _po_or_404(db, po_id)
     bu_scope(user, po.business_unit_id)
-    if po.status != "received":
-        raise HTTPException(400, "Only received POs can be paid")
-    # Atomic claim (T-1): same pattern as receive_po — a concurrent second
-    # pay must get a 409, not a second payment journal.
+    endpoint = "POST /api/ops/purchase-orders/{po_id}/pay"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
+    # CM-3 contract (see receive_po): the claim is the arbiter, the
+    # loser gets a 409, and no 400 status pre-check runs before it.
     claimed = db.query(PurchaseOrder).filter(
         PurchaseOrder.id == po_id, PurchaseOrder.status == "received",
-    ).update({"status": "paid"}, synchronize_session=False)
+    ).update({"status": "paid", "version": PurchaseOrder.version + 1},
+             synchronize_session=False)
     if claimed == 0:
-        raise HTTPException(409, f"PO {po.po_no} has already been paid or moved")
+        db.refresh(po)
+        raise HTTPException(409, f"PO {po.po_no} has already been paid or moved (status: {po.status})")
     po.status = "paid"
+    po.version = (po.version or 0) + 1
     po.paid_at = utcnow()
     db.flush()
     if not _post_po_journal(db, po, user.id, "pay"):
         db.rollback()
         raise HTTPException(500, f"PO {po.po_no} payment journal could not be posted; payment rolled back")
+    _assert_token_current(db, user)
     db.commit()
     db.refresh(po)
     out = serialize_po(db, po)
     out["journal_posted"] = True
     _log_audit(db, user, "PAY_PO", f"po_id={po_id}")
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
     return out
 
 
@@ -2303,8 +2340,13 @@ def list_invoices(business_unit_id: Optional[int] = None, status: Optional[str] 
 
 
 @router.post("/invoices")
-def create_invoice(payload: InvoiceIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_invoice(payload: InvoiceIn, user: User = Depends(get_current_user), db: Session = Depends(get_db),
+                   idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     bu_scope(user, payload.business_unit_id)
+    endpoint = "POST /api/ops/invoices"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
     cust = db.query(Customer).filter(Customer.id == payload.customer_id, Customer.is_active == True).first()  # noqa: E712
     if not cust or cust.business_unit_id != payload.business_unit_id:
         raise HTTPException(404, "Customer not found in this BU")
@@ -2338,7 +2380,9 @@ def create_invoice(payload: InvoiceIn, user: User = Depends(get_current_user), d
     db.commit()
     db.refresh(inv)
     _log_audit(db, user, "CREATE_INVOICE", f"id={inv.id}")
-    return serialize_invoice(db, inv)
+    out = serialize_invoice(db, inv)
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
+    return out
 
 
 def _invoice_or_404(db: Session, invoice_id: int) -> SalesInvoice:
@@ -2398,15 +2442,27 @@ def _post_invoice_journal(db: Session, inv: SalesInvoice, user_id: int, kind: st
 
 
 @router.post("/invoices/{invoice_id}/send")
-def send_invoice(invoice_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def send_invoice(invoice_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db),
+                 idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     inv = _invoice_or_404(db, invoice_id)
     bu_scope(user, inv.business_unit_id)
-    if inv.status != "draft":
-        raise HTTPException(400, f"Cannot send an invoice in status {inv.status}")
+    endpoint = "POST /api/ops/invoices/{invoice_id}/send"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
+    # CM-2: lock the Customer row for the whole send, so two concurrent
+    # sends for the SAME customer (different invoices) serialise — the
+    # credit-limit check below reads a stable outstanding figure, and a
+    # concurrent record_payment on another invoice of this customer
+    # cannot move it mid-check. Held until commit.
+    cust = None
+    if inv.customer_id:
+        cust = db.query(Customer).filter(Customer.id == inv.customer_id).with_for_update().first()
     # Credit-limit enforcement: outstanding (other sent invoices of this
     # customer, converted to MMK) + this invoice must stay within the limit.
-    cust = inv.customer
-    if cust is not None and getattr(cust, "credit_limit", None):
+    # Only evaluated while the invoice is still a draft — an already-sent
+    # invoice goes straight to the claim below and gets the 409.
+    if inv.status == "draft" and cust is not None and getattr(cust, "credit_limit", None):
         limit = Decimal(str(cust.credit_limit))
         outstanding = Decimal("0")
         for other in db.query(SalesInvoice).filter(
@@ -2417,17 +2473,19 @@ def send_invoice(invoice_id: int, user: User = Depends(get_current_user), db: Se
         if outstanding + this_total > limit:
             raise HTTPException(400, f"Credit limit exceeded for {cust.name}: limit Ks {float(limit):,.0f}, "
                                      f"outstanding Ks {float(outstanding):,.0f}, this invoice Ks {float(this_total):,.0f}")
-    # Atomic claim (T-1): same pattern as receive_po — a concurrent second
-    # send must get a 409, not a second stock decrement + send journal.
+    # CM-3 contract (see receive_po): the claim is the arbiter, the
+    # loser gets a 409, and no 400 status pre-check runs before it.
     # Placed AFTER the credit-limit check on purpose: the check counts
     # sent invoices as outstanding, so the claim (which flips this invoice
     # to "sent") must not run before it, or the invoice would count its
     # own balance against its own limit. This is the first mutation point.
     claimed = db.query(SalesInvoice).filter(
         SalesInvoice.id == invoice_id, SalesInvoice.status == "draft",
-    ).update({"status": "sent"}, synchronize_session=False)
+    ).update({"status": "sent", "version": SalesInvoice.version + 1},
+             synchronize_session=False)
     if claimed == 0:
-        raise HTTPException(409, f"Invoice {inv.invoice_no} has already been sent or moved")
+        db.refresh(inv)
+        raise HTTPException(409, f"Invoice {inv.invoice_no} has already been sent or moved (status: {inv.status})")
     # Serial-tracked lines: validate + mark the units sold with this invoice.
     _mark_line_serials_sold(db, inv.business_unit_id, inv.lines, invoice_id=inv.id)
     # Invoice lines sell physical goods (Q2): validate stock per item
@@ -2441,19 +2499,24 @@ def send_invoice(invoice_id: int, user: User = Depends(get_current_user), db: Se
         if ln.inventory_item_id:
             need[ln.inventory_item_id] += Decimal(str(ln.quantity))
     cogs_total = Decimal("0")
-    for item_id, qty in need.items():
+    # Cm-4: lock item rows in canonical (sorted id) order, never in
+    # invoice line order — two sends sharing items in opposite line
+    # order would otherwise deadlock on Postgres.
+    for item_id, qty in sorted(need.items()):
         item = db.query(InventoryItem).filter(InventoryItem.id == item_id).with_for_update().first()
         if not item or item.business_unit_id != inv.business_unit_id:
             raise HTTPException(404, f"Inventory item {item_id} not found in this BU")
         if Decimal(str(item.current_stock or 0)) < qty:
             raise HTTPException(400, f"Not enough stock for {item.name}: {float(item.current_stock or 0):g} available, {qty:g} needed")
         cogs_total += qty * Decimal(str(item.unit_cost or 0))
-        item.current_stock = Decimal(str(item.current_stock or 0)) - qty
+        if not _stock_sub(db, item, qty):
+            raise HTTPException(409, f"Stock for {item.name} changed while sending — please retry")
         item.updated_at = utcnow()
         consume_batches_fefo(db, item, qty)
         db.add(StockMovement(item_id=item.id, movement_type="out", quantity=qty,
                              reason=f"Invoice {inv.invoice_no} sent", recorded_by_id=user.id))
     inv.status = "sent"
+    inv.version = (inv.version or 0) + 1
     inv.sent_at = utcnow()
     db.flush()
     if not _post_invoice_journal(db, inv, user.id, "send"):
@@ -2478,11 +2541,13 @@ def send_invoice(invoice_id: int, user: User = Depends(get_current_user), db: Se
             db.rollback()
             logger.warning("Invoice COGS journal failed for %s: %s", inv.invoice_no, exc)
             raise HTTPException(500, f"Invoice {inv.invoice_no} COGS journal could not be posted; invoice left as draft")
+    _assert_token_current(db, user)
     db.commit()
     db.refresh(inv)
     out = serialize_invoice(db, inv)
     out["journal_posted"] = True
     _log_audit(db, user, "SEND_INVOICE", f"invoice_id={invoice_id}")
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
     return out
 
 
@@ -2495,12 +2560,16 @@ class PaymentIn(BaseModel):
 
 
 @router.post("/invoices/{invoice_id}/payments")
-def record_payment(invoice_id: int, payload: PaymentIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def record_payment(invoice_id: int, payload: PaymentIn, user: User = Depends(get_current_user), db: Session = Depends(get_db),
+                   idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     inv = _invoice_or_404(db, invoice_id)
     bu_scope(user, inv.business_unit_id)
-    if inv.status not in ("sent", "partial"):
-        raise HTTPException(400, f"Cannot take payment on a {inv.status} invoice")
-    # Atomic claim (T-1): serialise concurrent payments on this invoice.
+    endpoint = "POST /api/ops/invoices/{invoice_id}/payments"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
+    # CM-3 contract (see receive_po): the claim is the arbiter, the
+    # loser gets a 409, and no 400 status pre-check runs before it.
     # The conditional UPDATE takes the writer lock; the loser re-evaluates
     # against the winner's committed state (paid -> 409), and the balance
     # below is re-read after the claim, so two full payments cannot both
@@ -2510,9 +2579,15 @@ def record_payment(invoice_id: int, payload: PaymentIn, user: User = Depends(get
     claimed = db.query(SalesInvoice).filter(
         SalesInvoice.id == invoice_id,
         SalesInvoice.status.in_(("sent", "partial")),
-    ).update({"status": "partial"}, synchronize_session=False)
+    ).update({"status": "partial", "version": SalesInvoice.version + 1},
+             synchronize_session=False)
     if claimed == 0:
-        raise HTTPException(409, f"Invoice {inv.invoice_no} has already been paid or moved")
+        db.refresh(inv)
+        raise HTTPException(409, f"Invoice {inv.invoice_no} has already been paid or moved (status: {inv.status})")
+    # CM-2: lock the Customer row too, so a send for another invoice of
+    # this customer cannot compute its outstanding figure mid-payment.
+    if inv.customer_id:
+        db.query(Customer).filter(Customer.id == inv.customer_id).with_for_update().first()
     # The payment amount is in the invoice's currency unless the caller
     # says otherwise — a mismatched currency is rejected rather than
     # applied 1:1 to the balance.
@@ -2532,10 +2607,12 @@ def record_payment(invoice_id: int, payload: PaymentIn, user: User = Depends(get
     db.flush()
     a2 = invoice_amounts(db, inv)
     inv.status = "paid" if a2["balance"] <= 0 else "partial"
+    inv.version = (inv.version or 0) + 1
     db.flush()
     if not _post_invoice_journal(db, inv, user.id, "payment", amt, payment_date=payload.payment_date):
         db.rollback()
         raise HTTPException(500, f"Payment journal for invoice {inv.invoice_no} could not be posted; payment rolled back")
+    _assert_token_current(db, user)
     db.commit()
     # P3-3: the installment allocation + unit reserved→sold marking used to
     # run inside a bare `except Exception: db.rollback()` with no log line,
@@ -2563,6 +2640,7 @@ def record_payment(invoice_id: int, payload: PaymentIn, user: User = Depends(get
     out["journal_posted"] = True
     out["installments_ok"] = installments_ok
     _log_audit(db, user, "RECORD_PAYMENT", f"invoice_id={invoice_id}")
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
     return out
 
 
@@ -2608,8 +2686,14 @@ def aging_report(business_unit_id: Optional[int] = None, user: User = Depends(ge
     q = db.query(SalesInvoice).filter(SalesInvoice.status.in_(("sent", "partial")))
     if business_unit_id:
         q = q.filter(SalesInvoice.business_unit_id == business_unit_id)
-    for inv in q.all():
-        a = invoice_amounts(db, inv)
+    # PM-3: one aggregate query per input (payments / returns / line
+    # totals) plus one eager load of customers + BUs — was one payments
+    # SUM, one returns query and two lazy loads per invoice.
+    invoices = q.options(selectinload(SalesInvoice.customer),
+                         selectinload(SalesInvoice.business_unit)).all()
+    amounts = invoice_amounts_batch(db, invoices)
+    for inv in invoices:
+        a = amounts[inv.id]
         fx = Decimal(str(getattr(inv, "exchange_rate", 1) or 1))
         balance_mmk = a["balance"] * fx
         if balance_mmk <= 0:
@@ -2626,12 +2710,12 @@ def aging_report(business_unit_id: Optional[int] = None, user: User = Depends(ge
     qp = db.query(PurchaseOrder).filter(PurchaseOrder.status == "received")
     if business_unit_id:
         qp = qp.filter(PurchaseOrder.business_unit_id == business_unit_id)
-    for po in qp.all():
+    pos = qp.options(selectinload(PurchaseOrder.supplier),
+                     selectinload(PurchaseOrder.business_unit)).all()
+    net_pos = po_net_totals_batch(db, pos)
+    for po in pos:
         fx = Decimal(str(getattr(po, "exchange_rate", 1) or 1))
-        ret = (db.query(func.coalesce(func.sum(PurchaseReturnLine.quantity * PurchaseReturnLine.unit_cost), 0))
-               .join(PurchaseReturn, PurchaseReturnLine.return_id == PurchaseReturn.id)
-               .filter(PurchaseReturn.po_id == po.id, PurchaseReturn.status == "posted").scalar())
-        total = (po_total(po) - Decimal(str(ret or 0))) * fx
+        total = net_pos[po.id] * fx
         if total <= 0:
             continue
         ref = po.received_at.date() if po.received_at else po.order_date
@@ -2856,10 +2940,22 @@ def create_payroll(payload: PayrollCreate, user: User = Depends(get_current_user
     run = PayrollRun(business_unit_id=payload.business_unit_id, period=payload.period,
                      status="draft", created_by_id=user.id)
     db.add(run)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        # CM-4: the existence check above is check-then-act — two
+        # concurrent creates for the same BU+period both pass it, and the
+        # loser used to hit uq_payroll_bu_period as an unhandled 500.
+        # 409 (retryable), not a 500.
+        db.rollback()
+        raise HTTPException(409, f"Payroll for {payload.period} already exists — please retry")
     for emp in employees:
         db.add(PayrollLine(run_id=run.id, employee_id=emp.id, base_salary=emp.base_salary))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, f"Payroll for {payload.period} already exists — please retry")
     db.refresh(run)
     _log_audit(db, user, "CREATE_PAYROLL", f"id={run.id}")
     return serialize_payroll(db, run)
@@ -2868,6 +2964,8 @@ def create_payroll(payload: PayrollCreate, user: User = Depends(get_current_user
 class PayrollLineUpdate(BaseModel):
     allowances: Optional[float] = Field(default=None, ge=0, le=10**13)
     deductions: Optional[float] = Field(default=None, ge=0, le=10**13)
+    # CM-8: optional optimistic-lock version of the RUN the editor read.
+    expected_version: Optional[int] = None
 
 
 @router.patch("/payroll-runs/{run_id}/lines/{line_id}")
@@ -2879,6 +2977,7 @@ def update_payroll_line(run_id: int, line_id: int, payload: PayrollLineUpdate,
     bu_scope(user, run.business_unit_id)
     if run.status != "draft":
         raise HTTPException(400, "Only draft runs can be edited")
+    _check_version(run, payload.expected_version, f"Payroll run {run.period}")
     line = db.query(PayrollLine).filter(PayrollLine.id == line_id, PayrollLine.run_id == run_id).first()
     if not line:
         raise HTTPException(404, "Payroll line not found")
@@ -2892,6 +2991,7 @@ def update_payroll_line(run_id: int, line_id: int, payload: PayrollLineUpdate,
         line.allowances = new_allow
     if payload.deductions is not None:
         line.deductions = new_ded
+    run.version = (run.version or 0) + 1
     db.commit()
     db.refresh(run)
     _log_audit(db, user, "UPDATE_PAYROLL_LINE", f"run_id={run_id}")
@@ -2900,12 +3000,22 @@ def update_payroll_line(run_id: int, line_id: int, payload: PayrollLineUpdate,
 
 @router.post("/payroll-runs/{run_id}/approve")
 def approve_payroll(run_id: int, user: User = Depends(require_roles("Chairman", "HO")), db: Session = Depends(get_db)):
-    run = db.query(PayrollRun).filter(PayrollRun.id == run_id).first()
+    run = db.query(PayrollRun).filter(PayrollRun.id == run_id).with_for_update().first()
     if not run:
         raise HTTPException(404, "Payroll run not found")
-    if run.status != "draft":
-        raise HTTPException(400, f"Run is {run.status}")
+    # CM-4 conditional claim: an approve racing update_payroll_line (which
+    # locks the run) must not approve numbers the approver never saw, and
+    # two concurrent approves must not both "succeed" — the loser gets a
+    # 409, not a silent second approval.
+    claimed = db.query(PayrollRun).filter(
+        PayrollRun.id == run_id, PayrollRun.status == "draft",
+    ).update({"status": "approved", "version": PayrollRun.version + 1},
+             synchronize_session=False)
+    if claimed == 0:
+        db.refresh(run)
+        raise HTTPException(409, f"Payroll run {run.period} has already been approved or moved (status: {run.status})")
     run.status = "approved"
+    run.version = (run.version or 0) + 1
     run.approved_by_id = user.id
     db.commit()
     db.refresh(run)
@@ -2914,18 +3024,49 @@ def approve_payroll(run_id: int, user: User = Depends(require_roles("Chairman", 
 
 
 @router.post("/payroll-runs/{run_id}/pay")
-def pay_payroll(run_id: int, user: User = Depends(require_roles("Chairman", "HO")), db: Session = Depends(get_db)):
+def pay_payroll(run_id: int, user: User = Depends(require_roles("Chairman", "HO")), db: Session = Depends(get_db),
+                idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     run = db.query(PayrollRun).filter(PayrollRun.id == run_id).with_for_update().first()
     if not run:
         raise HTTPException(404, "Payroll run not found")
+    endpoint = "POST /api/ops/payroll-runs/{run_id}/pay"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
     if run.status != "approved":
         raise HTTPException(400, "Payroll must be approved before paying")
+    # Conditional claim (CM-4 backstop): on SQLite the FOR UPDATE load
+    # above is a no-op, so two concurrent pays could both pass the check
+    # — the loser gets a 409 here instead of paying twice.
+    claimed = db.query(PayrollRun).filter(
+        PayrollRun.id == run_id, PayrollRun.status == "approved",
+    ).update({"status": "paid", "version": PayrollRun.version + 1},
+             synchronize_session=False)
+    if claimed == 0:
+        db.refresh(run)
+        raise HTTPException(409, f"Payroll run {run.period} has already been paid or moved (status: {run.status})")
+    run.version = (run.version or 0) + 1
     # ERP completion: staff-advance repayments are applied HERE, at pay
     # time — the safest hook. A run can only transition approved -> paid
     # once, so a deduction can never double-apply, and there is no un-pay
     # path that would need to restore balances. Each line collects
     # min(monthly_deduction, remaining) per open advance, capped so the
     # net pay never goes below zero.
+    # Cm-8: lock every open StaffAdvance row for the run's employees
+    # (ordered by advance_date, id) BEFORE computing deductions, and
+    # re-read remaining_amount from the locked rows — two payroll runs
+    # for the same employee paid concurrently (catch-up month-end) used
+    # to read the same remaining_amount and both deduct it.
+    emp_ids = [l.employee_id for l in run.lines]
+    locked_advances = (db.query(StaffAdvance)
+                       .filter(StaffAdvance.employee_id.in_(emp_ids),
+                               StaffAdvance.status == "approved",
+                               StaffAdvance.remaining_amount > 0)
+                       .order_by(StaffAdvance.advance_date, StaffAdvance.id)
+                       .with_for_update().all()) if emp_ids else []
+    advances_by_emp: dict[int, list] = {}
+    for _adv in locked_advances:
+        advances_by_emp.setdefault(_adv.employee_id, []).append(_adv)
     for line in run.lines:
         if Decimal(str(getattr(line, "advance_deduction", 0) or 0)) > 0:
             continue
@@ -2933,11 +3074,7 @@ def pay_payroll(run_id: int, user: User = Depends(require_roles("Chairman", "HO"
         capacity = gross - Decimal(str(line.deductions or 0))
         if capacity <= 0:
             continue
-        advances = (db.query(StaffAdvance)
-                    .filter(StaffAdvance.employee_id == line.employee_id,
-                            StaffAdvance.status == "approved",
-                            StaffAdvance.remaining_amount > 0)
-                    .order_by(StaffAdvance.advance_date, StaffAdvance.id).all())
+        advances = advances_by_emp.get(line.employee_id, [])
         collected = Decimal("0")
         for adv in advances:
             if collected >= capacity:
@@ -3002,11 +3139,13 @@ def pay_payroll(run_id: int, user: User = Depends(require_roles("Chairman", "HO"
         db.rollback()
         raise server_error("Payroll journal could not be posted; run left as approved",
                            exc, logger, context=f"run {run.id}")
+    _assert_token_current(db, user)
     db.commit()
     db.refresh(run)
     out = serialize_payroll(db, run)
     out["journal_posted"] = True
     _log_audit(db, user, "PAY_PAYROLL", f"run_id={run_id}")
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
     return out
 
 
@@ -3081,12 +3220,15 @@ def customer_statement(customer_id: int, format: str = "pdf", limit: int = 500,
     bu = db.query(BusinessUnit).filter(BusinessUnit.id == cust.business_unit_id).first()
     invs = db.query(SalesInvoice).filter(SalesInvoice.customer_id == customer_id).order_by(
         SalesInvoice.invoice_date, SalesInvoice.id).limit(limit).all()
+    # PM-3: one aggregate query per input instead of two queries + one
+    # lazy line-load per invoice.
+    amounts = invoice_amounts_batch(db, invs)
     rows = []
     total_billed = Decimal("0")
     total_paid = Decimal("0")
     total_returns = Decimal("0")
     for inv in invs:
-        a = invoice_amounts(db, inv)
+        a = amounts[inv.id]
         total_billed += a["total"]
         total_paid += a["paid"]
         total_returns += a.get("returns") or Decimal("0")
