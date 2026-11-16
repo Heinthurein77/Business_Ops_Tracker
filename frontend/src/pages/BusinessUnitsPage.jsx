@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
+import LastUpdated from '../components/LastUpdated';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
 
 const INP = 'rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm';
@@ -14,14 +15,21 @@ export default function BusinessUnitsPage() {
   const [editName, setEditName] = useState({}); // bu_id -> name being edited
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  // F-12: when the list was last refreshed (LastUpdated, header).
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
+    setRefreshing(true);
     try {
       const d = await api.adminBusinessUnits();
       setItems(d.items);
       setNatures(d.natures);
+      setUpdatedAt(new Date());
     } catch (e) {
       setError(e.message || 'Failed to load');
+    } finally {
+      setRefreshing(false);
     }
   }, []);
 
@@ -74,10 +82,13 @@ export default function BusinessUnitsPage() {
     <div className={`min-h-screen ${PAGE_BG} text-slate-800 dark:text-slate-200 antialiased flex flex-col lg:flex-row`}>
       <AdminSidebar />
       <main className="flex-1 min-w-0 px-4 sm:px-6 py-6 sm:py-8 space-y-6 fade-in">
-        <div>
-          <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">Group Structure</p>
-          <h1 className="font-bold text-slate-900 dark:text-slate-100 tracking-tight text-xl">Business Units</h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Add new businesses, rename units, and set each unit's business nature. A new unit gets its chart of accounts automatically from the nature template — then add its CEO in User Management and opening balances in Accounting → Setup.</p>
+        <div className="flex items-end justify-between flex-wrap gap-3">
+          <div>
+            <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">Group Structure</p>
+            <h1 className="font-bold text-slate-900 dark:text-slate-100 tracking-tight text-xl">Business Units</h1>
+            <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Add new businesses, rename units, and set each unit's business nature. A new unit gets its chart of accounts automatically from the nature template — then add its CEO in User Management and opening balances in Accounting → Setup.</p>
+          </div>
+          <LastUpdated updatedAt={updatedAt} onRefresh={load} refreshing={refreshing} />
         </div>
 
         {error && <div className="rounded-xl border border-red-300/60 bg-red-50 dark:bg-red-500/10 px-4 py-3 text-sm text-red-600 dark:text-red-400" role="alert">{error}</div>}

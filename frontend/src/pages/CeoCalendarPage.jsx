@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { api, ApiError } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import ActivityMonthCalendar from '../components/ActivityMonthCalendar';
 import Footer from '../components/Footer';
+import LastUpdated from '../components/LastUpdated';
 import { money } from '../utils/quadrantMetrics';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
 import { viewUploadUrl } from '../utils/safeUrl';
@@ -205,6 +206,25 @@ export default function CeoCalendarPage() {
   const [data, setData] = useState(null);
   const [selectedDay, setSelectedDay] = useState(null);
   const [error, setError] = useState('');
+  // F-12: when the calendar was last refreshed (LastUpdated, header).
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const load = useCallback(async () => {
+    if (buId == null) return;
+    setRefreshing(true);
+    try {
+      const payload = await api.ceoActivityCalendar(buId, month);
+      setData(payload);
+      setSelectedDay(null);
+      setError('');
+      setUpdatedAt(new Date());
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to load CEO calendar');
+    } finally {
+      setRefreshing(false);
+    }
+  }, [buId, month]);
 
   useEffect(() => {
     api
@@ -217,16 +237,7 @@ export default function CeoCalendarPage() {
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Failed to load business units'));
   }, []);
 
-  useEffect(() => {
-    if (buId == null) return;
-    api
-      .ceoActivityCalendar(buId, month)
-      .then((payload) => {
-        setData(payload);
-        setSelectedDay(null);
-      })
-      .catch((err) => setError(err instanceof ApiError ? err.message : 'Failed to load CEO calendar'));
-  }, [buId, month]);
+  useEffect(() => { load(); }, [load]);
 
   const ceoName = data?.ceo ? data.ceo.full_name || data.ceo.username : null;
 
@@ -254,6 +265,7 @@ export default function CeoCalendarPage() {
             </p>
           </div>
           <div className="flex items-center gap-3 flex-wrap">
+            <LastUpdated updatedAt={updatedAt} onRefresh={load} refreshing={refreshing} />
             {data && (
               <a
                 href={api.ceoMonthlySummaryUrl(buId, month || data.current_month)}

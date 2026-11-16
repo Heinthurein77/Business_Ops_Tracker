@@ -1,8 +1,9 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
+import LastUpdated from '../components/LastUpdated';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
 import { viewUploadUrl } from '../utils/safeUrl';
 
@@ -194,10 +195,17 @@ export default function ActivityDashboardPage() {
   const [expanded, setExpanded] = useState(null);
   const [dirSearch, setDirSearch] = useState('');
   const [dirFilter, setDirFilter] = useState('all');
+  // F-12: when the dashboard was last refreshed (LastUpdated, header).
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  const reload = () => {
-    api.activityDashboard().then(setData).catch(() => {});
-  };
+  const reload = useCallback(() => {
+    setRefreshing(true);
+    api.activityDashboard()
+      .then((d) => { setData(d); setUpdatedAt(new Date()); })
+      .catch(() => {})
+      .finally(() => setRefreshing(false));
+  }, []);
 
   useEffect(() => {
     reload();
@@ -268,6 +276,7 @@ export default function ActivityDashboardPage() {
               accentClass={needsHelp.length > 0 ? 'text-red-600 dark:text-red-400' : 'text-slate-900 dark:text-slate-100'}
             />
           </div>
+          <LastUpdated updatedAt={updatedAt} onRefresh={reload} refreshing={refreshing} />
         </header>
 
         {needsHelp.length > 0 && (

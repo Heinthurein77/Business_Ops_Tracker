@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
+import LastUpdated from '../components/LastUpdated';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
 import { viewUploadUrl } from '../utils/safeUrl';
 
@@ -9,10 +10,24 @@ export default function CeoProfilesPage() {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
+  // F-12: when the profiles were last refreshed (LastUpdated, header).
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => {
-    api.ceoProfiles().then(setData).catch((err) => setError(err.message || 'Failed to load CEO profiles'));
+  const load = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      setData(await api.ceoProfiles());
+      setError('');
+      setUpdatedAt(new Date());
+    } catch (err) {
+      setError(err.message || 'Failed to load CEO profiles');
+    } finally {
+      setRefreshing(false);
+    }
   }, []);
+
+  useEffect(() => { load(); }, [load]);
 
   const filtered = useMemo(() => {
     if (!data) return [];
@@ -55,7 +70,9 @@ export default function CeoProfilesPage() {
             <h1 className="font-bold text-slate-900 dark:text-slate-100 tracking-tight text-xl">CEO Profiles</h1>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{completedCount}/{data.total} completed</p>
           </div>
-          <div className="relative w-full sm:w-72">
+          <div className="flex items-center gap-3 flex-wrap">
+            <LastUpdated updatedAt={updatedAt} onRefresh={load} refreshing={refreshing} />
+            <div className="relative w-full sm:w-72">
             <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
               <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M17 10a7 7 0 11-14 0 7 7 0 0114 0z" />
             </svg>
@@ -66,6 +83,7 @@ export default function CeoProfilesPage() {
               placeholder="Search by CEO or business unit…"
               className="w-full text-sm pl-9 pr-3 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
             />
+            </div>
           </div>
         </div>
 

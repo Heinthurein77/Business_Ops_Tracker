@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
+import LastUpdated from '../components/LastUpdated';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
 
 const EMPTY_FORM = { role: 'CEO', business_unit_id: '', username: '', full_name: '' };
@@ -22,6 +23,9 @@ export default function ManageUsersPage() {
   const [resets, setResets] = useState(null); // { requests, pending_count }
   const [resetsError, setResetsError] = useState('');
   const [busyResetId, setBusyResetId] = useState(null);
+  // F-12: when the lists were last refreshed (LastUpdated, header).
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
 
   function showBanner(banner) {
     setSecretRevealed(false);
@@ -56,15 +60,26 @@ export default function ManageUsersPage() {
       });
   }
 
-  useEffect(() => {
-    loadUsers();
-    api.adminOperations().then((d) => {
-      setBusinessUnits(d.operations.map((op) => ({ id: op.bu_id, code: op.bu_code, name: op.bu_name })));
-    });
+  // F-12: one refresh for both lists, so LastUpdated's manual refresh
+  // re-fetches users and password requests together.
+  const load = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await Promise.all([loadUsers(), loadResets()]);
+      setUpdatedAt(new Date());
+    } finally {
+      setRefreshing(false);
+    }
   }, []);
 
   useEffect(() => {
-    loadResets();
+    load();
+    api.adminOperations().then((d) => {
+      setBusinessUnits(d.operations.map((op) => ({ id: op.bu_id, code: op.bu_code, name: op.bu_name })));
+    });
+  }, [load]);
+
+  useEffect(() => {
     return () => clearTimeout(copyTimer.current);
   }, []);
 
@@ -240,6 +255,7 @@ export default function ManageUsersPage() {
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{users.length} account{users.length !== 1 ? 's' : ''}</p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
+            <LastUpdated updatedAt={updatedAt} onRefresh={load} refreshing={refreshing} />
             <div className="relative w-full sm:w-64">
               <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M17 10a7 7 0 11-14 0 7 7 0 0114 0z" />

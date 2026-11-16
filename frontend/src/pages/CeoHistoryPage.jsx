@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, ApiError } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import ActivityMonthCalendar from '../components/ActivityMonthCalendar';
 import Footer from '../components/Footer';
+import LastUpdated from '../components/LastUpdated';
 import { formatVariance, money } from '../utils/quadrantMetrics';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
 import { viewUploadUrl } from '../utils/safeUrl';
@@ -28,17 +29,27 @@ export default function CeoHistoryPage() {
   const [selectedDay, setSelectedDay] = useState(null);
   const [error, setError] = useState('');
   const navigate = useNavigate();
+  // F-12: when the history was last refreshed (LastUpdated, header).
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => {
-    api
-      .ceoDashboard(month)
-      .then((payload) => {
-        setData(payload);
-        setReviewIndex(0);
-        setSelectedDay(null);
-      })
-      .catch((err) => setError(err instanceof ApiError ? err.message : 'Failed to load history'));
+  const load = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      const payload = await api.ceoDashboard(month);
+      setData(payload);
+      setReviewIndex(0);
+      setSelectedDay(null);
+      setError('');
+      setUpdatedAt(new Date());
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to load history');
+    } finally {
+      setRefreshing(false);
+    }
   }, [month]);
+
+  useEffect(() => { load(); }, [load]);
 
   if (!data) {
     return (
@@ -69,6 +80,7 @@ export default function CeoHistoryPage() {
             <h1 className="font-bold text-slate-900 tracking-tight text-lg">{data.calendar_month_label}</h1>
           </div>
           <div className="flex items-center gap-2">
+            <LastUpdated updatedAt={updatedAt} onRefresh={load} refreshing={refreshing} />
             <button
               type="button"
               onClick={() => setMonth(data.prev_month)}

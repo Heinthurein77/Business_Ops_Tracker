@@ -49,17 +49,44 @@ async function handle(response) {
   return body;
 }
 
+// F-3 / CM-6: every money POST carries an Idempotency-Key so the server
+// can return the stored response instead of re-executing when a request
+// is retried after a lost response. One key per logical action: postMoney
+// generates the key once and reuses it across that action's retry, while
+// a new action gets a fresh key. postJson also sends a fresh key unless
+// the caller supplies one, so any postJson money call is covered too.
+function newIdempotencyKey() {
+  try {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  } catch { /* fall through to the Math.random fallback below */ }
+  return `key-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 function getJson(path) {
   return fetch(path, { credentials: 'include' }).then(handle);
 }
 
-function postJson(path, data) {
+function postJson(path, data, options = {}) {
   return fetch(path, {
     method: 'POST',
     credentials: 'include',
-    headers: JSON_HEADERS,
+    headers: { ...JSON_HEADERS, 'Idempotency-Key': options.idempotencyKey || newIdempotencyKey() },
     body: JSON.stringify(data ?? {}),
   }).then(handle);
+}
+
+// Money actions (the endpoints that read Idempotency-Key server-side):
+// one key per logical action, reused if the request has to be retried
+// after a network failure. Only network-level failures are retried —
+// an HTTP error means the server answered, so it is never re-sent.
+async function postMoney(path, data) {
+  const key = newIdempotencyKey();
+  try {
+    return await postJson(path, data, { idempotencyKey: key });
+  } catch (err) {
+    if (err instanceof TypeError) return postJson(path, data, { idempotencyKey: key });
+    throw err;
+  }
 }
 
 function postForm(path, formData) {
@@ -133,7 +160,7 @@ export const api = {
   // {"source": "...", "source_id": <id>} — returns already_posted:true if a
   // journal has since appeared, 404 if the source is unknown, 409 if it
   // still cannot post.
-  retryJournal: (source, sourceId) => postJson('/api/accounting/journal/retry', { source, source_id: sourceId }),
+  retryJournal: (source, sourceId) => postMoney('/api/accounting/journal/retry', { source, source_id: sourceId }),
   exportExcelUrl: (startDate, endDate) => {
     const params = new URLSearchParams();
     if (startDate) params.set('start_date', startDate);
@@ -185,7 +212,7 @@ export const api = {
     return getJson(`/api/ops/expenses${query ? `?${query}` : ''}`);
   },
   submitExpense: (payload) => postJson('/api/ops/expenses', payload),
-  reviewExpense: (id, payload) => postJson(`/api/ops/expenses/${id}/review`, payload),
+  reviewExpense: (id, payload) => postMoney(`/api/ops/expenses/${id}/review`, payload),
 
   submitStaff: (payload) => postJson('/api/ops/staff', payload),
   listStaff: (params = {}) => {
@@ -222,21 +249,21 @@ export const api = {
   createSupplier: (payload) => postJson('/api/ops/suppliers', payload),
   deleteSupplier: (id) => fetch(`/api/ops/suppliers/${id}`, { method: 'DELETE', credentials: 'include' }).then(handle),
   listPOs: (buId) => getJson(`/api/ops/purchase-orders${buId ? `?business_unit_id=${buId}` : ''}`),
-  createPO: (payload) => postJson('/api/ops/purchase-orders', payload),
+  createPO: (payload) => postMoney('/api/ops/purchase-orders', payload),
   orderPO: (id) => postJson(`/api/ops/purchase-orders/${id}/order`),
-  receivePO: (id) => postJson(`/api/ops/purchase-orders/${id}/receive`),
-  payPO: (id) => postJson(`/api/ops/purchase-orders/${id}/pay`),
+  receivePO: (id) => postMoney(`/api/ops/purchase-orders/${id}/receive`),
+  payPO: (id) => postMoney(`/api/ops/purchase-orders/${id}/pay`),
   cancelPO: (id) => postJson(`/api/ops/purchase-orders/${id}/cancel`),
-  transferStock: (itemId, payload) => postJson(`/api/ops/inventory/${itemId}/transfer`, payload),
+  transferStock: (itemId, payload) => postMoney(`/api/ops/inventory/${itemId}/transfer`, payload),
   // ---- Sales & receivables (ERP Phase 4) ----
   listSalesCustomers: (buId) => getJson(`/api/ops/sales-customers${buId ? `?business_unit_id=${buId}` : ''}`),
   createSalesCustomer: (payload) => postJson('/api/ops/sales-customers', payload),
   deleteSalesCustomer: (id) => fetch(`/api/ops/sales-customers/${id}`, { method: 'DELETE', credentials: 'include' }).then(handle),
   listInvoices: (buId) => getJson(`/api/ops/invoices${buId ? `?business_unit_id=${buId}` : ''}`),
-  createInvoice: (payload) => postJson('/api/ops/invoices', payload),
-  sendInvoice: (id) => postJson(`/api/ops/invoices/${id}/send`),
+  createInvoice: (payload) => postMoney('/api/ops/invoices', payload),
+  sendInvoice: (id) => postMoney(`/api/ops/invoices/${id}/send`),
   cancelInvoice: (id) => postJson(`/api/ops/invoices/${id}/cancel`),
-  recordInvoicePayment: (id, payload) => postJson(`/api/ops/invoices/${id}/payments`, payload),
+  recordInvoicePayment: (id, payload) => postMoney(`/api/ops/invoices/${id}/payments`, payload),
   aging: (buId) => getJson(`/api/ops/aging${buId ? `?business_unit_id=${buId}` : ''}`),
   // ---- HR & payroll (ERP Phase 5) ----
   listEmployees: (buId) => getJson(`/api/ops/employees${buId ? `?business_unit_id=${buId}` : ''}`),
@@ -251,7 +278,7 @@ export const api = {
     method: 'PATCH', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
   }).then(handle),
   approvePayroll: (id) => postJson(`/api/ops/payroll-runs/${id}/approve`),
-  payPayroll: (id) => postJson(`/api/ops/payroll-runs/${id}/pay`),
+  payPayroll: (id) => postMoney(`/api/ops/payroll-runs/${id}/pay`),
   monthlyReportUrl: (month) => `/api/ops/monthly-report${month ? `?month=${month}` : ''}`,
   opsExportUrl: (tab, buId) => {
     const q = new URLSearchParams({ tab: tab || 'actions' });
@@ -275,7 +302,7 @@ export const api = {
     return getJson(`/api/accounting/journal?${q.toString()}`);
   },
   accCreateJournal: (payload) => postJson('/api/accounting/journal', payload),
-  accPostJournal: (id) => postJson(`/api/accounting/journal/${id}/post`),
+  accPostJournal: (id) => postMoney(`/api/accounting/journal/${id}/post`),
   accReverseJournal: (id) => postJson(`/api/accounting/journal/${id}/reverse`),
   accDeleteJournal: (id) => fetch(`/api/accounting/journal/${id}`, {
     method: 'DELETE', credentials: 'include',
@@ -390,18 +417,22 @@ export const api = {
     method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
   }).then(handle),
   modSellUnit: (id, payload) => fetch(`/api/modules/property-units/${id}/sell`, {
-    method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
+    method: 'POST', credentials: 'include',
+    headers: { ...JSON_HEADERS, 'Idempotency-Key': newIdempotencyKey() },
+    body: JSON.stringify(payload),
   }).then(handle),
   modLeases: (buId) => getJson(`/api/modules/leases${buId ? `?business_unit_id=${buId}` : ''}`),
   modCreateLease: (payload) => fetch('/api/modules/leases', {
-    method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
+    method: 'POST', credentials: 'include',
+    headers: { ...JSON_HEADERS, 'Idempotency-Key': newIdempotencyKey() },
+    body: JSON.stringify(payload),
   }).then(handle),
-  modBillLease: (id, period) => fetch(`/api/modules/leases/${id}/bill${period ? `?period=${period}` : ''}`, { method: 'POST', credentials: 'include' }).then(handle),
+  modBillLease: (id, period) => fetch(`/api/modules/leases/${id}/bill${period ? `?period=${period}` : ''}`, { method: 'POST', credentials: 'include', headers: { 'Idempotency-Key': newIdempotencyKey() } }).then(handle),
   modPrincipalReport: (buId, period) => getJson(`/api/modules/principal-report?${new URLSearchParams({ ...(buId ? { business_unit_id: buId } : {}), ...(period ? { period } : {}) })}`),
   // ---- ERP completion: POS, quotations, returns, transfers, serials, advances, attendance ----
   listPosSales: (buId, saleDate) => getJson(`/api/ops/pos-sales?${new URLSearchParams({ ...(buId ? { business_unit_id: buId } : {}), ...(saleDate ? { sale_date: saleDate } : {}) })}`),
-  createPosSale: (payload) => postJson('/api/ops/pos-sales', payload),
-  voidPosSale: (id) => postJson(`/api/ops/pos-sales/${id}/void`),
+  createPosSale: (payload) => postMoney('/api/ops/pos-sales', payload),
+  voidPosSale: (id) => postMoney(`/api/ops/pos-sales/${id}/void`),
   posDailySummary: (buId, day) => getJson(`/api/ops/pos-sales/daily-summary?${new URLSearchParams({ ...(buId ? { business_unit_id: buId } : {}), ...(day ? { date: day } : {}) })}`),
   listQuotations: (buId) => getJson(`/api/ops/quotations${buId ? `?business_unit_id=${buId}` : ''}`),
   createQuotation: (payload) => postJson('/api/ops/quotations', payload),
@@ -410,13 +441,13 @@ export const api = {
   invoicePdfUrl: (id) => `/api/ops/sales-invoices/${id}/pdf`,
   deliveryNoteUrl: (id) => `/api/ops/sales-invoices/${id}/delivery-note`,
   listSalesReturns: (buId, invoiceId) => getJson(`/api/ops/sales-returns?${new URLSearchParams({ ...(buId ? { business_unit_id: buId } : {}), ...(invoiceId ? { invoice_id: invoiceId } : {}) })}`),
-  createSalesReturn: (payload) => postJson('/api/ops/sales-returns', payload),
+  createSalesReturn: (payload) => postMoney('/api/ops/sales-returns', payload),
   listPurchaseReturns: (buId, poId) => getJson(`/api/ops/purchase-returns?${new URLSearchParams({ ...(buId ? { business_unit_id: buId } : {}), ...(poId ? { po_id: poId } : {}) })}`),
-  createPurchaseReturn: (payload) => postJson('/api/ops/purchase-returns', payload),
+  createPurchaseReturn: (payload) => postMoney('/api/ops/purchase-returns', payload),
   modStockTransfers: (params = {}) => getJson(`/api/modules/stock-transfers?${new URLSearchParams({ ...(params.from ? { from_business_unit_id: params.from } : {}), ...(params.to ? { to_business_unit_id: params.to } : {}), ...(params.status ? { status: params.status } : {}) })}`),
   modCreateTransfer: (payload) => postJson('/api/modules/stock-transfers', payload),
-  modSendTransfer: (id) => postJson(`/api/modules/stock-transfers/${id}/send`),
-  modReceiveTransfer: (id) => postJson(`/api/modules/stock-transfers/${id}/receive`),
+  modSendTransfer: (id) => postMoney(`/api/modules/stock-transfers/${id}/send`),
+  modReceiveTransfer: (id) => postMoney(`/api/modules/stock-transfers/${id}/receive`),
   modCancelTransfer: (id) => postJson(`/api/modules/stock-transfers/${id}/cancel`),
   listSerials: (itemId, status) => getJson(`/api/ops/inventory/${itemId}/serials${status ? `?status=${status}` : ''}`),
   addSerials: (itemId, payload) => postJson(`/api/ops/inventory/${itemId}/serials`, payload),
@@ -424,12 +455,12 @@ export const api = {
   setSerialStatus: (id, status) => postJson(`/api/ops/serials/${id}/status`, { status }),
   listAdvances: (buId, status) => getJson(`/api/ops/staff-advances?${new URLSearchParams({ ...(buId ? { business_unit_id: buId } : {}), ...(status ? { status } : {}) })}`),
   createAdvance: (payload) => postJson('/api/ops/staff-advances', payload),
-  approveAdvance: (id) => postJson(`/api/ops/staff-advances/${id}/approve`),
+  approveAdvance: (id) => postMoney(`/api/ops/staff-advances/${id}/approve`),
   rejectAdvance: (id) => postJson(`/api/ops/staff-advances/${id}/reject`),
   approvePO: (id) => postJson(`/api/ops/purchase-orders/${id}/approve`),
   rejectPOApproval: (id) => postJson(`/api/ops/purchase-orders/${id}/reject-approval`),
-  accApproveJournal: (id) => postJson(`/api/accounting/journal/${id}/approve`),
-  accRejectJournalApproval: (id) => postJson(`/api/accounting/journal/${id}/reject-approval`),
+  accApproveJournal: (id) => postMoney(`/api/accounting/journal/${id}/approve`),
+  accRejectJournalApproval: (id) => postMoney(`/api/accounting/journal/${id}/reject-approval`),
   bulkAttendance: (payload) => postJson('/api/ops/attendance/bulk', payload),
   listAttendance: (buId, month) => getJson(`/api/ops/attendance?${new URLSearchParams({ ...(buId ? { business_unit_id: buId } : {}), ...(month ? { month } : {}) })}`),
   leaveBalances: (buId, year) => getJson(`/api/ops/leave-balances?${new URLSearchParams({ ...(buId ? { business_unit_id: buId } : {}), ...(year ? { year } : {}) })}`),

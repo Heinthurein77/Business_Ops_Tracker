@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Chart from 'react-apexcharts';
 import { api } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
+import LastUpdated from '../components/LastUpdated';
 import { useTheme } from '../context/ThemeContext';
 import { BUDGET_BADGE_CLASS, BUDGET_STATUS_LABEL } from '../utils/quadrantMetrics';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
@@ -27,14 +28,27 @@ export default function ComparisonPage() {
   const [error, setError] = useState('');
   const [metric, setMetric] = useState('cash_flow');
   const [trendBuId, setTrendBuId] = useState(null);
+  // F-12: when the comparison was last refreshed (LastUpdated, header).
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => {
-    api.adminComparison().then((d) => {
+  const load = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      const d = await api.adminComparison();
       setData(d);
       const bus = d.trend_by_bu || d.trend_cash_flow_by_bu || [];
       setTrendBuId((prev) => prev ?? bus[0]?.bu_id ?? null);
-    }).catch((err) => setError(err.message || 'Failed to load comparison'));
+      setError('');
+      setUpdatedAt(new Date());
+    } catch (err) {
+      setError(err.message || 'Failed to load comparison');
+    } finally {
+      setRefreshing(false);
+    }
   }, []);
+
+  useEffect(() => { load(); }, [load]);
 
   const sorted = useMemo(() => {
     if (!data) return [];
@@ -155,6 +169,7 @@ export default function ComparisonPage() {
             <h1 className="font-bold text-slate-900 dark:text-slate-100 text-xl tracking-tight">Comparison & Analytics</h1>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{data.today_display} &middot; metric applies to trend &amp; ranking</p>
           </div>
+          <LastUpdated updatedAt={updatedAt} onRefresh={load} refreshing={refreshing} />
           <div className="tab-track flex-wrap">
             {Object.entries(METRICS).map(([key, meta]) => (
               <button

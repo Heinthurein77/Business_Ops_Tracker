@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
+import LastUpdated from '../components/LastUpdated';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
 
 const ACTION_BADGE_CLASS = {
@@ -34,10 +35,24 @@ export default function SecurityLogPage() {
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [eventFilter, setEventFilter] = useState('all');
+  // F-12: when the log was last refreshed (LastUpdated, header).
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => {
-    api.securityLog().then(setData).catch((err) => setError(err.message || 'Failed to load security log'));
+  const load = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      setData(await api.securityLog());
+      setError('');
+      setUpdatedAt(new Date());
+    } catch (err) {
+      setError(err.message || 'Failed to load security log');
+    } finally {
+      setRefreshing(false);
+    }
   }, []);
+
+  useEffect(() => { load(); }, [load]);
 
   const filtered = useMemo(() => {
     if (!data) return [];
@@ -95,6 +110,7 @@ export default function SecurityLogPage() {
               </p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
+              <LastUpdated updatedAt={updatedAt} onRefresh={load} refreshing={refreshing} />
               <input
                 type="text"
                 placeholder="Search user, detail, IP..."

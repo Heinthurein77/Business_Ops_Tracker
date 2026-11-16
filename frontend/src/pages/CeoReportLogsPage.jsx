@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { api, ApiError } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
+import LastUpdated from '../components/LastUpdated';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
 
 /** Split out of the old all-in-one CeoDashboardPage — a dedicated page for
@@ -10,10 +11,24 @@ import { GLASS, PAGE_BG } from '../utils/glassTheme';
 export default function CeoReportLogsPage() {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
+  // F-12: when the logs were last refreshed (LastUpdated, header).
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => {
-    api.ceoDashboard().then(setData).catch((err) => setError(err instanceof ApiError ? err.message : 'Failed to load report logs'));
+  const load = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      setData(await api.ceoDashboard());
+      setError('');
+      setUpdatedAt(new Date());
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to load report logs');
+    } finally {
+      setRefreshing(false);
+    }
   }, []);
+
+  useEffect(() => { load(); }, [load]);
 
   if (!data) {
     return (
@@ -32,10 +47,13 @@ export default function CeoReportLogsPage() {
           <div className="mb-6 rounded-xl bg-red-500/10 border border-red-500/20 px-5 py-4 text-sm text-red-700">{error}</div>
         )}
 
-        <div className="mb-6">
-          <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 mb-1">Audit Trail</p>
-          <h1 className="font-bold text-slate-900 tracking-tight text-lg">My Report Logs</h1>
-          <p className="text-xs text-slate-500 mt-0.5">Your own submission history, with exact submission time</p>
+        <div className="mb-6 flex items-end justify-between flex-wrap gap-3">
+          <div>
+            <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 mb-1">Audit Trail</p>
+            <h1 className="font-bold text-slate-900 tracking-tight text-lg">My Report Logs</h1>
+            <p className="text-xs text-slate-500 mt-0.5">Your own submission history, with exact submission time</p>
+          </div>
+          <LastUpdated updatedAt={updatedAt} onRefresh={load} refreshing={refreshing} />
         </div>
 
         <section className={`${GLASS} overflow-hidden`}>

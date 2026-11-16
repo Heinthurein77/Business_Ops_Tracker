@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import Chart from 'react-apexcharts';
 import { api } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
+import LastUpdated from '../components/LastUpdated';
 import { useTheme } from '../context/ThemeContext';
 import { DAILY_STEP_GOAL } from '../constants';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
@@ -24,10 +25,24 @@ export default function HealthDashboardPage() {
   const [dirSearch, setDirSearch] = useState('');
   const [dirFilter, setDirFilter] = useState('all');
   const [historySearch, setHistorySearch] = useState('');
+  // F-12: when the dashboard was last refreshed (LastUpdated, header).
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => {
-    api.healthDashboard().then(setData).catch((err) => setError(err.message || 'Failed to load health dashboard'));
+  const load = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      setData(await api.healthDashboard());
+      setError('');
+      setUpdatedAt(new Date());
+    } catch (err) {
+      setError(err.message || 'Failed to load health dashboard');
+    } finally {
+      setRefreshing(false);
+    }
   }, []);
+
+  useEffect(() => { load(); }, [load]);
 
   const filteredDirectory = useMemo(() => {
     if (!data) return [];
@@ -92,6 +107,7 @@ export default function HealthDashboardPage() {
             <h1 className="font-bold text-slate-900 dark:text-slate-100 text-xl tracking-tight">Health and Fitness</h1>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{data.today_display}</p>
           </div>
+          <LastUpdated updatedAt={updatedAt} onRefresh={load} refreshing={refreshing} />
         </header>
 
         <div className="grid lg:grid-cols-12 gap-6">

@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import DatePicker from '../components/DatePicker';
 import Footer from '../components/Footer';
+import LastUpdated from '../components/LastUpdated';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
 
 function formatReportDate(iso) {
@@ -18,10 +19,24 @@ export default function ReportLogsPage() {
   const [search, setSearch] = useState('');
   const [dateFilter, setDateFilter] = useState(null);
   const [buFilter, setBuFilter] = useState('all');
+  // F-12: when the logs were last refreshed (LastUpdated, header).
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => {
-    api.reportLogs().then(setData).catch((err) => setError(err.message || 'Failed to load report logs'));
+  const load = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      setData(await api.reportLogs());
+      setError('');
+      setUpdatedAt(new Date());
+    } catch (err) {
+      setError(err.message || 'Failed to load report logs');
+    } finally {
+      setRefreshing(false);
+    }
   }, []);
+
+  useEffect(() => { load(); }, [load]);
 
   const buOptions = useMemo(() => {
     if (!data) return [];
@@ -89,6 +104,7 @@ export default function ReportLogsPage() {
               </p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
+              <LastUpdated updatedAt={updatedAt} onRefresh={load} refreshing={refreshing} />
               <input
                 type="text"
                 placeholder="Search BU, submitter..."
