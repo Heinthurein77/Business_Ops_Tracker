@@ -19,13 +19,15 @@ so they would otherwise false-positive on every run.
 
 Known gaps (recorded, not hidden):
 - Quick (single-item) stock transfers post with source="stock_transfer"
-  but source_id set to the *inventory item* id, not a transfer id, so they
-  cannot be identified or re-posted by (source, source_id) and are not
-  listed here. Formal transfers are covered.
-- A formal transfer whose send journal posted but whose receive journal
-  failed is NOT listed (one posted entry exists for the transfer id);
-  the check is per transfer, not per leg. The receive leg needs its own
-  source to be distinguishable — a follow-up for the re-post endpoint.
+  but source_id set to the *inventory item* id, not a transfer id, so
+  they cannot be re-posted by (source, source_id) — see
+  find_journal_failures() below: they ARE listed here (from the
+  "Transfer to BU …" stock movements), but the recovery is a MANUAL
+  journal, never a re-entered transfer (the stock already moved) and
+  never the retry endpoint (which 409s on them). Residual masking:
+  journal entries carry only the item id, so once ANY quick transfer
+  for an item has posted, a later failed quick transfer of the same
+  item is indistinguishable from the posted one and is not listed.
 - Old stored URLs are bearer links (SM-8): rotation/re-key of pre-cutover
   objects is a separate follow-up, not part of this job.
 
@@ -38,6 +40,7 @@ One summary notification per Chairman/HO user per run while failures
 persist (not one per failure — a bad month-end must not spam the inbox),
 plus a job_heartbeats row for the dead-man check.
 """
+import re
 import sys
 from decimal import Decimal
 
@@ -49,12 +52,14 @@ from src.models import (
     DailyFinancial,
     ExpenseRequest,
     HeadOfficeDailyFinancial,
+    InventoryItem,
     JournalEntry,
     JobHeartbeat,
     Notification,
     PosSale,
     PurchaseReturn,
     SalesReturn,
+    StockMovement,
     StockTransfer,
     User,
 )
@@ -82,6 +87,26 @@ def _posted_pairs(db: Session) -> set:
         .all()
     )
     return {(source, source_id) for source, source_id in rows}
+
+
+def _posted_transfer_legs(db: Session) -> set:
+    """(source_id, business_unit_id) pairs with at least one posted,
+    unreversed stock_transfer journal entry. Formal transfers post one
+    entry per BU side (send leg in the source BU, receive leg in the
+    destination BU), so the check must be per leg, not per transfer:
+    any posted entry for the transfer id would otherwise mask a failed
+    receive leg behind a posted send leg (F-2)."""
+    rows = (
+        db.query(JournalEntry.source_id, JournalEntry.business_unit_id)
+        .filter(
+            JournalEntry.source == "stock_transfer",
+            JournalEntry.status == "posted",
+            JournalEntry.reversed_by_id == None,  # noqa: E711
+            JournalEntry.source_id != None,  # noqa: E711
+        )
+        .all()
+    )
+    return {(source_id, bu_id) for source_id, bu_id in rows}
 
 
 def _bu_names(db: Session) -> dict:
@@ -172,9 +197,13 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
             **bu_label(r.business_unit_id),
         })
 
-    # Formal stock transfers: sent/received, transfer cost > 0, no
-    # stock_transfer journal. (Per-transfer, not per-leg — see module
-    # docstring: a failed receive leg behind a posted send leg is missed.)
+    # Formal stock transfers: sent/received, transfer cost > 0. Per LEG
+    # (F-2): the send leg is due once sent, the receive leg only once
+    # received — an in_transit transfer with its send journal posted is
+    # NOT a failure just because the receive journal does not exist yet.
+    # The retry endpoint re-posts each missing side separately, so one
+    # entry per transfer (source_id = transfer id) suffices.
+    legs_posted = _posted_transfer_legs(db)
     for t in (
         db.query(StockTransfer)
         .filter(StockTransfer.status.in_(("in_transit", "received")))
@@ -188,19 +217,107 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
         )
         if cost <= 0:
             continue
-        if ("stock_transfer", t.id) in posted:
+        missing_legs = []
+        if (t.id, t.from_business_unit_id) not in legs_posted:
+            missing_legs.append("send")
+        if t.status == "received" and (t.id, t.to_business_unit_id) not in legs_posted:
+            missing_legs.append("receive")
+        if not missing_legs:
             continue
+        from_bu = bus.get(t.from_business_unit_id)
+        to_bu = bus.get(t.to_business_unit_id)
+        if len(missing_legs) == 2:
+            leg_detail = "with no journal posted for either leg."
+        else:
+            leg = missing_legs[0]
+            posted_leg = "receive" if leg == "send" else "send"
+            missing_bu = to_bu if leg == "receive" else from_bu
+            leg_detail = (
+                f"the {posted_leg} journal posted but the {leg} journal "
+                f"({missing_bu.code if missing_bu else '-'} books) never posted — "
+                f"re-posting re-posts the missing leg only."
+            )
         failures.append({
             "kind": "stock_transfer",
             "source": "stock_transfer",
             "source_id": t.id,
             "label": f"Stock transfer {t.transfer_no}",
-            "detail": f"Transfer cost Ks {cost:,.0f} with no journal posted.",
+            "detail": f"Transfer cost Ks {cost:,.0f} {leg_detail}",
             "amount": _money(cost),
             "date": t.sent_at.date().isoformat() if t.sent_at else None,
+            "missing_legs": missing_legs,
             "business_unit_id": t.from_business_unit_id,
-            "bu_code": bus[t.from_business_unit_id].code if t.from_business_unit_id in bus else "-",
-            "bu_name": bus[t.from_business_unit_id].name if t.from_business_unit_id in bus else "-",
+            "bu_code": from_bu.code if from_bu else "-",
+            "bu_name": from_bu.name if from_bu else "-",
+            "to_bu_code": to_bu.code if to_bu else "-",
+            "to_bu_name": to_bu.name if to_bu else "-",
+        })
+
+    # Quick (single-item) transfers (F-2): transfer_stock (ops.py)
+    # posts both intercompany journals with source="stock_transfer",
+    # source_id = the SOURCE ITEM id. The flag-only path (intercompany
+    # accounts missing) commits the stock move with no journal at all,
+    # so the movements are the only record: an "out" movement whose
+    # reason is exactly "Transfer to BU <id>" is a quick transfer.
+    # (Formal transfers write "Stock transfer <no> to BU <id>" instead,
+    # so they never match this scan.)
+    # Grouped by item: entries carry only the item id, so one failure
+    # per item aggregates every unposted quick transfer of that item.
+    # Recovery is a MANUAL journal — the stock already moved, so do NOT
+    # re-enter the transfer (that would move it a second time), and the
+    # retry endpoint cannot reconstruct it (409). The detail says so
+    # explicitly: it is the UI-visible message on the Journal Failures
+    # page, and "retryable": False marks it for the frontend.
+    quick_moves = (
+        db.query(StockMovement)
+        .filter(
+            StockMovement.movement_type == "out",
+            StockMovement.reason.like("Transfer to BU %"),
+        )
+        .order_by(StockMovement.id.desc())
+        .limit(limit)
+        .all()
+    )
+    quick_by_item: dict[int, dict] = {}
+    for mv in quick_moves:
+        group = quick_by_item.setdefault(mv.item_id, {"moves": [], "to_bu_ids": set()})
+        group["moves"].append(mv)
+        m = re.match(r"^Transfer to BU (\d+)$", mv.reason or "")
+        if m:
+            group["to_bu_ids"].add(int(m.group(1)))
+    for item_id, group in quick_by_item.items():
+        if ("stock_transfer", item_id) in posted:
+            continue  # at least one quick transfer of this item posted
+        item = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
+        if item is None:
+            continue
+        total_qty = sum((Decimal(str(mv.quantity or 0)) for mv in group["moves"]), Decimal("0"))
+        amount = total_qty * Decimal(str(item.unit_cost or 0))
+        if amount <= 0:
+            continue  # no journal is due on a zero-cost transfer (poster skips it)
+        latest = max(group["moves"], key=lambda mv: mv.id)  # ids increase with time
+        n = len(group["moves"])
+        to_codes = ", ".join(
+            bus[bu_id].code if bu_id in bus else f"BU {bu_id}"
+            for bu_id in sorted(group["to_bu_ids"])
+        ) or "-"
+        failures.append({
+            "kind": "quick_stock_transfer",
+            "source": "stock_transfer",
+            "source_id": item_id,
+            "label": f"Quick transfer — {item.name} (item #{item_id})",
+            "detail": (
+                f"{n} quick transfer(s) moved {total_qty:,.0f} unit(s) to {to_codes} "
+                f"for Ks {float(amount):,.0f} with no journal posted. Post a MANUAL journal "
+                f"for this amount — do NOT re-enter the transfer (the stock already moved; "
+                f"re-entering would move it a second time). The Re-post button cannot fix "
+                f"this: a quick transfer cannot be reconstructed from the item alone."
+            ),
+            "amount": _money(amount),
+            "date": latest.created_at.date().isoformat() if latest.created_at else None,
+            "retryable": False,
+            "recovery": "manual_journal",
+            **bu_label(item.business_unit_id),
         })
 
     # Approved expenses: amount > 0, no expense journal. (An approved

@@ -12,7 +12,9 @@ import { GLASS, PAGE_BG } from '../utils/glassTheme';
  * (src/jobs/reconcile_journals.py). Each row can be re-posted in place via
  * POST /api/accounting/journal/retry {"source", "source_id"} — already
  * posted returns already_posted:true, unknown source 404, still
- * unpostable 409. */
+ * unpostable 409. Quick-transfer rows carry retryable:false — they cannot
+ * be re-posted (the stock already moved), so the button is replaced by a
+ * "Manual journal needed" badge and the detail says to post one. */
 export default function JournalFailuresPage() {
   const [failures, setFailures] = useState([]);
   const [total, setTotal] = useState(0);
@@ -99,13 +101,19 @@ export default function JournalFailuresPage() {
                       </p>
                       <p className="text-xs text-amber-600 dark:text-amber-400 mt-0.5">{f.detail}</p>
                     </div>
-                    <button
-                      onClick={() => retry(f)}
-                      disabled={retrying === f.source + ':' + f.source_id}
-                      className="text-xs font-semibold bg-brand-600 hover:bg-brand-700 text-white px-3.5 py-2 rounded-lg transition-colors disabled:opacity-50"
-                    >
-                      {retrying === f.source + ':' + f.source_id ? 'Re-posting…' : 'Re-post journal'}
-                    </button>
+                    {f.retryable === false ? (
+                      <span className="text-xs font-semibold text-amber-700 dark:text-amber-400 bg-amber-500/10 border border-amber-500/20 px-3.5 py-2 rounded-lg">
+                        Manual journal needed
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => retry(f)}
+                        disabled={retrying === f.source + ':' + f.source_id}
+                        className="text-xs font-semibold bg-brand-600 hover:bg-brand-700 text-white px-3.5 py-2 rounded-lg transition-colors disabled:opacity-50"
+                      >
+                        {retrying === f.source + ':' + f.source_id ? 'Re-posting…' : 'Re-post journal'}
+                      </button>
+                    )}
                   </li>
                 ))}
               </ul>

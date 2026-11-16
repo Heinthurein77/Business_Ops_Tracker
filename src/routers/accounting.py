@@ -454,6 +454,10 @@ def list_business_units(user: User = Depends(require_accounting), db: Session = 
 
 @router.get("/templates")
 def list_templates(user: User = Depends(require_accounting)):
+    """List the CoA template types available for BU provisioning.
+
+    API-only (F-6): no frontend caller — the UI provisions via
+    POST /provision/{bu_id} without ever listing templates first."""
     return {"templates": TEMPLATE_TYPES}
 
 
@@ -780,11 +784,15 @@ class JournalRetryIn(BaseModel):
 
 
 @router.post("/journal/retry")
-def retry_journal(payload: JournalRetryIn, user: User = Depends(require_accounting),
+def retry_journal(payload: JournalRetryIn, user: User = Depends(require_admin),
                   db: Session = Depends(get_db),
                   idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     """CM-7: re-post a journal for a business record whose original
     posting failed (a legacy flag-only row, or a transient failure).
+    F-7: Chairman/HO-only (require_admin), matching the Journal
+    Failures page (GET /api/admin/journal-failures) that lists what
+    this re-posts — Accountants can read the journal but do not own
+    the re-post action.
     Idempotent: if a posted entry with this source/source_id already
     exists, nothing is re-posted and already_posted=true is returned.
     404 when the source record does not exist; 409 when it still cannot
@@ -873,7 +881,7 @@ def retry_journal(payload: JournalRetryIn, user: User = Depends(require_accounti
             t = db.query(_StockTransfer).filter(_StockTransfer.id == sid).first()
             if not t:
                 if db.query(InventoryItem).filter(InventoryItem.id == sid).first():
-                    raise HTTPException(409, "Quick transfer_stock journals cannot be reconstructed from the item alone — re-enter the transfer")
+                    raise HTTPException(409, "Quick transfer_stock journals cannot be reconstructed from the item alone — post a MANUAL journal for this amount (do not re-enter the transfer; the stock already moved)")
                 raise HTTPException(404, f"Stock transfer {sid} not found")
             check_bu_access(user, t.from_business_unit_id)
             from src.routers.modules import _post_transfer_journal
