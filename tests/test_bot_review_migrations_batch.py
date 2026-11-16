@@ -59,8 +59,10 @@ PREV_HEAD = "c9ec96d6b1e5"
 # Workstream A (realtime review) added 7f3a9c1e5b2d on top of it:
 # CM-8 version columns, CM-6 idempotency table, CC-1 stock-batch CHECK
 # + unique, Cm-7 year-close partial unique index.
-CURRENT_HEAD = "7f3a9c1e5b2d"
-CURRENT_HEAD_DOWN = "f58eca28a187"
+# 2026-11-16 review fix F-5 added 64f310f1ca3d on top of that:
+# CM-8 version column on quotations.
+CURRENT_HEAD = "64f310f1ca3d"
+CURRENT_HEAD_DOWN = "7f3a9c1e5b2d"
 
 from types import SimpleNamespace
 

@@ -1479,6 +1479,10 @@ class Quotation(Base):
     converted_invoice_id = Column(Integer, ForeignKey("sales_invoices.id"), nullable=True)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
+    # F-5 / CM-8 optimistic locking: bumped on every mutation of the row;
+    # update_quotation accepts an optional expected_version and 409s on
+    # mismatch. Starts at 0 for pre-existing rows (migration backfill).
+    version = Column(Integer, default=0, nullable=False)
 
     business_unit = relationship("BusinessUnit")
     customer = relationship("Customer")

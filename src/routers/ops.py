@@ -174,8 +174,16 @@ def _idempotency_store(db, user, endpoint: str, key: Optional[str], body) -> Non
 
 def _check_version(obj, expected_version, label: str) -> None:
     """CM-8: an update that names the version it read must 409 when the
-    row has moved since. Absent expected_version = back-compat (no check)."""
+    row has moved since. F-9: absent expected_version stays back-compat
+    (no check) because existing internal callers and tests omit it, but
+    it is logged — an update with no version is last-write-wins, and the
+    caller should send the version it read. Requiring the field would
+    break those callers; the warning is the visible half of the fix."""
     if expected_version is None:
+        logger.warning(
+            "F-9: %s updated without expected_version — optimistic locking "
+            "skipped (last-write-wins); send the version that was read",
+            label)
         return
     if (obj.version or 0) != expected_version:
         raise HTTPException(
@@ -2031,7 +2039,10 @@ class POUpdate(BaseModel):
 @router.patch("/purchase-orders/{po_id}")
 def update_po(po_id: int, payload: POUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Edit a draft PO. Editing a rejected PO resubmits it: the approval
-    stage is recomputed from the new total."""
+    stage is recomputed from the new total.
+
+    API-only (F-6): no frontend caller — draft POs can only be edited
+    via this endpoint, not from the UI."""
     po = _po_or_404(db, po_id)
     bu_scope(user, po.business_unit_id)
     if po.status != "draft":
@@ -2106,12 +2117,36 @@ def receive_po(po_id: int, user: User = Depends(get_current_user), db: Session =
         db.refresh(po)
         raise HTTPException(409, f"PO {po.po_no} has already been received or moved (status: {po.status})")
     fx = Decimal(str(getattr(po, "exchange_rate", 1) or 1))
-    for ln in po.lines:
-        item = None
-        if ln.inventory_item_id:
-            item = db.query(InventoryItem).filter(InventoryItem.id == ln.inventory_item_id).with_for_update().first()
-            if item is not None and item.business_unit_id != po.business_unit_id:
-                raise HTTPException(400, f"PO line item {ln.inventory_item_id} does not belong to this BU")
+    # F-8 (Cm-4 class): take the item row locks in canonical sorted-id
+    # order before the stock loop, never in PO line order — two
+    # concurrent receives sharing items in opposite line order would
+    # otherwise deadlock on Postgres (cf. send_invoice). Resolve each
+    # line to an item id first (explicit id, else the existing item with
+    # that name in this BU), then lock every resolved id in sorted
+    # order; the loop below reuses the locked rows. Lines that resolve
+    # to nothing keep the old resolve-or-create path inside the loop.
+    _line_item_id: dict[int, int] = {}
+    for _idx, _ln in enumerate(po.lines):
+        _item = None
+        if _ln.inventory_item_id:
+            _item = db.query(InventoryItem).filter(
+                InventoryItem.id == _ln.inventory_item_id).first()
+            if _item is not None and _item.business_unit_id != po.business_unit_id:
+                raise HTTPException(400, f"PO line item {_ln.inventory_item_id} does not belong to this BU")
+        else:
+            _item = db.query(InventoryItem).filter(
+                InventoryItem.business_unit_id == po.business_unit_id,
+                InventoryItem.name == _ln.item_name, InventoryItem.is_active == True).first()  # noqa: E712
+        if _item is not None:
+            _line_item_id[_idx] = _item.id
+    _locked_items: dict[int, InventoryItem] = {}
+    for _item_id in sorted(set(_line_item_id.values())):
+        _locked = db.query(InventoryItem).filter(
+            InventoryItem.id == _item_id).with_for_update().first()
+        if _locked is not None:
+            _locked_items[_item_id] = _locked
+    for _idx, ln in enumerate(po.lines):
+        item = _locked_items.get(_line_item_id[_idx]) if _idx in _line_item_id else None
         if item is None:
             item = db.query(InventoryItem).filter(
                 InventoryItem.business_unit_id == po.business_unit_id,
@@ -3674,6 +3709,7 @@ def serialize_quotation(db: Session, q: Quotation) -> dict:
         "tax_rate": float(q.tax_rate or 0), "notes": q.notes,
         "currency": q.currency or "MMK", "exchange_rate": float(q.exchange_rate or 1),
         "project_id": q.project_id,
+        "version": getattr(q, "version", 0) or 0,
         "converted_invoice_id": q.converted_invoice_id,
         "subtotal": float(a["subtotal"]), "tax_amount": float(a["tax"]), "total": float(a["total"]),
         "lines": [{"id": l.id, "description": l.description, "quantity": float(l.quantity),
@@ -3757,17 +3793,24 @@ class QuotationUpdate(BaseModel):
     notes: Optional[str] = None
     project_id: Optional[int] = None
     lines: Optional[list[InvoiceLineIn]] = None
+    # F-5 / CM-8: optional optimistic-lock version the editor read.
+    expected_version: Optional[int] = None
 
 
 @router.patch("/quotations/{quotation_id}")
 def update_quotation(quotation_id: int, payload: QuotationUpdate,
                      user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    q = db.query(Quotation).filter(Quotation.id == quotation_id).first()
+    """Edit a draft quotation.
+
+    API-only (F-6): no frontend caller — draft quotations can only be
+    edited via this endpoint, not from the UI."""
+    q = db.query(Quotation).filter(Quotation.id == quotation_id).with_for_update().first()
     if not q:
         raise HTTPException(404, "Quotation not found")
     bu_scope(user, q.business_unit_id)
     if q.status != "draft":
         raise HTTPException(400, "Only draft quotations can be edited")
+    _check_version(q, payload.expected_version, f"Quotation {q.quote_no}")
     if payload.quote_date is not None:
         q.quote_date = payload.quote_date
     if payload.valid_until is not None:
@@ -3785,6 +3828,7 @@ def update_quotation(quotation_id: int, payload: QuotationUpdate,
             db.delete(old)
         db.flush()
         _fill_quotation_lines(db, q, payload.lines)
+    q.version = (q.version or 0) + 1
     db.commit()
     db.refresh(q)
     _log_audit(db, user, "UPDATE_QUOTATION", f"quotation_id={quotation_id}")
