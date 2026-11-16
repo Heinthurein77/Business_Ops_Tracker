@@ -18,13 +18,26 @@ from src.models import Base, JobHeartbeat, Notification, User
 NOW = datetime(2026, 11, 9, 12, 0, 0)
 
 
+def _now():
+    """Naive UTC now, matching src.utils.utcnow() (what main() uses for
+    its window). R-1: log lines in TestMain must be generated relative
+    to the real clock — hard-coded 2026-11-09 stamps fall outside
+    main()'s 24 h window a week later and the tests fail."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _stamp(dt):
+    return dt.strftime("%Y-%m-%d %H:%M:%S,000")
+
+
 def _lines():
+    base = _now() - timedelta(hours=2)
     return [
-        "2026-11-09 10:00:00,123 INFO business_ops_tracker: started",
-        "2026-11-09 10:01:00,123 ERROR business_ops_tracker.error: Unhandled exception error_id=abcd",
-        "2026-11-09 10:02:00,123 WARNING business_ops_tracker: PO journal failed for PO-1-0001 (receive): boom",
-        "2026-11-09 10:03:00,123 WARNING business_ops_tracker: LOGIN_LOCKOUT user=ceo_bu1",
-        "2026-11-09 10:04:00,123 WARNING business_ops_tracker: account lockout triggered for ceo_bu1",
+        f"{_stamp(base)} INFO business_ops_tracker: started",
+        f"{_stamp(base + timedelta(minutes=1))} ERROR business_ops_tracker.error: Unhandled exception error_id=abcd",
+        f"{_stamp(base + timedelta(minutes=2))} WARNING business_ops_tracker: PO journal failed for PO-1-0001 (receive): boom",
+        f"{_stamp(base + timedelta(minutes=3))} WARNING business_ops_tracker: LOGIN_LOCKOUT user=ceo_bu1",
+        f"{_stamp(base + timedelta(minutes=4))} WARNING business_ops_tracker: account lockout triggered for ceo_bu1",
         "plain line with no timestamp at all",
     ]
 
@@ -139,7 +152,7 @@ class TestMain:
         _seed_heartbeat(session, "scheduled_alerts", 1)
         _seed_heartbeat(session, "log_scan", 1)
         log_file = tmp_path / "app.log"
-        log_file.write_text("2026-11-09 11:00:00,000 INFO business_ops_tracker: ok\n")
+        log_file.write_text(f"{_stamp(_now() - timedelta(hours=1))} INFO business_ops_tracker: ok\n")
         monkeypatch.setattr(log_scan, "SessionLocal", _fresh_db_session(scan_db))
         assert log_scan.main(["--log-file", str(log_file), "--hours", "24"]) == 0
         assert _notifications(engine) == []
@@ -167,7 +180,7 @@ class TestMain:
         _seed_heartbeat(session, "scheduled_alerts", 1)
         _seed_heartbeat(session, "log_scan", 1)
         log_file = tmp_path / "app.log"
-        log_file.write_text("2026-11-09 11:00:00,000 INFO ok\n")
+        log_file.write_text(f"{_stamp(_now() - timedelta(hours=1))} INFO ok\n")
         monkeypatch.setenv("APP_LOG_FILE", str(log_file))
         monkeypatch.setattr(log_scan, "SessionLocal", _fresh_db_session(scan_db))
         assert log_scan.main([]) == 0
@@ -176,7 +189,7 @@ class TestMain:
         engine, session = scan_db
         _seed_heartbeat(session, "scheduled_alerts", 1)
         _seed_heartbeat(session, "log_scan", 1)
-        monkeypatch.setattr("sys.stdin", io.StringIO("2026-11-09 11:00:00,000 INFO ok\n"))
+        monkeypatch.setattr("sys.stdin", io.StringIO(f"{_stamp(_now() - timedelta(hours=1))} INFO ok\n"))
         monkeypatch.setattr(log_scan, "SessionLocal", _fresh_db_session(scan_db))
         assert log_scan.main(["--log-file", "-"]) == 0
 
@@ -188,7 +201,7 @@ class TestMain:
     def test_no_database_falls_back_to_stderr_and_nonzero(
             self, tmp_path, monkeypatch, capsys):
         log_file = tmp_path / "app.log"
-        log_file.write_text("2026-11-09 11:00:00,000 ERROR something broke\n")
+        log_file.write_text(f"{_stamp(_now() - timedelta(hours=1))} ERROR something broke\n")
 
         def _raise():
             raise RuntimeError("db down")
@@ -207,7 +220,7 @@ class TestMain:
         _seed_heartbeat(session, "log_scan", 1)
         session.commit()
         log_file = tmp_path / "app.log"
-        log_file.write_text("2026-11-09 11:00:00,000 ERROR something broke\n")
+        log_file.write_text(f"{_stamp(_now() - timedelta(hours=1))} ERROR something broke\n")
         monkeypatch.setattr(log_scan, "SessionLocal", lambda: sessionmaker(bind=engine)())
         assert log_scan.main(["--log-file", str(log_file)]) == 1
         assert "no active Chairman" in capsys.readouterr().err

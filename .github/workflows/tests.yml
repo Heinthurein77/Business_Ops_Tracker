@@ -28,9 +28,13 @@ jobs:
           cache: pip
       - name: Install Python dependencies
         run: pip install -r requirements.txt
-      - name: Pytest suite
-        run: python -m pytest tests/ -q
 
+      # The SPA smoke test (test_spa_route_returns_index_html) serves
+      # frontend/dist/index.html, so the production build must run BEFORE
+      # pytest — on a fresh checkout dist/ does not exist yet, and pytest
+      # first would make the gate red for a step-ordering reason, not a
+      # code reason. (Found while verifying the 2026-11-16 review fix pass:
+      # the suite went red locally as soon as dist/ was removed.)
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -39,3 +43,6 @@ jobs:
       - name: Frontend production build
         working-directory: frontend
         run: npm ci --ignore-scripts && npm run build
+
+      - name: Pytest suite
+        run: python -m pytest tests/ -q

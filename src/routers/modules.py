@@ -754,6 +754,10 @@ def sell_unit(unit_id: int, payload: SellUnitIn, user: User = Depends(get_curren
 @router.get("/invoices/{invoice_id}/installments")
 def list_installments(invoice_id: int, user: User = Depends(get_current_user),
                       db: Session = Depends(get_db)):
+    """List an invoice's installment plan.
+
+    API-only (F-6): no frontend caller — the sell response already
+    carries the installments inline, so the UI never calls this."""
     inv = db.query(SalesInvoice).filter(SalesInvoice.id == invoice_id).first()
     if not inv:
         raise HTTPException(404, "Invoice not found")

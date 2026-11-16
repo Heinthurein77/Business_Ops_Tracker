@@ -1,11 +1,11 @@
 # Caddy reverse proxy for the production compose path (R-2).
 #
-# Only used with the `tls` profile:
+# TLS is the default production path — there is no profile gate:
 #   export DOMAIN=erp.example.com
-#   docker compose -f docker-compose.prod.yml --profile tls up -d --build
+#   docker compose -f docker-compose.prod.yml up -d --build
 #
 # {$DOMAIN} comes from the caddy service's environment (compose requires
-# DOMAIN when the tls profile is used). Caddy obtains and renews a
+# DOMAIN — `up` fails loudly without it). Caddy obtains and renews a
 # Let's Encrypt certificate automatically; ports 80/443 must be reachable
 # and the domain's DNS must point at this server. No HTTP-only fallback:
 # if the domain or DNS is wrong, Caddy fails to issue and the site stays
