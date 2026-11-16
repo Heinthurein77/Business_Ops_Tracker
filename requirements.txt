@@ -30,7 +30,7 @@ cryptography==50.0.1
 boto3==1.35.90
 openpyxl==3.1.5
 python-dotenv==1.2.3
-tzdata==2025.2
+tzdata==2026.6
 # fpdf2 was the one unpinned runtime dep (A-m2): pinned to 2.8.9, the
 # version the suite runs against, so a rebuild cannot pull an untested
 # minor (PDF payslips/statements). Pin fpdf2 ONLY — see the sec-review
