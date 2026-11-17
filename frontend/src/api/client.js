@@ -1,10 +1,13 @@
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
 class ApiError extends Error {
-  constructor(message, status, redirectTo) {
+  constructor(message, status, redirectTo, data) {
     super(message);
     this.status = status;
     this.redirectTo = redirectTo;
+    // M-01: the full response body — the login flow reads
+    // `data.totp_setup_token` from a TOTP_ENROLLMENT_REQUIRED response.
+    this.data = data || null;
   }
 }
 
@@ -29,21 +32,21 @@ async function handle(response) {
   const isJson = (response.headers.get('content-type') || '').includes('application/json');
   const body = isJson ? await response.json().catch(() => ({})) : null;
   if (!response.ok) {
-    if (response.status === 401) {
+    if (response.status === 401 && body?.detail !== 'TOTP_REQUIRED') {
       // SM-1: global 401 handling — every API call funnels through here,
       // so a session that expired (or was revoked on another device) is
       // caught in one place instead of each page's .catch. The flag lets
       // the login page say "your session expired" instead of a bare
       // redirect, and the event lets AuthContext drop the user immediately
-      // (ProtectedRoute then sends the tab to /login). In-flight form
-      // data is NOT lost: the daily-report forms persist their drafts to
-      // localStorage (see utils/drafts.js) and restore them after re-login.
+      // (ProtectedRoute then sends the tab to /login). A 401 with detail
+      // TOTP_REQUIRED is not an expired session — it is a login step
+      // asking for a second-factor code — so it skips this side effect.
       try {
         sessionStorage.setItem('bot-session-expired', '1');
         window.dispatchEvent(new CustomEvent('session-expired'));
       } catch { /* storage/event unavailable — the 401 still throws below */ }
     }
-    throw new ApiError(formatDetail(body?.detail) || `Request failed (${response.status})`, response.status, body?.redirect_to);
+    throw new ApiError(formatDetail(body?.detail) || `Request failed (${response.status})`, response.status, body?.redirect_to, body);
   }
   return body;
 }
@@ -71,9 +74,16 @@ function postForm(path, formData) {
 
 export const api = {
   me: () => getJson('/api/auth/me'),
-  login: (username, password) => postJson('/api/auth/login', { username, password }),
+  login: (username, password, totpCode) => postJson('/api/auth/login', { username, password, totp_code: totpCode || null }),
   logout: () => postJson('/api/auth/logout'),
   forgotPassword: (username) => postJson('/api/auth/forgot-password', { username }),
+  // M-01: TOTP second factor. totpEnroll/totpConfirm take the setup token
+  // from a TOTP_ENROLLMENT_REQUIRED login response; omit it when calling
+  // with a live session.
+  totpEnroll: (setupToken) => postJson('/api/auth/totp/enroll', { setup_token: setupToken || null }),
+  totpConfirm: (code, setupToken) => postJson('/api/auth/totp/confirm', { code, setup_token: setupToken || null }),
+  totpDisable: (code) => postJson('/api/auth/totp/disable', { code }),
+  totpDisableUser: (userId) => postJson(`/api/admin/users/${userId}/totp-disable`),
   forcePasswordChange: (currentPassword, newPassword, confirmPassword) =>
     postJson('/api/auth/force-password-change', {
       current_password: currentPassword,

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { QRCodeCanvas } from 'qrcode.react';
 import { useAuth, roleHomePath } from '../context/AuthContext';
 import { api, ApiError } from '../api/client';
 
@@ -15,6 +16,15 @@ export default function LoginPage() {
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  // M-01: second factor. needsTotp — the account has TOTP enabled and the
+  // sign-in needs its code. enrollToken/enrollData — a Chairman signing in
+  // with no enrolled TOTP is forced through setup before any session.
+  const [totpCode, setTotpCode] = useState('');
+  const [needsTotp, setNeedsTotp] = useState(false);
+  const [enrollToken, setEnrollToken] = useState('');
+  const [enrollData, setEnrollData] = useState(null);
+  const [enrollCode, setEnrollCode] = useState('');
+  const [secretCopied, setSecretCopied] = useState(false);
 
   // SM-1: the global 401 handler sets this flag when a session expires
   // (or is revoked on another device) mid-use. Say so plainly, and clear
@@ -33,13 +43,70 @@ export default function LoginPage() {
     setError('');
     setSubmitting(true);
     try {
-      const data = await login(username, password);
+      const data = await login(username, password, totpCode || undefined);
       navigate(data.user.require_password_change ? '/force-password-change' : roleHomePath(data.user.role));
+    } catch (err) {
+      if (err instanceof ApiError && err.message === 'TOTP_REQUIRED') {
+        // The password was right — the account has TOTP enabled, so ask
+        // for its code and retry with it.
+        setNeedsTotp(true);
+        setError('Enter the 6-digit code from your authenticator app.');
+      } else if (err instanceof ApiError && err.message === 'TOTP_ENROLLMENT_REQUIRED') {
+        // Chairman with no enrolled TOTP: start setup with the token the
+        // login attempt returned (no session exists yet).
+        await startEnrollment(err.data?.totp_setup_token);
+      } else {
+        setError(err instanceof ApiError ? err.message : 'Something went wrong. Please try again.');
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function startEnrollment(setupToken) {
+    if (!setupToken) {
+      setError('Two-factor setup is required, but no setup token was returned. Please try signing in again.');
+      return;
+    }
+    setEnrollToken(setupToken);
+    setError('');
+    setSubmitting(true);
+    try {
+      const data = await api.totpEnroll(setupToken);
+      setEnrollData(data);
+      setInfo('Two-factor authentication is required for the Chairman account. Scan the code with your authenticator app, then confirm with a code.');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not start two-factor setup. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleEnrollConfirm(e) {
+    e.preventDefault();
+    setError('');
+    setSubmitting(true);
+    try {
+      await api.totpConfirm(enrollCode, enrollToken);
+      setEnrollData(null);
+      setEnrollToken('');
+      setEnrollCode('');
+      setNeedsTotp(false);
+      setTotpCode('');
+      setInfo('Two-factor authentication is set up — sign in again with your password and a code from your authenticator app.');
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Something went wrong. Please try again.');
     } finally {
       setSubmitting(false);
     }
+  }
+
+  async function copySecret() {
+    try {
+      await navigator.clipboard.writeText(enrollData.secret);
+      setSecretCopied(true);
+      setTimeout(() => setSecretCopied(false), 2000);
+    } catch { /* clipboard unavailable — the secret is still shown */ }
   }
 
   async function handleForgot(e) {
@@ -130,6 +197,55 @@ export default function LoginPage() {
                   <div className="mt-5 rounded-lg bg-emerald-50 border border-emerald-200 px-4 py-3 text-sm text-emerald-700">{info}</div>
                 )}
 
+                {/* M-01: forced TOTP enrollment — shown instead of the
+                    sign-in form once setup has started. */}
+                {enrollData && (
+                  <div className="mt-8 space-y-5">
+                    <div className="flex justify-center rounded-lg bg-white p-4">
+                      <QRCodeCanvas value={enrollData.otpauth_url} size={192} />
+                    </div>
+                    <p className="text-sm lg:text-slate-500 text-slate-400">
+                      Scan this code with your authenticator app (Google Authenticator, Microsoft Authenticator, or
+                      similar). If you cannot scan it, enter this secret manually instead:
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 break-all rounded-lg border lg:border-slate-300 border-slate-700 lg:bg-slate-50 bg-slate-900 px-3 py-2 text-sm lg:text-slate-900 text-white">{enrollData.secret}</code>
+                      <button
+                        type="button"
+                        onClick={copySecret}
+                        className="shrink-0 rounded-lg border lg:border-slate-300 border-slate-700 px-3 py-2 text-xs font-semibold lg:text-slate-700 text-slate-300"
+                      >
+                        {secretCopied ? 'Copied' : 'Copy'}
+                      </button>
+                    </div>
+                    <form onSubmit={handleEnrollConfirm} className="space-y-5">
+                      <div>
+                        <label className="block text-sm font-medium lg:text-slate-700 text-slate-300 mb-1.5">Authenticator code</label>
+                        <input
+                          type="text"
+                          required
+                          autoComplete="one-time-code"
+                          inputMode="numeric"
+                          maxLength={10}
+                          placeholder="6-digit code"
+                          value={enrollCode}
+                          onChange={(e) => setEnrollCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                          className="w-full rounded-lg border lg:border-slate-300 border-slate-700 lg:bg-white bg-slate-900 lg:text-slate-900 text-white px-4 py-2.5 text-sm tracking-[0.3em] shadow-sm focus:outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 placeholder:text-slate-500 placeholder:tracking-normal transition"
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={submitting}
+                        className="w-full rounded-lg bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-700 hover:to-indigo-700 text-white font-semibold py-2.5 text-sm shadow-lg shadow-brand-600/30 transition-all active:scale-[0.99] disabled:opacity-60"
+                      >
+                        {submitting ? 'Confirming…' : 'Confirm and Enable'}
+                      </button>
+                    </form>
+                  </div>
+                )}
+
+                {!enrollData && (
+                <>
                 <form onSubmit={handleLogin} className="mt-8 space-y-5">
                   <div>
                     <label className="block text-sm font-medium lg:text-slate-700 text-slate-300 mb-1.5">Username</label>
@@ -157,6 +273,25 @@ export default function LoginPage() {
                       className="w-full rounded-lg border lg:border-slate-300 border-slate-700 lg:bg-white bg-slate-900 lg:text-slate-900 text-white px-4 py-2.5 text-sm shadow-sm focus:outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 placeholder:text-slate-500 transition"
                     />
                   </div>
+                  {needsTotp && (
+                    <div>
+                      <label className="block text-sm font-medium lg:text-slate-700 text-slate-300 mb-1.5">Authenticator code</label>
+                      <input
+                        type="text"
+                        required
+                        autoComplete="one-time-code"
+                        inputMode="numeric"
+                        maxLength={10}
+                        placeholder="6-digit code"
+                        value={totpCode}
+                        onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                        className="w-full rounded-lg border lg:border-slate-300 border-slate-700 lg:bg-white bg-slate-900 lg:text-slate-900 text-white px-4 py-2.5 text-sm tracking-[0.3em] shadow-sm focus:outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 placeholder:text-slate-500 placeholder:tracking-normal transition"
+                      />
+                      <p className="mt-1.5 text-xs lg:text-slate-500 text-slate-400">
+                        Open your authenticator app and enter the current 6-digit code for this account.
+                      </p>
+                    </div>
+                  )}
                   <button
                     type="submit"
                     disabled={submitting}
@@ -177,6 +312,8 @@ export default function LoginPage() {
                 >
                   Forgot Password?
                 </button>
+                </>
+                )}
 
                 {/* SM-1: document the all-devices logout — signing out, or
                     changing a password, ends the session on every device

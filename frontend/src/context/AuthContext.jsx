@@ -58,8 +58,8 @@ export function AuthProvider({ children }) {
     return () => window.removeEventListener('session-expired', onExpired);
   }, []);
 
-  const login = useCallback(async (username, password) => {
-    const data = await api.login(username, password);
+  const login = useCallback(async (username, password, totpCode) => {
+    const data = await api.login(username, password, totpCode);
     setUser(data.user);
     // Exact expiry comes from /api/auth/me; refresh so the warning banner
     // has the real value instead of a client-side guess.

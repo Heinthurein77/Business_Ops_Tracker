@@ -24,6 +24,7 @@ import BusinessUnitDetailPage from './pages/BusinessUnitDetailPage';
 import HeadOfficePage from './pages/HeadOfficePage';
 import ManageUsersPage from './pages/ManageUsersPage';
 import BusinessUnitsPage from './pages/BusinessUnitsPage';
+import TotpSetupPage from './pages/TotpSetupPage';
 
 function RootRedirect() {
   const { user, loading } = useAuth();
@@ -199,6 +200,14 @@ export default function App() {
             element={
               <ProtectedRoute roles={['Chairman']}>
                 <SecurityLogPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/totp-setup"
+            element={
+              <ProtectedRoute>
+                <TotpSetupPage />
               </ProtectedRoute>
             }
           />
