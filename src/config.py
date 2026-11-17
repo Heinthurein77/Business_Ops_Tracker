@@ -22,6 +22,20 @@ def _bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _int(name: str, default: int) -> int:
+    """int(os.getenv(...)) with a named error (m-07): a typo'd env var used
+    to crash startup with a bare ValueError traceback instead of saying
+    which variable was bad. Whitespace is stripped; anything else that is
+    not a plain integer refuses to start."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        raise RuntimeError(f"{name} must be an integer, got {raw!r}") from None
+
+
 def _enforce_db_tls(url: str, production: bool) -> str:
     """Normalize a Postgres connection string for SQLAlchemy + psycopg2 and
     make sure production connections are encrypted.
@@ -92,7 +106,7 @@ class Settings:
                 f"{sorted(_KNOWN_ENVIRONMENTS)}."
             )
         self.IS_PRODUCTION: bool = self.ENVIRONMENT == "production"
-        self.PORT: int = int(os.getenv("PORT", "8000"))
+        self.PORT: int = _int("PORT", 8000)
         self.APP_TIMEZONE: str = os.getenv("APP_TIMEZONE", "Asia/Yangon")
         self.APP_NAME: str = os.getenv("APP_NAME", "Business Operations & CEO Tracking System")
 
@@ -152,7 +166,7 @@ class Settings:
         # Pinned: a configurable algorithm is only a way to misconfigure into
         # "none" or an asymmetric algorithm confusable with the HMAC secret.
         self.JWT_ALGORITHM: str = "HS256"
-        self.JWT_EXPIRE_MINUTES: int = int(os.getenv("JWT_EXPIRE_MINUTES", "480"))
+        self.JWT_EXPIRE_MINUTES: int = _int("JWT_EXPIRE_MINUTES", 480)
         self.SECURE_COOKIES: bool = self.IS_PRODUCTION
         # The __Host- prefix makes browsers refuse the cookie unless it is
         # Secure, Path=/ and has no Domain — so a sibling subdomain or a plain
@@ -161,8 +175,8 @@ class Settings:
         self.COOKIE_NAME: str = "__Host-access_token" if self.IS_PRODUCTION else "access_token"
         # How long a temporary password handed out by the Chairman stays
         # usable, so an unclaimed one can't linger as a live credential.
-        self.TEMP_PASSWORD_TTL_HOURS_NEW_ACCOUNT: int = int(os.getenv("TEMP_PASSWORD_TTL_HOURS_NEW_ACCOUNT", "72"))
-        self.TEMP_PASSWORD_TTL_HOURS_RESET: int = int(os.getenv("TEMP_PASSWORD_TTL_HOURS_RESET", "24"))
+        self.TEMP_PASSWORD_TTL_HOURS_NEW_ACCOUNT: int = _int("TEMP_PASSWORD_TTL_HOURS_NEW_ACCOUNT", 72)
+        self.TEMP_PASSWORD_TTL_HOURS_RESET: int = _int("TEMP_PASSWORD_TTL_HOURS_RESET", 24)
         # Optional: supply the first Chairman password from a secret instead
         # of having the app generate one and print it to the logs.
         self.BOOTSTRAP_CHAIRMAN_PASSWORD: str = os.getenv("BOOTSTRAP_CHAIRMAN_PASSWORD", "")
@@ -201,7 +215,7 @@ class Settings:
         # X-Forwarded-For counting TRUSTED_PROXY_HOPS entries in from the
         # right — never the left-most entry, which the client controls.
         self.CLIENT_IP_HEADER: str = os.getenv("CLIENT_IP_HEADER", "").strip().lower()
-        self.TRUSTED_PROXY_HOPS: int = max(1, int(os.getenv("TRUSTED_PROXY_HOPS", "1")))
+        self.TRUSTED_PROXY_HOPS: int = max(1, _int("TRUSTED_PROXY_HOPS", 1))
         # Hostnames this app answers to (unset = not enforced; include
         # localhost/127.0.0.1 if you set it, the container healthcheck uses
         # 127.0.0.1) and the origins allowed to make state-changing browser
@@ -215,13 +229,13 @@ class Settings:
         # enforced by the edge middleware (src/edge.py). The auth endpoints
         # have their own database-backed throttles; this one exists so a
         # single signed-in account can't hammer PDF/Excel generation.
-        self.EDGE_EXPORT_RATE_LIMIT: int = int(os.getenv("EDGE_EXPORT_RATE_LIMIT", "60"))
-        self.EDGE_EXPORT_RATE_WINDOW: int = int(os.getenv("EDGE_EXPORT_RATE_WINDOW", "300"))
+        self.EDGE_EXPORT_RATE_LIMIT: int = _int("EDGE_EXPORT_RATE_LIMIT", 60)
+        self.EDGE_EXPORT_RATE_WINDOW: int = _int("EDGE_EXPORT_RATE_WINDOW", 300)
         # Per-user/per-minute budget for mutating API endpoints, enforced by
         # the edge middleware (D-10). Generous on purpose (120/min): it only
         # stops scripted abuse, never a human clicking through the app.
-        self.EDGE_WRITE_RATE_LIMIT: int = int(os.getenv("EDGE_WRITE_RATE_LIMIT", "120"))
-        self.EDGE_WRITE_RATE_WINDOW: int = int(os.getenv("EDGE_WRITE_RATE_WINDOW", "60"))
+        self.EDGE_WRITE_RATE_LIMIT: int = _int("EDGE_WRITE_RATE_LIMIT", 120)
+        self.EDGE_WRITE_RATE_WINDOW: int = _int("EDGE_WRITE_RATE_WINDOW", 60)
         # Per-user/per-day upload budget, enforced by the edge middleware
         # (D-m7). Same in-process sliding-window mechanism as the D-10
         # write budget, but counted per calendar-day window on upload
@@ -232,9 +246,9 @@ class Settings:
         # (receipts, report attachments, profile photos) and only stops
         # scripted abuse. Size is measured from Content-Length, which the
         # edge already validates against the per-request cap.
-        self.EDGE_UPLOAD_DAILY_COUNT_LIMIT: int = int(os.getenv("EDGE_UPLOAD_DAILY_COUNT_LIMIT", "50"))
-        self.EDGE_UPLOAD_DAILY_BYTES_LIMIT: int = int(os.getenv(
-            "EDGE_UPLOAD_DAILY_BYTES_LIMIT", str(200 * 1024 * 1024)))
+        self.EDGE_UPLOAD_DAILY_COUNT_LIMIT: int = _int("EDGE_UPLOAD_DAILY_COUNT_LIMIT", 50)
+        self.EDGE_UPLOAD_DAILY_BYTES_LIMIT: int = _int(
+            "EDGE_UPLOAD_DAILY_BYTES_LIMIT", 200 * 1024 * 1024)
 
         # --- Cloudflare R2 ---
         self.R2_ACCOUNT_ID: str = os.getenv("R2_ACCOUNT_ID", "")
@@ -282,7 +296,7 @@ class Settings:
         )
 
         # --- Business Rules ---
-        self.TOTAL_BUSINESS_UNITS: int = int(os.getenv("TOTAL_BUSINESS_UNITS", "23"))
+        self.TOTAL_BUSINESS_UNITS: int = _int("TOTAL_BUSINESS_UNITS", 23)
 
 
 settings = Settings()

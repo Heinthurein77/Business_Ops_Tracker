@@ -108,6 +108,16 @@ class TestProdRefusals:
         _assert_refused(_prod(ENVIRONMENT="staging"), tmp_path, "ENVIRONMENT")
         _assert_refused(_prod(ENVIRONMENT="prod"), tmp_path, "ENVIRONMENT")
 
+    # m-07 (minor): a typo'd integer env var used to crash startup with a
+    # bare ValueError; _int() names the variable instead.
+    def test_non_integer_port_refused_with_named_error(self, tmp_path):
+        _assert_refused(_prod(PORT="eight-thousand"), tmp_path, "PORT must be an integer")
+
+    def test_non_integer_total_business_units_refused(self, tmp_path):
+        _assert_refused(
+            _prod(TOTAL_BUSINESS_UNITS="twenty-three"), tmp_path,
+            "TOTAL_BUSINESS_UNITS must be an integer")
+
 
 class TestGoodConfigsBoot:
     def test_good_production_config_boots(self, tmp_path):
