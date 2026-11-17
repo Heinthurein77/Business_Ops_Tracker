@@ -20,6 +20,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from src.auth import (
@@ -148,16 +149,31 @@ def _run_startup_step(step_name: str, func, *, attempts: int = STARTUP_DB_MAX_AT
 
 
 # File a generated (random) bootstrap Chairman password is written to
-# instead of the log stream (D-13). It lives under LOCAL_UPLOAD_DIR — the
-# writable volume, /app/uploads in the Docker image — with 0600 perms, and
-# the server operator fetches it with:
-#   docker compose exec web cat /app/uploads/.bootstrap_chairman_password
-# then deletes the file after the first login.
+# instead of the log stream (D-13). It lives NEXT TO the uploads
+# directory — a sibling of LOCAL_UPLOAD_DIR, never inside it — with 0600
+# perms, and the server operator fetches it with:
+#   docker compose exec web cat /app/.bootstrap_chairman_password
+# then deletes the file after the first login. m-17: the uploads directory
+# is served (session-gated) in non-production, so a live credential file
+# must not sit in it; the file is also deleted automatically after the
+# first successful Chairman login (see routers/auth.py login()).
 BOOTSTRAP_PASSWORD_FILENAME = ".bootstrap_chairman_password"
 
 
 def _bootstrap_password_path() -> Path:
-    return Path(settings.LOCAL_UPLOAD_DIR) / BOOTSTRAP_PASSWORD_FILENAME
+    return Path(settings.LOCAL_UPLOAD_DIR).parent / BOOTSTRAP_PASSWORD_FILENAME
+
+
+def _delete_bootstrap_password_file() -> bool:
+    """Deletes the bootstrap password file after the first successful
+    Chairman login. Best effort: returns False (never raises) when there
+    is nothing to delete or the delete fails, so login can never fail
+    over cleanup."""
+    try:
+        _bootstrap_password_path().unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
 
 
 def _write_bootstrap_password_file(password: str) -> Path:
@@ -235,9 +251,9 @@ def _ensure_user(db, username, password, role, require_password_change, business
     )
 
 
-def seed_users(db) -> None:
+def seed_users(db) -> dict:
     # Seeded on first boot only (_ensure_user is a no-op once the account
-    # exists) with a known default password, so every seeded account —
+    # exists) with a random password per account, so every seeded account —
     # including the admin-tier ones — must rotate it on first login.
     #
     # In production this can't use a hardcoded, source-visible password:
@@ -246,11 +262,15 @@ def seed_users(db) -> None:
     # real (ENVIRONMENT=production) deploy only bootstraps the one Chairman
     # account — with the password from BOOTSTRAP_CHAIRMAN_PASSWORD when that
     # secret is configured (never logged), otherwise a random one written to
-    # the 0600 file /app/uploads/.bootstrap_chairman_password (see D-13)
-    # — and stops there;
+    # the 0600 file /app/.bootstrap_chairman_password (see D-13, m-17: a
+    # sibling of the uploads directory, never inside it) — and stops there;
     # every other account is created afterward through Manage Users
     # (Chairman-only), which already hands out its own one-time temporary
     # password per account instead of a fixed, publicly-known string.
+    #
+    # Returns the {username: password} pairs it generated this run (empty
+    # when nothing was seeded), so a dev/test caller can log in with them;
+    # the lifespan caller ignores the return value.
     if settings.ENVIRONMENT.lower() == "production":
         if db.query(User).filter(User.username == "chairman").first() is None:
             configured_password = settings.BOOTSTRAP_CHAIRMAN_PASSWORD
@@ -277,50 +297,116 @@ def seed_users(db) -> None:
                 else:
                     # D-13: the generated password is NOT printed to the log
                     # stream — anyone with log access would hold the Chairman
-                    # credential. Only a truncated hint plus the file path is
-                    # logged; the full value is in the 0600 file, retrievable
-                    # by the server operator (see _write_bootstrap_password_file).
+                    # credential. Only the file path is logged (m-17: not
+                    # even a prefix hint — a prefix narrows a brute-force
+                    # search); the full value is in the 0600 file,
+                    # retrievable by the server operator (see
+                    # _write_bootstrap_password_file). The file is deleted
+                    # automatically after the first successful Chairman login.
                     password_file = _write_bootstrap_password_file(bootstrap_password)
                     logger.warning(
                         "First boot: seeded the 'chairman' account with a random temporary "
-                        "password — the full value is NOT shown here; it was written to %s "
-                        "(hint: first 4 characters %s…). Delete that file after first login.",
+                        "password — the full value is NOT shown here; it was written to %s. "
+                        "Delete that file after first login.",
                         password_file,
-                        bootstrap_password[:4],
                     )
-        return
+        return {}
 
-    # Defence in depth for the known-password seeding below (audit finding
-    # L4): config.py already refuses to boot on an unrecognised ENVIRONMENT,
+    # Defence in depth for the dev seeding below (audit finding L4):
+    # config.py already refuses to boot on an unrecognised ENVIRONMENT,
     # but this branch must be unreachable outside development/test on its
     # own merits — if a future environment name ever slips past the config
-    # check, fail loudly here rather than seed publicly-known passwords.
+    # check, fail loudly here rather than seed dev accounts.
     if settings.ENVIRONMENT not in ("development", "test"):
         raise RuntimeError(
-            f"Refusing to seed known default passwords with ENVIRONMENT={settings.ENVIRONMENT!r}: "
+            f"Refusing to seed dev accounts with ENVIRONMENT={settings.ENVIRONMENT!r}: "
             "the dev seed branch is for development/test only."
         )
-    logger.warning(
-        "DEV SEED PASSWORDS IN USE - seeded accounts have publicly-known passwords and must "
-        "rotate them at first login. NEVER run this mode in production."
-    )
 
-    _ensure_user(db, "chairman", "Chairman123!", "Chairman", True, full_name="Chairman")
-    _ensure_user(db, "ho_staff", "HOStaff123!", "HO", True, full_name="Head Office Staff")
+    # M-02: the publicly-known-password branch is deleted. Dev accounts are
+    # seeded ONLY when ALLOW_DEV_SEED=true is set explicitly AND the
+    # database is local (sqlite or localhost) — one wrong ENVIRONMENT value
+    # on a fresh production database can no longer create 25 accounts with
+    # passwords readable in the public source. Each account gets a random
+    # password, written once to a 0600 file (same pattern as the bootstrap
+    # file) and returned to the caller; the values are never logged.
+    if not settings.ALLOW_DEV_SEED:
+        logger.warning(
+            "Dev seed accounts are disabled (ALLOW_DEV_SEED is not true) — "
+            "no dev accounts seeded. Create accounts through Manage Users."
+        )
+        return {}
+    if not _is_local_database_url(settings.DATABASE_URL):
+        raise RuntimeError(
+            "Refusing to seed dev accounts: ALLOW_DEV_SEED is set but DATABASE_URL "
+            "is not local (sqlite or localhost) — dev seeding is for local "
+            "databases only."
+        )
+
+    generated: dict[str, str] = {}
+
+    def _seed_dev_account(username, role, business_unit_id=None, full_name=None):
+        # _ensure_user is a no-op when the account already exists, so only
+        # newly created accounts get a generated password recorded here.
+        if db.query(User).filter(User.username == username).first() is not None:
+            return
+        password = secrets.token_urlsafe(18)
+        _ensure_user(db, username, password, role, True,
+                     business_unit_id=business_unit_id, full_name=full_name)
+        generated[username] = password
+
+    _seed_dev_account("chairman", "Chairman", full_name="Chairman")
+    _seed_dev_account("ho_staff", "HO", full_name="Head Office Staff")
 
     business_units = {bu.code: bu.id for bu in db.query(BusinessUnit).all()}
     for i in range(1, settings.TOTAL_BUSINESS_UNITS + 1):
         code = f"BU{i}"
-        _ensure_user(
-            db,
+        _seed_dev_account(
             f"ceo_bu{i}",
-            "BUCeo2026!",
             "CEO",
-            True,
             business_unit_id=business_units.get(code),
             full_name=f"CEO - Business Unit {i}",
         )
     db.commit()
+    if generated:
+        seed_file = _write_dev_seed_password_file(generated)
+        logger.warning(
+            "Dev seed accounts created with random passwords (rotate them at first "
+            "login) — passwords written once to %s (0600); they are NOT shown here. "
+            "NEVER run this mode against a shared database.",
+            seed_file,
+        )
+    return generated
+
+
+def _is_local_database_url(url: str) -> bool:
+    """True for sqlite URLs and for Postgres on localhost — the only
+    databases dev seeding may ever touch (M-02)."""
+    if url.startswith("sqlite:"):
+        return True
+    try:
+        host = (make_url(url).host or "").lower()
+    except Exception:  # noqa: BLE001 - an unparseable URL is not local
+        return False
+    return host in {"localhost", "127.0.0.1", "::1"}
+
+
+def _write_dev_seed_password_file(passwords: dict[str, str]) -> Path:
+    """Writes the generated dev-seed passwords to a 0600 file next to the
+    uploads directory (same pattern as the bootstrap file) and returns its
+    path. The values are never logged."""
+    path = Path(settings.LOCAL_UPLOAD_DIR).parent / ".dev_seed_passwords"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(
+            fd,
+            "".join(f"{username}: {password}\n" for username, password in sorted(passwords.items())).encode("utf-8"),
+        )
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
+    return path
 
 
 @asynccontextmanager
@@ -333,6 +419,12 @@ async def lifespan(app: FastAPI):
         settings.CLIENT_IP_HEADER or "(X-Forwarded-For, right-counted)",
         settings.TRUSTED_PROXY_HOPS,
     )
+    # m-28: fail startup in production when the client-IP self-check fails
+    # — a misconfigured proxy silently disables per-IP login throttling,
+    # and the app must not serve traffic in that state.
+    from src.throttle import enforce_client_ip_configuration
+
+    enforce_client_ip_configuration()
     if settings.RUN_MIGRATIONS_ON_STARTUP:
         _run_startup_step("migrations", run_migrations)
     else:
@@ -473,6 +565,11 @@ if not settings.IS_PRODUCTION:
         base = Path(settings.LOCAL_UPLOAD_DIR).resolve()
         target = (base / file_path).resolve()
         if target != base and base not in target.parents:
+            raise HTTPException(status_code=404, detail="Not found")
+        # m-17: dotfiles are never served — the bootstrap/recovery
+        # credential files live outside this directory now, but a dotfile
+        # must never become downloadable through this route by mistake.
+        if any(part.startswith(".") for part in Path(file_path).parts):
             raise HTTPException(status_code=404, detail="Not found")
         if not target.is_file():
             raise HTTPException(status_code=404, detail="Not found")

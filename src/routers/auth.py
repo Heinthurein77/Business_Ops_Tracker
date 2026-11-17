@@ -135,6 +135,18 @@ def login(payload: LoginRequest, request: Request, response: Response, db: Sessi
     # owner check), the same warning get_current_user emits per request.
     warn_null_bu_ceo(user)
     log_audit(db, user, "LOGIN_SUCCESS", "", request)
+    if user.role == "Chairman":
+        # m-17: the bootstrap password file has served its purpose once
+        # the Chairman signs in — delete it so the credential stops
+        # existing on disk. Local import: main.py imports this router, so
+        # a top-level import would be circular. Best effort only: login
+        # must never fail over cleanup.
+        try:
+            from src.main import _delete_bootstrap_password_file
+
+            _delete_bootstrap_password_file()
+        except Exception:  # noqa: BLE001 - cleanup must not break login
+            logger.warning("Could not delete the bootstrap password file after Chairman login")
 
     _issue_session_cookie(response, user)
     response.headers["Cache-Control"] = "no-store"

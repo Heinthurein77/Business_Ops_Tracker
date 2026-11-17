@@ -125,6 +125,9 @@ class Settings:
         # When migrations run as a separate release step (a PRE_DEPLOY job),
         # set this to false so the web container never needs owner credentials.
         self.RUN_MIGRATIONS_ON_STARTUP: bool = _bool("RUN_MIGRATIONS_ON_STARTUP", True)
+        # M-02: dev seed accounts are opt-in only — see seed_users in
+        # src/main.py. Never set this on a shared/production database.
+        self.ALLOW_DEV_SEED: bool = _bool("ALLOW_DEV_SEED", False)
 
         # --- Auth / JWT ---
         _insecure_default_secret = "insecure-dev-secret-change-me-in-render-env-vars"
@@ -208,6 +211,18 @@ class Settings:
         # requests, e.g. https://app.example.com.
         self.ALLOWED_HOSTS: list[str] = _csv("ALLOWED_HOSTS")
         self.ALLOWED_ORIGINS: list[str] = _csv("ALLOWED_ORIGINS")
+        if self.IS_PRODUCTION and (not self.ALLOWED_HOSTS or not self.ALLOWED_ORIGINS):
+            # m-35: with neither allowlist set, the Host check is off and
+            # the CSRF same-origin fallback trusts whatever Host the
+            # client sent — so both are required in production, like
+            # JWT_SECRET_KEY and DATA_ENCRYPTION_KEY above. The compose
+            # path sets both; any other deploy path must too.
+            raise RuntimeError(
+                "ALLOWED_HOSTS and ALLOWED_ORIGINS must both be set in production — "
+                "refusing to start with the Host check disabled. Set them to the "
+                "hostnames/origins this deployment answers to (include "
+                "localhost/127.0.0.1 if the container healthcheck uses them)."
+            )
         # enforce | report-only | off — report-only lets you click through the
         # app watching the browser console for violations before enforcing.
         self.CSP_MODE: str = os.getenv("CSP_MODE", "enforce").strip().lower()

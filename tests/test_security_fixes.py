@@ -370,13 +370,16 @@ class TestSeedPasswordGuard:
                 seed_users(db)
         assert db.query(User).count() == 0
 
-    def test_production_branch_never_seeds_known_passwords(self, db):
+    def test_production_branch_never_seeds_known_passwords(self, db, tmp_path, monkeypatch):
         from unittest import mock
 
         from src.auth import verify_password
         from src.config import settings
         from src.main import seed_users
 
+        # Keep the generated bootstrap file inside tmp (it now lives next
+        # to the uploads dir, not inside it — m-17).
+        monkeypatch.setattr(settings, "LOCAL_UPLOAD_DIR", str(tmp_path / "uploads"))
         with mock.patch.object(settings, "ENVIRONMENT", "production"):
             seed_users(db)
         assert {u.username for u in db.query(User).all()} == {"chairman"}
@@ -384,15 +387,59 @@ class TestSeedPasswordGuard:
         assert not verify_password("Chairman123!", chairman.hashed_password)
         assert chairman.require_password_change is True
 
-    def test_dev_branch_still_seeds_in_test_environment(self, db):
+    def test_dev_branch_seeds_nothing_without_allow_dev_seed(self, db):
+        # M-02: the known-password branch is gone — without the explicit
+        # ALLOW_DEV_SEED flag, no dev accounts are seeded at all, even in
+        # the test environment.
+        from unittest import mock
+
+        from src.config import settings
+        from src.main import seed_users
+
+        with mock.patch.multiple(settings, ENVIRONMENT="test", TOTAL_BUSINESS_UNITS=1):
+            generated = seed_users(db)
+        assert generated == {}
+        assert db.query(User).count() == 0
+
+    def test_dev_branch_seeds_random_passwords_with_flag_and_local_db(self, db, tmp_path, monkeypatch):
+        # M-02: with ALLOW_DEV_SEED=true and a local (sqlite) DATABASE_URL,
+        # dev accounts are seeded with random passwords — never the old
+        # publicly-known ones — written once to a 0600 file.
+        import stat
+
         from unittest import mock
 
         from src.auth import verify_password
         from src.config import settings
         from src.main import seed_users
 
-        with mock.patch.multiple(settings, ENVIRONMENT="test", TOTAL_BUSINESS_UNITS=1):
-            seed_users(db)
+        monkeypatch.setattr(settings, "LOCAL_UPLOAD_DIR", str(tmp_path / "uploads"))
+        with mock.patch.multiple(settings, ENVIRONMENT="test", TOTAL_BUSINESS_UNITS=1, ALLOW_DEV_SEED=True):
+            generated = seed_users(db)
         chairman = db.query(User).filter(User.username == "chairman").one()
-        assert verify_password("Chairman123!", chairman.hashed_password)
+        assert not verify_password("Chairman123!", chairman.hashed_password)
+        assert verify_password(generated["chairman"], chairman.hashed_password)
         assert db.query(User).filter(User.username == "ceo_bu1").count() == 1
+        assert not verify_password("BUCeo2026!", db.query(User).filter(User.username == "ceo_bu1").one().hashed_password)
+        seed_file = tmp_path / ".dev_seed_passwords"
+        assert seed_file.is_file()
+        assert stat.S_IMODE(seed_file.stat().st_mode) == 0o600
+
+    def test_dev_seed_refuses_non_local_database_url(self, db):
+        # M-02: the flag alone is not enough — a non-local DATABASE_URL
+        # must refuse, so a mis-set flag can never seed a shared database.
+        from unittest import mock
+
+        from src.config import settings
+        from src.main import seed_users
+
+        with mock.patch.multiple(
+            settings,
+            ENVIRONMENT="test",
+            TOTAL_BUSINESS_UNITS=1,
+            ALLOW_DEV_SEED=True,
+            DATABASE_URL="postgresql://user:pass@db.example.com:5432/app",
+        ):
+            with pytest.raises(RuntimeError):
+                seed_users(db)
+        assert db.query(User).count() == 0

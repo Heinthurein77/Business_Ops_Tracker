@@ -28,7 +28,7 @@ from starlette.requests import Request
 from src.auth import decode_access_token
 from src.client_ip import get_client_ip
 from src.config import settings
-from src.throttle import check_client_ip_configuration, ip_is_throttle_key
+from src.throttle import enforce_client_ip_configuration, ip_is_throttle_key
 
 _error_log = logging.getLogger("business_ops_tracker.error")
 
@@ -259,9 +259,9 @@ class EdgeMiddleware:
         # SM-3: verify at startup (this middleware is built once, when the
         # app starts) that the deployed proxy setup resolves to a real
         # client IP — a misconfigured CLIENT_IP_HEADER / TRUSTED_PROXY_HOPS
-        # silently disables per-IP throttling. Best effort; the check
-        # itself never raises.
-        check_client_ip_configuration()
+        # silently disables per-IP throttling. m-28: in production a
+        # failed check refuses to start instead of logging once.
+        enforce_client_ip_configuration()
 
     # ------------------------------------------------------------------ ASGI
 

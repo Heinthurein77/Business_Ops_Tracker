@@ -379,6 +379,21 @@ def unlock_user_login(
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # m-30: the lockout on the Chairman account is the last line of defence
+    # against guessing its password — HO staff must not be able to clear it
+    # unilaterally (Chairman recovery is the out-of-band reset script), and
+    # nobody may clear their own lockout.
+    if target.role == "Chairman":
+        raise HTTPException(
+            status_code=403,
+            detail="The Chairman account cannot be unlocked from this endpoint",
+        )
+    if target.id == user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="You cannot unlock your own account",
+        )
+
     was_locked = login_lockout_remaining(db, target.username) is not None
     if was_locked:
         db.add(
