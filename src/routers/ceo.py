@@ -36,7 +36,6 @@ from src.utils import (
     build_resubmit_audit_detail,
     build_social_rows,
     calculate_age,
-    classify_post_error,
     compute_bu_quadrant_summary,
     compute_field_changes,
     compute_monthly_social_counts,
@@ -51,7 +50,6 @@ from src.utils import (
     parse_bounded_decimal,
     parse_monthly_target_amounts,
     serialize_ceo_profile,
-    server_error,
     shift_month,
     today_local,
     todays_submission_events,
@@ -1445,30 +1443,4 @@ def submit_report(
     audit_detail = build_resubmit_audit_detail(report_date, changes)
     log_audit(db, user, "DAILY_REPORT_SUBMITTED", audit_detail, request)
 
-    # ERP Phase 1: auto-post the day's revenue to the journal (no-op until
-    # the BU's chart of accounts is provisioned). Never break submission —
-    # but never hide a posting failure either: the report is saved, and the
-    # response says the books did not move (previously a bare except +
-    # {"ok": True} swallowed it entirely).
-    auto_post_error = None
-    try:
-        from src.routers.accounting import auto_post_daily_financial
-        db.refresh(financial)
-        auto_post_daily_financial(db, financial, user.id)
-    except Exception as exc:
-        db.rollback()
-        # SM-13: route through server_error() — the response and the audit
-        # row carry a fixed message + error_id, never the raw exception
-        # text (which can carry SQL fragments and table/column names).
-        # The fixed reason category (never raw text) tells the operator
-        # *why* the books did not move.
-        err = server_error("Daily report journal could not be posted", exc, logger, context="ceo auto-post")
-        auto_post_error = err.detail
-        auto_post_reason = classify_post_error(exc)
-        log_audit(db, user, "DAILY_REPORT_AUTO_POST_FAILED",
-                  f"date={report_date} error_id={_error_id_of(err.detail)}", request)
-
-    if auto_post_error is not None:
-        return {"ok": True, "auto_post_failed": True, "auto_post_error": auto_post_error,
-                "auto_post_reason": auto_post_reason}
     return {"ok": True}

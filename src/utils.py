@@ -62,21 +62,6 @@ def server_error(detail: str, exc: BaseException, logger: logging.Logger,
     return HTTPException(500, f"{detail} (error_id: {error_id})")
 
 
-def classify_post_error(exc: BaseException) -> str:
-    """Map an auto-post failure to a safe, fixed reason category (SM-13).
-
-    The category is derived from the exception TYPE/status, never from its
-    text, so no SQL fragments or internals can leak into a response — but
-    the operator still learns *why* the books did not move. Only the
-    closed-period case has a distinct category today; everything else is
-    "journal_failed" and must be diagnosed by error_id in the logs.
-    """
-    if (isinstance(exc, HTTPException) and exc.status_code == 400
-            and "closed" in str(exc.detail).lower()):
-        return "period_closed"
-    return "journal_failed"
-
-
 def today_local() -> date:
     return datetime.now(APP_TZ).date()
 

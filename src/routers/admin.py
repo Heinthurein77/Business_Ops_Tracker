@@ -14,7 +14,6 @@ from sqlalchemy.orm import Session
 
 from src.auth import require_roles
 from src.database import get_db
-from src.jobs.reconcile_journals import find_journal_failures
 from src.models import (
     ActivityLog,
     AuditLog,
@@ -1131,33 +1130,6 @@ def security_log(user: User = Depends(require_chairman), db: Session = Depends(g
     return {"logs": logs}
 
 
-@router.get("/journal-failures")
-def journal_failures(limit: int = 200, user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    """SC-1: operations whose journal never posted (POS sales, returns,
-    transfers, expense approvals, daily reports) — the admin view for the
-    daily reconciliation job (src/jobs/reconcile_journals.py, same
-    detection). Each entry carries the (source, source_id) pair the
-    re-post endpoint takes, so the frontend can retry it in place:
-    POST /api/accounting/journal/retry {"source": ..., "source_id": ...}
-    (returns already_posted:true if a journal has since appeared, 404 if
-    the source is unknown, 409 if it still cannot post)."""
-    limit = max(1, min(limit, 500))
-    result = find_journal_failures(db, limit=limit)
-    return {
-        "failures": result["failures"],
-        # G-5: `total` is the true count, not the page size — the
-        # scans are uncapped and `truncated` says whether the page
-        # shows only the first `limit` failures.
-        "total": result["total"],
-        "truncated": result["truncated"],
-        "retry": {
-            "method": "POST",
-            "path": "/api/accounting/journal/retry",
-            "body": {"source": "<source>", "source_id": "<source_id>"},
-        },
-    }
-
-
 @router.get("/ceo-profiles")
 def ceo_profiles(user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """All CEOs' mandatory profile info, for Head Office/Chairman to review.
@@ -2003,23 +1975,15 @@ def export_excel(
 
 from pydantic import BaseModel as _BaseModel, Field as _Field  # noqa: E402
 
-from src.accounting_templates import TEMPLATE_LABELS, TEMPLATE_TYPES  # noqa: E402
-from src.models import Account  # noqa: E402
-
 
 def _serialize_bu_admin(db: Session, bu: BusinessUnit) -> dict:
-    account_count = db.query(Account).filter(Account.business_unit_id == bu.id).count()
     user_count = db.query(User).filter(User.business_unit_id == bu.id).count()
     ceo = db.query(User).filter(User.business_unit_id == bu.id, User.role == "CEO",
                                 User.is_active == True).first()  # noqa: E712
     return {
         "id": bu.id, "code": bu.code, "name": bu.name,
-        "nature": getattr(bu, "nature", None),
-        "nature_label": TEMPLATE_LABELS.get(getattr(bu, "nature", None) or "", "—"),
         "user_count": user_count,
         "ceo_name": (ceo.full_name or ceo.username) if ceo else None,
-        "account_count": account_count,
-        "has_books": account_count > 0,
         "created_at": bu.created_at.isoformat() if bu.created_at else None,
     }
 
@@ -2034,49 +1998,38 @@ def _next_bu_code(db: Session) -> str:
 
 class BUCreateIn(_BaseModel):
     name: str = _Field(min_length=1, max_length=120)
-    nature: str = "retail"
 
 
 class BUUpdateIn(_BaseModel):
     name: Optional[str] = None
-    nature: Optional[str] = None
 
 
 @router.get("/business-units")
 def list_business_units(user: User = Depends(require_admin), db: Session = Depends(get_db)):
     bus = db.query(BusinessUnit).order_by(BusinessUnit.id).all()
-    return {"items": [_serialize_bu_admin(db, bu) for bu in bus],
-            "natures": [{"key": k, "label": TEMPLATE_LABELS.get(k, k)} for k in TEMPLATE_TYPES]}
+    return {"items": [_serialize_bu_admin(db, bu) for bu in bus]}
 
 
 @router.post("/business-units")
 def create_business_unit(payload: BUCreateIn, user: User = Depends(require_admin),
                          db: Session = Depends(get_db)):
-    """Create a BU and provision its chart of accounts from the nature template."""
+    """Create a business unit."""
     name = payload.name.strip()
     if not name:
         raise HTTPException(400, "Name is required")
-    if payload.nature not in TEMPLATE_TYPES:
-        raise HTTPException(400, f"nature must be one of {TEMPLATE_TYPES}")
     if db.query(BusinessUnit).filter(func.lower(BusinessUnit.name) == name.lower()).first():
         raise HTTPException(400, f"A business unit named '{name}' already exists")
-    bu = BusinessUnit(code=_next_bu_code(db), name=name, nature=payload.nature)
+    bu = BusinessUnit(code=_next_bu_code(db), name=name)
     db.add(bu)
     db.commit()
     db.refresh(bu)
-    from src.routers.accounting import provision_bu
-    provision = provision_bu(bu.id, template=payload.nature, user=user, db=db)
-    out = _serialize_bu_admin(db, bu)
-    out["provision"] = provision
-    return out
+    return _serialize_bu_admin(db, bu)
 
 
 @router.patch("/business-units/{bu_id}")
 def update_business_unit(bu_id: int, payload: BUUpdateIn, user: User = Depends(require_admin),
                          db: Session = Depends(get_db)):
-    """Rename a BU and/or set its nature. Setting a nature on a BU with no
-    chart of accounts yet provisions it; a BU that already has books keeps
-    its existing chart (only the label changes)."""
+    """Rename a business unit."""
     bu = db.query(BusinessUnit).filter(BusinessUnit.id == bu_id).first()
     if not bu:
         raise HTTPException(404, "Business unit not found")
@@ -2090,18 +2043,6 @@ def update_business_unit(bu_id: int, payload: BUUpdateIn, user: User = Depends(r
         if dup:
             raise HTTPException(400, f"A business unit named '{name}' already exists")
         bu.name = name
-    if payload.nature is not None:
-        if payload.nature not in TEMPLATE_TYPES:
-            raise HTTPException(400, f"nature must be one of {TEMPLATE_TYPES}")
-        bu.nature = payload.nature
-        db.commit()
-        has_accounts = db.query(Account).filter(Account.business_unit_id == bu.id).count() > 0
-        if has_accounts:
-            note = "Nature label updated — existing chart of accounts unchanged."
-        else:
-            from src.routers.accounting import provision_bu
-            provision_bu(bu.id, template=payload.nature, user=user, db=db)
-            note = f"Chart of accounts created from the {TEMPLATE_LABELS.get(payload.nature, payload.nature)} template."
     db.commit()
     db.refresh(bu)
     out = _serialize_bu_admin(db, bu)

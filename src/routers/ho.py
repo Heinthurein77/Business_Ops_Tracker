@@ -14,7 +14,6 @@ from sqlalchemy.orm import Session
 from src.auth import require_roles
 from src.database import get_db
 from src.models import (
-    BusinessUnit,
     HeadOfficeActivityLog,
     HeadOfficeDailyFinancial,
     HeadOfficeHealthStatus,
@@ -37,7 +36,6 @@ from src.utils import (
     build_health_rows,
     build_resubmit_audit_detail,
     build_social_rows,
-    classify_post_error,
     compute_field_changes,
     compute_ho_quadrant_summary,
     compute_monthly_social_counts,
@@ -51,7 +49,6 @@ from src.utils import (
     log_audit,
     parse_bounded_decimal,
     parse_monthly_target_amounts,
-    server_error,
     today_local,
     todays_submission_events,
     validate_blood_pressure,
@@ -620,36 +617,4 @@ def submit_report(
     audit_detail = build_resubmit_audit_detail(report_date, changes)
     log_audit(db, user, "HO_DAILY_REPORT_SUBMITTED", audit_detail, request)
 
-    # HO daily financials auto-post to journals, mirroring the CEO flow.
-    # HO has no BU of its own, so the books live in the designated Head
-    # Office business unit (code "HO", provisioned like any BU). Until
-    # such a BU exists this is a silent no-op, exactly like the CEO flow
-    # when a BU has no chart of accounts yet. A posting failure is
-    # surfaced on the response (and audit-logged) instead of swallowed,
-    # as in ceo.py — the report itself is already saved.
-    auto_post_error = None
-    ho_bu = db.query(BusinessUnit).filter(BusinessUnit.code == "HO").first()
-    if ho_bu is not None:
-        try:
-            from src.routers.accounting import auto_post_daily_financial
-            db.refresh(financial)
-            auto_post_daily_financial(db, financial, user.id,
-                                      business_unit_id=ho_bu.id,
-                                      source="ho_daily_financial")
-        except Exception as exc:
-            db.rollback()
-            # SM-13: route through server_error() — the response and the
-            # audit row carry a fixed message + error_id, never the raw
-            # exception text (which can carry SQL fragments and
-            # table/column names). The fixed reason category (never raw
-            # text) tells the operator *why* the books did not move.
-            err = server_error("Daily report journal could not be posted", exc, logger, context="ho auto-post")
-            auto_post_error = err.detail
-            auto_post_reason = classify_post_error(exc)
-            log_audit(db, user, "HO_DAILY_REPORT_AUTO_POST_FAILED",
-                      f"date={report_date.isoformat()} error_id={_error_id_of(err.detail)}", request)
-
-    if auto_post_error is not None:
-        return {"ok": True, "auto_post_failed": True, "auto_post_error": auto_post_error,
-                "auto_post_reason": auto_post_reason}
     return {"ok": True}
