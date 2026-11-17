@@ -417,133 +417,144 @@ def submit_report(
         # instead of saving the report as if the evidence were attached.
         document_url = upload_attachment_or_503(attachment.file, attachment.filename)
 
-    financial = (
-        db.query(HeadOfficeDailyFinancial)
-        .filter(HeadOfficeDailyFinancial.report_date == report_date)
-        .with_for_update()
-        .first()
-    )
-    # Captured before being overwritten below, so a same-day resubmission's
-    # audit log entry can show exactly what changed rather than just that a
-    # submission happened — mirrors /api/ceo/submit-report's same tamper-evidence.
-    previous_financial = (
-        {
-            "revenue": financial.revenue,
-            "cash_flow": financial.cash_flow,
-            "receivable": financial.receivable,
-            "payable": financial.payable,
-            "other_amount": financial.other_amount,
-            "financial_other_notes": financial.other_notes,
-        }
-        if financial is not None
-        else None
-    )
-    if financial is None:
-        financial = HeadOfficeDailyFinancial(report_date=report_date)
-        db.add(financial)
-    financial.revenue = revenue_val
-    financial.cash_flow = cash_flow_val
-    financial.receivable = receivable_val
-    financial.payable = payable_val
-    financial.other_amount = other_amount_val
-    financial.other_notes = financial_other_notes or None
-    financial.submitted_by = user.id
+    # M-14: no_autoflush for the four lookup-or-create blocks below (and
+    # the assert_token_current check just before the commit, which queries
+    # too) — same guard as /api/ceo/submit-report. Each block adds a new
+    # per-day row and the NEXT block's lookup would autoflush that pending
+    # INSERT — on a concurrent double submit the flush hits the per-day
+    # unique constraint OUTSIDE the try/except around db.commit() below
+    # and 500s instead of 409ing. With autoflush off, nothing is sent to
+    # the DB until the commit, whose IntegrityError handler is the 409
+    # guard. The lookups only ever read already-committed rows (each block
+    # queries a different table), so deferring the flush changes no result.
+    with db.no_autoflush:
+        financial = (
+            db.query(HeadOfficeDailyFinancial)
+            .filter(HeadOfficeDailyFinancial.report_date == report_date)
+            .with_for_update()
+            .first()
+        )
+        # Captured before being overwritten below, so a same-day resubmission's
+        # audit log entry can show exactly what changed rather than just that a
+        # submission happened — mirrors /api/ceo/submit-report's same tamper-evidence.
+        previous_financial = (
+            {
+                "revenue": financial.revenue,
+                "cash_flow": financial.cash_flow,
+                "receivable": financial.receivable,
+                "payable": financial.payable,
+                "other_amount": financial.other_amount,
+                "financial_other_notes": financial.other_notes,
+            }
+            if financial is not None
+            else None
+        )
+        if financial is None:
+            financial = HeadOfficeDailyFinancial(report_date=report_date)
+            db.add(financial)
+        financial.revenue = revenue_val
+        financial.cash_flow = cash_flow_val
+        financial.receivable = receivable_val
+        financial.payable = payable_val
+        financial.other_amount = other_amount_val
+        financial.other_notes = financial_other_notes or None
+        financial.submitted_by = user.id
 
-    activity = (
-        db.query(HeadOfficeActivityLog)
-        .filter(HeadOfficeActivityLog.report_date == report_date)
-        .with_for_update()
-        .first()
-    )
-    previous_activity = (
-        {
-            "meetings_attended": activity.meetings_attended,
-            "site_visits": activity.site_visits,
-            "key_decisions": activity.key_decisions,
-            "next_day_schedule": activity.next_day_schedule,
-            "gym_percent": activity.gym_percent,
-            "swimming_percent": activity.swimming_percent,
-            "cycle_percent": activity.cycle_percent,
-            "activity_other_notes": activity.other_notes,
-        }
-        if activity is not None
-        else None
-    )
-    if activity is None:
-        activity = HeadOfficeActivityLog(report_date=report_date)
-        db.add(activity)
-    # SM-7: captured before being overwritten below, so a resubmission that
-    # replaces the attachment can delete the previous R2 object afterwards.
-    previous_document_url = activity.document_url
-    activity.meetings_attended = meetings_attended
-    activity.site_visits = site_visits
-    activity.key_decisions = key_decisions
-    activity.next_day_schedule = next_day_schedule
-    if document_url:
-        activity.document_url = document_url
-    activity.gym_percent = gym_percent_val
-    activity.swimming_percent = swimming_percent_val
-    activity.cycle_percent = cycle_percent_val
-    activity.other_notes = activity_other_notes or None
-    activity.submitted_by = user.id
+        activity = (
+            db.query(HeadOfficeActivityLog)
+            .filter(HeadOfficeActivityLog.report_date == report_date)
+            .with_for_update()
+            .first()
+        )
+        previous_activity = (
+            {
+                "meetings_attended": activity.meetings_attended,
+                "site_visits": activity.site_visits,
+                "key_decisions": activity.key_decisions,
+                "next_day_schedule": activity.next_day_schedule,
+                "gym_percent": activity.gym_percent,
+                "swimming_percent": activity.swimming_percent,
+                "cycle_percent": activity.cycle_percent,
+                "activity_other_notes": activity.other_notes,
+            }
+            if activity is not None
+            else None
+        )
+        if activity is None:
+            activity = HeadOfficeActivityLog(report_date=report_date)
+            db.add(activity)
+        # SM-7: captured before being overwritten below, so a resubmission that
+        # replaces the attachment can delete the previous R2 object afterwards.
+        previous_document_url = activity.document_url
+        activity.meetings_attended = meetings_attended
+        activity.site_visits = site_visits
+        activity.key_decisions = key_decisions
+        activity.next_day_schedule = next_day_schedule
+        if document_url:
+            activity.document_url = document_url
+        activity.gym_percent = gym_percent_val
+        activity.swimming_percent = swimming_percent_val
+        activity.cycle_percent = cycle_percent_val
+        activity.other_notes = activity_other_notes or None
+        activity.submitted_by = user.id
 
-    health = (
-        db.query(HeadOfficeHealthStatus)
-        .filter(HeadOfficeHealthStatus.report_date == report_date)
-        .with_for_update()
-        .first()
-    )
-    previous_health = (
-        {
-            "daily_steps": health.daily_steps,
-            "heart_rate": health.heart_rate,
-            "sleep_hours": health.sleep_hours,
-            "bp_systolic": health.bp_systolic,
-            "bp_diastolic": health.bp_diastolic,
-            "health_other_notes": health.other_notes,
-        }
-        if health is not None
-        else None
-    )
-    if health is None:
-        health = HeadOfficeHealthStatus(report_date=report_date)
-        db.add(health)
-    health.daily_steps = daily_steps_val
-    health.heart_rate = heart_rate_val
-    health.sleep_hours = sleep_hours_val
-    health.bp_systolic = bp_systolic_val
-    health.bp_diastolic = bp_diastolic_val
-    health.other_notes = health_other_notes or None
-    health.submitted_by = user.id
+        health = (
+            db.query(HeadOfficeHealthStatus)
+            .filter(HeadOfficeHealthStatus.report_date == report_date)
+            .with_for_update()
+            .first()
+        )
+        previous_health = (
+            {
+                "daily_steps": health.daily_steps,
+                "heart_rate": health.heart_rate,
+                "sleep_hours": health.sleep_hours,
+                "bp_systolic": health.bp_systolic,
+                "bp_diastolic": health.bp_diastolic,
+                "health_other_notes": health.other_notes,
+            }
+            if health is not None
+            else None
+        )
+        if health is None:
+            health = HeadOfficeHealthStatus(report_date=report_date)
+            db.add(health)
+        health.daily_steps = daily_steps_val
+        health.heart_rate = heart_rate_val
+        health.sleep_hours = sleep_hours_val
+        health.bp_systolic = bp_systolic_val
+        health.bp_diastolic = bp_diastolic_val
+        health.other_notes = health_other_notes or None
+        health.submitted_by = user.id
 
-    social = (
-        db.query(HeadOfficeSocialLog)
-        .filter(HeadOfficeSocialLog.report_date == report_date)
-        .with_for_update()
-        .first()
-    )
-    previous_social = (
-        {
-            "event_flag": social.event_flag,
-            "meeting_flag": social.meeting_flag,
-            "golf_flag": social.golf_flag,
-            "social_other_notes": social.other_notes,
-        }
-        if social is not None
-        else None
-    )
-    if social is None:
-        social = HeadOfficeSocialLog(report_date=report_date)
-        db.add(social)
-    social.event_flag = parse_bool(event_flag)
-    social.meeting_flag = parse_bool(meeting_flag)
-    social.golf_flag = parse_bool(golf_flag)
-    social.other_notes = social_other_notes or None
-    social.submitted_by = user.id
+        social = (
+            db.query(HeadOfficeSocialLog)
+            .filter(HeadOfficeSocialLog.report_date == report_date)
+            .with_for_update()
+            .first()
+        )
+        previous_social = (
+            {
+                "event_flag": social.event_flag,
+                "meeting_flag": social.meeting_flag,
+                "golf_flag": social.golf_flag,
+                "social_other_notes": social.other_notes,
+            }
+            if social is not None
+            else None
+        )
+        if social is None:
+            social = HeadOfficeSocialLog(report_date=report_date)
+            db.add(social)
+        social.event_flag = parse_bool(event_flag)
+        social.meeting_flag = parse_bool(meeting_flag)
+        social.golf_flag = parse_bool(golf_flag)
+        social.other_notes = social_other_notes or None
+        social.submitted_by = user.id
 
-    # m-05 (SM-1): same mid-request revocation re-check as the CEO
-    # submit path — immediately before the commit.
-    assert_token_current(db, user)
+        # m-05 (SM-1): same mid-request revocation re-check as the CEO
+        # submit path — immediately before the commit.
+        assert_token_current(db, user)
 
     try:
         db.commit()

@@ -31,8 +31,18 @@ from sqlalchemy.orm import sessionmaker
 from src.auth import hash_password as make_hash
 from src.database import get_db
 from src.main import app
-from src.models import Base, BusinessUnit, DailyFinancial, User
-from src.routers.ceo import _report_submit_timestamps
+from src.models import (
+    Base,
+    BusinessUnit,
+    DailyFinancial,
+    HeadOfficeActivityLog,
+    HeadOfficeDailyFinancial,
+    HeadOfficeHealthStatus,
+    HeadOfficeSocialLog,
+    User,
+)
+from src.routers.ceo import _rate_limiter
+from src.routers.ho import _rate_limiter as ho_rate_limiter
 from src.utils import today_local
 
 PW = "TestPass123!"
@@ -58,6 +68,9 @@ def race_db(tmp_path):
         User(username="ceo_one", hashed_password=_PW_HASH,
              role="CEO", business_unit_id=1, is_active=True,
              require_password_change=False, is_profile_completed=True),
+        User(username="ho_user", hashed_password=_PW_HASH,
+             role="HO", is_active=True, require_password_change=False,
+             is_profile_completed=True),
     ])
     session.commit()
     session.close()
@@ -77,7 +90,7 @@ def race_db(tmp_path):
     engine.dispose()
 
 
-def _login_cookie(engine):
+def _login_cookie(engine, username="ceo_one"):
     """Log in once (main thread) and return the session cookie string
     both racing threads send."""
     async def _go():
@@ -85,7 +98,7 @@ def _login_cookie(engine):
                 transport=httpx.ASGITransport(app=app),
                 base_url="http://testserver") as ac:
             return await ac.post("/api/auth/login", json={
-                "username": "ceo_one", "password": PW})
+                "username": username, "password": PW})
     r = asyncio.run(_go())
     assert r.status_code == 200, r.text
     return r.headers.get("set-cookie", "").split(";")[0]
@@ -100,6 +113,21 @@ def _post_submit(engine, cookie, report_date):
             return await ac.post(
                 "/api/ceo/submit-report",
                 data={**FORM, "report_date": report_date.isoformat()},
+                headers={"Cookie": cookie})
+    return asyncio.run(_go())
+
+
+def _post_submit_ho(engine, cookie):
+    """One HO submit-report POST from this thread (own event loop).
+    The HO endpoint always files for today (no report_date field),
+    so attempts re-race on the same date after clearing today's rows."""
+    async def _go():
+        async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://testserver") as ac:
+            return await ac.post(
+                "/api/ho/submit-report",
+                data=FORM,
                 headers={"Cookie": cookie})
     return asyncio.run(_go())
 
@@ -149,10 +177,85 @@ def test_sequential_double_submit_is_allowed_resubmit(race_db):
     raced_date = today_local()
     first = _post_submit(race_db, cookie, raced_date)
     assert first.status_code == 200, first.text
-    _report_submit_timestamps.clear()
+    _rate_limiter.reset()
     second = _post_submit(race_db, cookie, raced_date)
     assert second.status_code == 200, second.text
     with sessionmaker(bind=race_db)() as s:
         assert s.query(DailyFinancial).filter(
             DailyFinancial.business_unit_id == 1,
             DailyFinancial.report_date == raced_date).count() == 1
+
+
+def _race_once_ho(engine, cookie):
+    """Two HO threads, released at the same instant by a Barrier."""
+    barrier = threading.Barrier(2)
+    results = {}
+
+    def _run(slot):
+        barrier.wait()
+        results[slot] = _post_submit_ho(engine, cookie)
+
+    threads = [threading.Thread(target=_run, args=(i,)) for i in (0, 1)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return sorted(r.status_code for r in results.values())
+
+
+_HO_DAY_MODELS = (
+    HeadOfficeDailyFinancial, HeadOfficeActivityLog,
+    HeadOfficeHealthStatus, HeadOfficeSocialLog,
+)
+
+
+def _clear_ho_today(engine):
+    with sessionmaker(bind=engine)() as s:
+        today = today_local()
+        for model in _HO_DAY_MODELS:
+            s.query(model).filter(model.report_date == today).delete()
+        s.commit()
+
+
+def test_double_submit_race_returns_409_loser_ho(race_db):
+    """M-14 (merge follow-up): the HO submit path had the same autoflush
+    hole as the CEO path — the loser's pending INSERT was autoflushed by
+    the next block's lookup (or by assert_token_current just before the
+    commit) outside the guarded commit, 500ing instead of 409ing.
+
+    Unlike the CEO endpoint, the HO endpoint always files for today, so
+    each attempt clears today's HO rows first to re-create the
+    both-miss condition; otherwise later attempts would just resubmit
+    the existing row (200 + 200) and never exercise the guard.
+    """
+    cookie = _login_cookie(race_db, "ho_user")
+    outcomes = []
+    for attempt in range(8):
+        ho_rate_limiter.reset()  # 5 submits / 60 s rate limit
+        _clear_ho_today(race_db)
+        statuses = _race_once_ho(race_db, cookie)
+        outcomes.append(statuses)
+        assert all(s in (200, 409) for s in statuses), outcomes
+        with sessionmaker(bind=race_db)() as s:
+            rows = s.query(HeadOfficeDailyFinancial).filter(
+                HeadOfficeDailyFinancial.report_date == today_local()).count()
+        assert rows == 1, (outcomes, rows)
+        if 409 in statuses:
+            assert statuses == [200, 409], outcomes
+            return
+    pytest.fail(f"guard never fired: no 409 in 8 race attempts: {outcomes}")
+
+
+def test_sequential_double_submit_is_allowed_resubmit_ho(race_db):
+    """Baseline: the same HO report filed twice in sequence is a legal
+    resubmit (200 + 200, still one row) — the 409 only fires on a true
+    concurrent collision."""
+    cookie = _login_cookie(race_db, "ho_user")
+    first = _post_submit_ho(race_db, cookie)
+    assert first.status_code == 200, first.text
+    ho_rate_limiter.reset()
+    second = _post_submit_ho(race_db, cookie)
+    assert second.status_code == 200, second.text
+    with sessionmaker(bind=race_db)() as s:
+        assert s.query(HeadOfficeDailyFinancial).filter(
+            HeadOfficeDailyFinancial.report_date == today_local()).count() == 1
