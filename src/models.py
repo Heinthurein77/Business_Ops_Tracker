@@ -756,6 +756,13 @@ class JournalEntry(Base):
         Index("uq_journal_year_close", "business_unit_id", "source", "source_id",
               unique=True, postgresql_where=text("source = 'year_close'"),
               sqlite_where=text("source = 'year_close'")),
+        # G-2: at most one reversal may point at an entry. The claim in
+        # reverse_journal is the runtime guard; this is the database
+        # backstop, so a second reversal for the same entry fails the
+        # constraint instead of leaving an orphan reversal with no
+        # pointer to it. NULLs are distinct in a unique constraint on
+        # both dialects, so unreversed entries are unaffected.
+        UniqueConstraint("reversed_by_id", name="uq_journal_entries_reversed_by_id"),
     )
 
     id = Column(Integer, primary_key=True, index=True)

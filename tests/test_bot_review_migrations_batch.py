@@ -61,8 +61,10 @@ PREV_HEAD = "c9ec96d6b1e5"
 # + unique, Cm-7 year-close partial unique index.
 # 2026-11-16 review fix F-5 added 64f310f1ca3d on top of that:
 # CM-8 version column on quotations.
-CURRENT_HEAD = "64f310f1ca3d"
-CURRENT_HEAD_DOWN = "7f3a9c1e5b2d"
+# 2026-11-17 review fix G-2 added f452a085537d on top of that:
+# unique constraint on journal_entries.reversed_by_id.
+CURRENT_HEAD = "f452a085537d"
+CURRENT_HEAD_DOWN = "64f310f1ca3d"
 
 from types import SimpleNamespace
 

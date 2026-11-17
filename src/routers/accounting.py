@@ -957,20 +957,48 @@ def retry_journal(payload: JournalRetryIn, user: User = Depends(require_admin),
 
 @router.post("/journal/{entry_id}/reverse")
 def reverse_journal(entry_id: int, user: User = Depends(require_accounting),
-                    db: Session = Depends(get_db)):
-    e = db.query(JournalEntry).filter(JournalEntry.id == entry_id).first()
+                    db: Session = Depends(get_db),
+                    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
+    from src.routers.ops import _idempotency_lookup, _idempotency_store
+    e = db.query(JournalEntry).filter(JournalEntry.id == entry_id).with_for_update().first()
     if not e:
         raise HTTPException(404, "Journal entry not found")
     check_bu_access(user, e.business_unit_id)
-    if e.status != "posted":
-        raise HTTPException(400, "Only posted entries can be reversed")
-    if e.reversed_by_id:
-        raise HTTPException(400, "Entry already reversed")
+    endpoint = "POST /api/accounting/journal/{entry_id}/reverse"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
+    entry_no = e.entry_no
+    # G-2 / CM-3: no status pre-check returning 400 before the claim —
+    # on SQLite the FOR UPDATE load above is a no-op and two concurrent
+    # reverses would both pass it, so the conditional UPDATE is the
+    # arbiter and the loser gets a 409 with the already-moved status.
+    # The claim runs BEFORE the reversal is created, and its SET is a
+    # deliberate no-op (status stays "posted"): the real pointer value
+    # (rev.id) does not exist until the reversal is created, so there is
+    # nothing meaningful to set yet — the WHERE clause is the guard, and
+    # the UPDATE itself takes the row lock that serialises a second
+    # reverse. Creating the reversal first would be wrong here:
+    # create_entry's internal SAVEPOINT commits the header on SQLite
+    # (pysqlite quirk), so a loser's reversal could not be rolled back
+    # and would survive as an orphan (verified by probe, 2026-11-17).
+    claimed = db.query(JournalEntry).filter(
+        JournalEntry.id == entry_id,
+        JournalEntry.status == "posted",
+        JournalEntry.reversed_by_id.is_(None),
+    ).update({"status": "posted"}, synchronize_session=False)
+    if claimed == 0:
+        db.refresh(e)
+        if e.reversed_by_id:
+            raise HTTPException(409, f"Journal entry {entry_no} has already been reversed")
+        raise HTTPException(409, f"Journal entry {entry_no} cannot be reversed (status: {e.status})")
     rev = _reverse_entry(db, e, user.id)
     db.commit()
     db.refresh(rev)
     _log_audit(db, user, "REVERSE_JOURNAL", f"entry_id={entry_id}")
-    return serialize_entry(db, rev)
+    out = serialize_entry(db, rev)
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
+    return out
 
 
 @router.delete("/journal/{entry_id}")
@@ -2447,13 +2475,21 @@ def create_intercompany(payload: IntercompanyIn, user: User = Depends(require_ac
 
 @router.post("/intercompany/{txn_id}/settle")
 def settle_intercompany(txn_id: int, user: User = Depends(require_accounting),
-                        db: Session = Depends(get_db)):
+                        db: Session = Depends(get_db),
+                        idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
+    from src.routers.ops import _idempotency_lookup, _idempotency_store
     require_group_access(user)
-    t = db.query(IntercompanyTransaction).filter(IntercompanyTransaction.id == txn_id).first()
+    t = db.query(IntercompanyTransaction).filter(IntercompanyTransaction.id == txn_id).with_for_update().first()
     if not t:
         raise HTTPException(404, "Intercompany transaction not found")
-    if t.status != "open":
-        raise HTTPException(400, "Already settled")
+    endpoint = "POST /api/accounting/intercompany/{txn_id}/settle"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
+    # G-2 / CM-3: no status pre-check returning 400 before the claim
+    # (see reverse_journal above) — the conditional UPDATE is the
+    # arbiter, so a second concurrent settle gets a 409 instead of
+    # posting the settlement journals a second time.
     amt = Decimal(str(t.amount))
     today_d = today_local()
     seller_recv = account_by_code(db, t.from_business_unit_id, "1180")
@@ -2462,6 +2498,19 @@ def settle_intercompany(txn_id: int, user: User = Depends(require_accounting),
     buyer_cash = account_by_code(db, t.to_business_unit_id, "1110")
     if not (seller_recv and seller_cash and buyer_pay and buyer_cash):
         raise HTTPException(400, "Required accounts missing in one of the BUs")
+    # G-2 / CM-3 conditional claim (backstop on SQLite, where the FOR
+    # UPDATE load above is a no-op): two concurrent settles must not
+    # both post the settlement journals — the loser gets a 409.
+    claimed = db.query(IntercompanyTransaction).filter(
+        IntercompanyTransaction.id == txn_id,
+        IntercompanyTransaction.status == "open",
+    ).update({"status": "settled", "settled_at": utcnow()},
+             synchronize_session=False)
+    if claimed == 0:
+        db.refresh(t)
+        raise HTTPException(409, f"Intercompany transaction {txn_id} has already been settled (status: {t.status})")
+    t.status = "settled"
+    t.settled_at = utcnow()
     create_entry(db, t.to_business_unit_id, today_d,
                  f"Intercompany settlement paid: {t.description or ''}", "intercompany", user.id,
                  [{"account_id": buyer_pay.id, "debit": amt, "credit": 0},
@@ -2472,11 +2521,13 @@ def settle_intercompany(txn_id: int, user: User = Depends(require_accounting),
                  [{"account_id": seller_cash.id, "debit": amt, "credit": 0},
                   {"account_id": seller_recv.id, "debit": 0, "credit": amt}],
                  source_id=t.id, post=True)
-    t.status = "settled"
-    t.settled_at = utcnow()
+    # One commit for the transaction + both journals together.
     db.commit()
+    db.refresh(t)
     _log_audit(db, user, "SETTLE_INTERCOMPANY", f"txn_id={txn_id}")
-    return serialize_intercompany(t)
+    out = serialize_intercompany(t)
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
+    return out
 
 
 # ------------------------------------------------------------------ cash flow + year-end close

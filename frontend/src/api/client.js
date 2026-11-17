@@ -371,7 +371,10 @@ export const api = {
   accCreateIntercompany: (payload) => fetch('/api/accounting/intercompany', {
     method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
   }).then(handle),
-  accSettleIntercompany: (id) => fetch(`/api/accounting/intercompany/${id}/settle`, { method: 'POST', credentials: 'include' }).then(handle),
+  accSettleIntercompany: (id) => fetch(`/api/accounting/intercompany/${id}/settle`, {
+    method: 'POST', credentials: 'include',
+    headers: { 'Idempotency-Key': newIdempotencyKey() },
+  }).then(handle),
   opsUploadReceipt: async (expenseId, file) => {
     const fd = new FormData();
     fd.append('file', file);
