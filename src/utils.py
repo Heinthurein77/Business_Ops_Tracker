@@ -9,7 +9,6 @@ import calendar as calendar_module
 import json
 import logging
 import re
-import secrets
 from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Optional
@@ -44,22 +43,6 @@ def utcnow() -> datetime:
     (_utcnow) because models <-> utils would be a circular import.
     """
     return datetime.now(timezone.utc).replace(tzinfo=None)
-
-
-def server_error(detail: str, exc: BaseException, logger: logging.Logger,
-                 context: str = "") -> "HTTPException":
-    """Build a 500 whose detail never embeds raw exception text (P3-4).
-
-    The raw exception (which can carry SQL fragments, constraint and
-    column names) is logged server-side only, keyed by a short error_id
-    that is included in the fixed generic detail — the same pattern the
-    edge middleware uses for unhandled exceptions (edge.py). Callers
-    raise the returned exception.
-    """
-    error_id = secrets.token_hex(4)
-    where = f" [{context}]" if context else ""
-    logger.warning("Internal error%s error_id=%s: %s", where, error_id, exc)
-    return HTTPException(500, f"{detail} (error_id: {error_id})")
 
 
 def today_local() -> date:

@@ -12,8 +12,6 @@ All three checks are idempotent/throttled in src/routers/ops.py:
 - Action items: one reminder per item per 7 days when due today or overdue.
 """
 import sys
-from datetime import datetime
-
 from src.database import SessionLocal
 from src.models import JobHeartbeat
 from src.utils import utcnow

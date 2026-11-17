@@ -6,13 +6,12 @@ Access model mirrors the rest of the app:
 - Chairman / HO ("admin"): all business units
 """
 import logging
+from decimal import Decimal
 from datetime import date, datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import func
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.auth import get_current_user, require_roles
@@ -68,66 +67,6 @@ def _escape_like(value: str) -> str:
     """Escape LIKE wildcards (Sm-1): `_` and `%` in a stored attachment
     key must match literally, never as a single-/multi-char wildcard."""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
-def _assert_token_current(db, user) -> None:
-    """SM-1 backend re-check, called immediately before the commit of
-    every money endpoint: a session revoked mid-request (logout /
-    password change on another device) must not still commit afterwards.
-
-    Workstream B defines ``assert_token_current(db, user)`` in src/auth
-    (it compares user.token_version against ``user._token_tv`` stashed on
-    the user object by get_current_user, raising 401 on mismatch). When
-    that helper is present it is used; otherwise this falls back to an
-    inline re-read of token_version. Duck-typed test users carry no
-    token at all (no ``_token_tv``) and are left alone."""
-    tv = getattr(user, "_token_tv", None)
-    if tv is None:
-        return
-    try:
-        from src.auth import assert_token_current as _atc
-    except ImportError:
-        _atc = None
-    if _atc is not None:
-        _atc(db, user)
-        return
-    row = db.query(User).filter(User.id == user.id).first()
-    if row is not None and row.token_version != tv:
-        raise HTTPException(401, "Session has expired — please sign in again")
-
-
-def _check_version(obj, expected_version, label: str) -> None:
-    """CM-8: an update that names the version it read must 409 when the
-    row has moved since. F-9: absent expected_version stays back-compat
-    (no check) because existing internal callers and tests omit it, but
-    it is logged — an update with no version is last-write-wins, and the
-    caller should send the version it read. Requiring the field would
-    break those callers; the warning is the visible half of the fix."""
-    if expected_version is None:
-        logger.warning(
-            "F-9: %s updated without expected_version — optimistic locking "
-            "skipped (last-write-wins); send the version that was read",
-            label)
-        return
-    if (obj.version or 0) != expected_version:
-        raise HTTPException(
-            409, f"{label} has changed since you loaded it (version {obj.version}) — "
-                 f"reload and try again")
-
-
-def _commit_or_409(db, what: str) -> None:
-    """CC-1: a CHECK violation (e.g. a batch quantity driven below zero)
-    is a retryable 409, not an unhandled 500. Other integrity errors
-    are re-raised unchanged."""
-    try:
-        db.commit()
-    except IntegrityError as exc:
-        db.rollback()
-        orig = str(getattr(exc, "orig", exc))
-        if "ck_" in orig or "check constraint" in orig.lower():
-            raise HTTPException(
-                409, f"{what} would violate a stock constraint — please retry")
-        raise
 
 
 # ---------------------------------------------------------------- helpers

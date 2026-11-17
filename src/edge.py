@@ -17,7 +17,6 @@ import asyncio
 import ipaddress
 import json
 import logging
-import re
 import secrets
 import time
 from collections import deque

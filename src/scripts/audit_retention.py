@@ -25,7 +25,7 @@ grace) notices if this job silently dies. A dry run writes no heartbeat.
 """
 import argparse
 import sys
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import sqlalchemy as sa
 

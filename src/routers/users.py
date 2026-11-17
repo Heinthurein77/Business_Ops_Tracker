@@ -9,7 +9,7 @@ returned once in a `Cache-Control: no-store` response — the Chairman passes it
 to the user out of band.
 """
 import secrets
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.exc import IntegrityError

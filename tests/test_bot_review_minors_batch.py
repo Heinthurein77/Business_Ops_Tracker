@@ -24,7 +24,7 @@ from src.config import settings
 from src.main import app as fastapi_app
 from src.main import lifespan, seed_business_units
 from src.models import Base, BusinessUnit
-from src.utils import server_error, utcnow
+from src.utils import utcnow
 
 CHAIRMAN = SimpleNamespace(id=1, role="Chairman", business_unit_id=None)
 
@@ -48,18 +48,6 @@ def db():
 
 
 # ---------------------------------------------------------------- P3-3
-
-
-# ---------------------------------------------------------------- P3-4
-
-
-def test_p3_4_server_error_helper_never_embeds_exception():
-    logger = logging.getLogger("test_p3_4")
-    exc = server_error("COGS journal could not be posted",
-                       RuntimeError("SELECT * FROM users"), logger, context="item 7")
-    assert exc.status_code == 500
-    assert "SELECT" not in exc.detail and "users" not in exc.detail
-    assert exc.detail.startswith("COGS journal could not be posted (error_id: ")
 
 
 # ---------------------------------------------------------------- P3-6

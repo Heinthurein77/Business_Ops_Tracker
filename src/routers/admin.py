@@ -41,7 +41,6 @@ from src.utils import (
     build_financial_rows,
     build_health_rows,
     build_social_rows,
-    calculate_age,
     compute_bu_quadrant_summary,
     compute_health_risk,
     compute_ho_quadrant_summary,

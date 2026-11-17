@@ -117,9 +117,6 @@ export const api = {
   healthDashboard: () => getJson('/api/admin/health-dashboard'),
   listUsers: () => getJson('/api/admin/users'),
   createUser: (payload) => postJson('/api/admin/users', payload),
-  updateUser: (userId, payload) => fetch(`/api/admin/users/${userId}`, {
-    method: 'PATCH', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
-  }).then(handle),
   resetUserPassword: (userId) => postJson(`/api/admin/users/${userId}/reset-password`),
   setUserActive: (userId, isActive) => postJson(`/api/admin/users/${userId}/active`, { is_active: isActive }),
   unlockUserLogin: (userId) => postJson(`/api/admin/users/${userId}/unlock-login`),

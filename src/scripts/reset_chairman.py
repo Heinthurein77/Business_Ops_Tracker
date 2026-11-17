@@ -18,7 +18,7 @@ migrated already (the web app does that on startup).
 """
 import secrets
 import sys
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from src.auth import bump_token_version, hash_password
 from src.config import settings
