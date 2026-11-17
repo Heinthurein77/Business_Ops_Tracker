@@ -825,13 +825,13 @@ def transfer_stock(item_id: int, payload: TransferIn, user: User = Depends(get_c
             try:
                 create_entry(db, src.business_unit_id, today_local(),
                              f"Stock transfer to BU {payload.to_business_unit_id} — {src.name}",
-                             "stock_transfer", user.id,
+                             "quick_stock_transfer", user.id,
                              [{"account_id": recv.id, "debit": total_cost, "credit": 0},
                               {"account_id": src_inv.id, "debit": 0, "credit": total_cost}],
                              source_id=src.id, post=True)
                 create_entry(db, payload.to_business_unit_id, today_local(),
                              f"Stock transfer from BU {src.business_unit_id} — {src.name}",
-                             "stock_transfer", user.id,
+                             "quick_stock_transfer", user.id,
                              [{"account_id": dst_inv.id, "debit": total_cost, "credit": 0},
                               {"account_id": pay.id, "debit": 0, "credit": total_cost}],
                              source_id=src.id, post=True)

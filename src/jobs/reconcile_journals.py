@@ -18,16 +18,23 @@ are excluded — the posters deliberately skip them (no journal is due),
 so they would otherwise false-positive on every run.
 
 Known gaps (recorded, not hidden):
-- Quick (single-item) stock transfers post with source="stock_transfer"
-  but source_id set to the *inventory item* id, not a transfer id, so
-  they cannot be re-posted by (source, source_id) — see
-  find_journal_failures() below: they ARE listed here (from the
-  "Transfer to BU …" stock movements), but the recovery is a MANUAL
-  journal, never a re-entered transfer (the stock already moved) and
-  never the retry endpoint (which 409s on them). Residual masking:
-  journal entries carry only the item id, so once ANY quick transfer
-  for an item has posted, a later failed quick transfer of the same
-  item is indistinguishable from the posted one and is not listed.
+- Quick (single-item) stock transfers post with
+  source="quick_stock_transfer" but source_id set to the *inventory
+  item* id, not a transfer id, so they cannot be re-posted by
+  (source, source_id) — see find_journal_failures() below: they ARE
+  listed here (from the "Transfer to BU …" stock movements), but the
+  recovery is a MANUAL journal, never a re-entered transfer (the
+  stock already moved) and never the retry endpoint (which cannot
+  reconstruct them). The distinct source (G-1) keeps quick journals
+  out of the formal-transfer namespace: a formal transfer id can no
+  longer mask a quick transfer of the same-numbered item, or vice
+  versa. Caveat: rows written before the G-1 fix (dev DBs only — no
+  production exists) still carry source="stock_transfer" with an
+  item id, so one of those rows IS read as a formal-transfer leg
+  for the same-numbered transfer. Residual masking: journal entries
+  carry only the item id, so once ANY quick transfer for an item
+  has posted, a later failed quick transfer of the same item is
+  indistinguishable from the posted one and is not listed.
 - Old stored URLs are bearer links (SM-8): rotation/re-key of pre-cutover
   objects is a separate follow-up, not part of this job.
 
@@ -70,7 +77,7 @@ JOB_NAME = "reconcile_journals"
 # Journal sources this job watches (see _has_posted) — the retry
 # endpoint takes {"source": ..., "source_id": ...}, so every failure
 # entry carries exactly that pair.
-SOURCES = ("pos_sale", "sales_return", "purchase_return", "stock_transfer", "expense", "daily_financial", "ho_daily_financial")
+SOURCES = ("pos_sale", "sales_return", "purchase_return", "stock_transfer", "quick_stock_transfer", "expense", "daily_financial", "ho_daily_financial")
 
 
 def _has_posted(db: Session, source: str, source_id: int, bu_id: int | None = None) -> bool:
@@ -239,8 +246,12 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
         })
 
     # Quick (single-item) transfers (F-2): transfer_stock (ops.py)
-    # posts both intercompany journals with source="stock_transfer",
-    # source_id = the SOURCE ITEM id. The flag-only path (intercompany
+    # posts both intercompany journals with
+    # source="quick_stock_transfer", source_id = the SOURCE ITEM id —
+    # a distinct source from formal transfers (G-1), whose transfer
+    # ids live in a separate id namespace: sharing "stock_transfer"
+    # let a posted formal transfer #N mask a failed quick transfer
+    # of item #N, and vice versa. The flag-only path (intercompany
     # accounts missing) commits the stock move with no journal at all,
     # so the movements are the only record: an "out" movement whose
     # reason is exactly "Transfer to BU <id>" is a quick transfer.
@@ -271,7 +282,7 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
         if m:
             group["to_bu_ids"].add(int(m.group(1)))
     for item_id, group in quick_by_item.items():
-        if _has_posted(db, "stock_transfer", item_id):
+        if _has_posted(db, "quick_stock_transfer", item_id):
             continue  # at least one quick transfer of this item posted
         item = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
         if item is None:
@@ -288,7 +299,7 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
         ) or "-"
         failures.append({
             "kind": "quick_stock_transfer",
-            "source": "stock_transfer",
+            "source": "quick_stock_transfer",
             "source_id": item_id,
             "label": f"Quick transfer — {item.name} (item #{item_id})",
             "detail": (

@@ -7,6 +7,12 @@ F-2: find_journal_failures() must detect
       failed — or vice versa), while
   (c) a fully-posted transfer (quick or formal) is not flagged.
 
+G-1: quick transfers now post with source="quick_stock_transfer"
+    (ops.py) while formal transfers keep "stock_transfer", so a
+    formal transfer id can no longer mask a quick transfer of the
+    same-numbered item, or vice versa — proved in both directions
+    below (the review's Case A and Case B).
+
 F-7: POST /api/accounting/journal/retry is Chairman/HO-only
     (require_admin), matching the Journal Failures page gate — an
     Accountant must not be able to re-post journals.
@@ -24,8 +30,10 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from src.accounting_templates import template_accounts
 from src.jobs.reconcile_journals import find_journal_failures
 from src.models import (
+    Account,
     Base,
     BusinessUnit,
     InventoryItem,
@@ -35,6 +43,7 @@ from src.models import (
     StockTransferLine,
     User,
 )
+from src.routers.ops import TransferIn, transfer_stock
 
 
 @pytest.fixture()
@@ -82,17 +91,32 @@ def _quick_move(db, item, qty=3, to_bu=2, when=None):
     db.flush()
 
 
-def _formal_transfer(db, status="received", cost=100):
+def _formal_transfer(db, status="received", cost=100, transfer_no="TR-1-0001", name="Gadget"):
     t = StockTransfer(from_business_unit_id=1, to_business_unit_id=2,
-                      transfer_no="TR-1-0001", status=status,
+                      transfer_no=transfer_no, status=status,
                       sent_at=datetime(2026, 11, 16, 9, 0, 0))
     db.add(t)
     db.flush()
-    src = _item(db, bu_id=1, name="Gadget", cost=cost)
+    src = _item(db, bu_id=1, name=name, cost=cost)
     db.add(StockTransferLine(transfer_id=t.id, inventory_item_id=src.id,
                              quantity=Decimal("2"), unit_cost=Decimal(str(cost))))
     db.commit()
     return t
+
+
+def _provision_template(db, bu_id):
+    """Retail chart of accounts for one BU (1140 inventory etc.), so
+    transfer_stock can post its journals instead of taking the
+    flag-only path."""
+    id_by_code = {}
+    for code, name, acc_type, parent_code, is_header in template_accounts("retail"):
+        acc = Account(business_unit_id=bu_id, code=code, name=name,
+                      account_type=acc_type, is_header=is_header, is_system=True,
+                      parent_id=id_by_code.get(parent_code) if parent_code else None)
+        db.add(acc)
+        db.flush()
+        id_by_code[code] = acc.id
+    db.commit()
 
 
 def _by_kind(failures, kind):
@@ -109,7 +133,7 @@ class TestQuickTransferDetection:
         quick = _by_kind(failures, "quick_stock_transfer")
         assert len(quick) == 1
         f = quick[0]
-        assert f["source"] == "stock_transfer"
+        assert f["source"] == "quick_stock_transfer"
         assert f["source_id"] == item.id
         assert f["amount"] == pytest.approx(300.0)
         assert f["business_unit_id"] == 1
@@ -123,9 +147,10 @@ class TestQuickTransferDetection:
         item = _item(db)
         _quick_move(db, item, qty=3, to_bu=2)
         # Quick transfers post one entry per BU side, both with
-        # source_id = the source item id.
-        _posted(db, 1, "stock_transfer", item.id, "JV-2026-11-001")
-        _posted(db, 2, "stock_transfer", item.id, "JV-2026-11-002")
+        # source_id = the source item id and source =
+        # "quick_stock_transfer" (G-1 — distinct from formal transfers).
+        _posted(db, 1, "quick_stock_transfer", item.id, "JV-2026-11-001")
+        _posted(db, 2, "quick_stock_transfer", item.id, "JV-2026-11-002")
         db.commit()
 
         assert find_journal_failures(db) == []
@@ -199,6 +224,75 @@ class TestFormalTransferPerLeg:
         failures = find_journal_failures(db)
         assert len(failures) == 1
         assert failures[0]["missing_legs"] == ["send"]
+
+
+class TestQuickFormalNamespaceCollision:
+    """G-1: quick transfers (source="quick_stock_transfer",
+    source_id=item id) and formal transfers (source="stock_transfer",
+    source_id=transfer id) live in separate id namespaces, so an id
+    coincidence must not mask a failure in either direction. Both
+    cases below fail on the pre-fix code (shared "stock_transfer"
+    source) and pass with the fix."""
+
+    def test_case_a_posted_formal_transfer_does_not_mask_failed_quick_transfer(self, db):
+        # Item #1 has an unposted quick transfer; formal transfer #1
+        # posted its send journal. The quick failure must be reported.
+        item = _item(db)  # id 1
+        _quick_move(db, item, qty=3, to_bu=2)
+        t = _formal_transfer(db, status="in_transit")  # id 1
+        assert item.id == 1 and t.id == 1
+        _posted(db, 1, "stock_transfer", t.id, "JV-2026-11-001")  # send leg
+        db.commit()
+
+        failures = find_journal_failures(db)
+        quick = _by_kind(failures, "quick_stock_transfer")
+        assert len(quick) == 1
+        assert (quick[0]["source"], quick[0]["source_id"]) == ("quick_stock_transfer", item.id)
+        # The formal transfer itself is not a failure (in_transit,
+        # send leg posted) — only the quick transfer is listed.
+        assert _by_kind(failures, "stock_transfer") == []
+
+    def test_case_b_posted_quick_transfer_does_not_mask_failed_formal_send_leg(self, db):
+        # Formal transfer #1 fully posted (control). Formal transfer
+        # #2's send leg never posted, but a quick transfer of item #2
+        # posted in BU1. The send leg must be reported missing — not
+        # just the receive leg.
+        t1 = _formal_transfer(db, status="received")  # id 1
+        _posted(db, 1, "stock_transfer", t1.id, "JV-2026-11-001")
+        _posted(db, 2, "stock_transfer", t1.id, "JV-2026-11-002")
+        t2 = _formal_transfer(db, status="received",
+                              transfer_no="TR-1-0002", name="Gadget2")  # id 2
+        t2_item_id = t2.lines[0].inventory_item_id
+        assert t2.id == 2 and t2_item_id == 2
+        _posted(db, 1, "quick_stock_transfer", t2_item_id, "JV-2026-11-003")
+        _posted(db, 2, "stock_transfer", t2.id, "JV-2026-11-004")  # receive leg only
+        db.commit()
+
+        failures = find_journal_failures(db)
+        formal = _by_kind(failures, "stock_transfer")
+        assert len(formal) == 1
+        assert formal[0]["source_id"] == t2.id
+        assert formal[0]["missing_legs"] == ["send"]
+        assert _by_kind(failures, "quick_stock_transfer") == []
+
+    def test_quick_transfer_endpoint_posts_quick_stock_transfer_source(self, db):
+        """G-1 (endpoint level): transfer_stock must post its two
+        journals with source="quick_stock_transfer" — a revert to
+        "stock_transfer" in ops.py fails here even though the
+        reconcile-level tests above post journals directly."""
+        for bu_id in (1, 2):
+            _provision_template(db, bu_id)
+        item = _item(db, cost=100, stock=10)
+        chairman = db.query(User).filter(User.id == 801).first()
+        out = transfer_stock(item.id, TransferIn(to_business_unit_id=2, quantity=3),
+                             user=chairman, db=db)
+        assert out["journal_posted"] is True
+        entries = db.query(JournalEntry).filter(JournalEntry.source_id == item.id).all()
+        assert len(entries) == 2  # one per BU side
+        assert {e.source for e in entries} == {"quick_stock_transfer"}
+        assert {e.business_unit_id for e in entries} == {1, 2}
+        assert all(e.status == "posted" for e in entries)
+        assert find_journal_failures(db) == []
 
 
 class TestJournalRetryRoleGate:
