@@ -16,6 +16,9 @@
 # - Exits non-zero (and prints to stderr, which cron mails/logs) if the
 #   dump fails or the output file is empty — a silent empty backup is
 #   worse than no backup.
+# - On success upserts a `job_heartbeats` row for "backup" (G-4), so the
+#   log-scan dead-man check notices if the Sunday cron silently dies
+#   (weekly job, 8-day grace — see src/jobs/log_scan.py).
 # - The dump contains the DATABASE CONTENTS only, not R2 file contents
 #   and not the DATA_ENCRYPTION_KEY: keep the key copy off-platform
 #   (see docs/backup-recovery.md), or the encrypted CEO fields in the
@@ -54,3 +57,35 @@ fi
 find "$BACKUP_DIR" -maxdepth 1 -name 'bot-*.dump' -type f -mtime +"$RETENTION_DAYS" -delete
 
 echo "backup.sh: wrote $OUT ($(du -h "$OUT" | cut -f1))"
+
+# G-4 (2026-11-17 review): heartbeat for the log-scan dead-man check,
+# so a dead Sunday backup cron is visible instead of silent. Same
+# upsert shape src/scripts/audit_retention.py uses for audit_retention
+# (INSERT ... ON CONFLICT on job_heartbeats), run inside the app
+# container — which has sqlalchemy and DATABASE_URL — because this
+# script runs on the host and psql may not be installed. Best effort
+# by design: a heartbeat failure must not fail a good backup; it only
+# warns, and log_scan flags "backup" as stale (8-day weekly grace)
+# until the next successful run writes one. Only reached on success:
+# a failed/empty dump exits above before this line.
+if [ -f docker-compose.prod.yml ] && command -v docker >/dev/null 2>&1; then
+    if ! docker compose -f docker-compose.prod.yml exec -T app python -c 'import os
+import sqlalchemy as sa
+from datetime import datetime, timezone
+engine = sa.create_engine(os.environ["DATABASE_URL"], hide_parameters=True)
+with engine.begin() as conn:
+    conn.execute(
+        sa.text(
+            "INSERT INTO job_heartbeats (job_name, last_run_at, last_status) "
+            "VALUES (:job, :now, :status) "
+            "ON CONFLICT (job_name) DO UPDATE SET "
+            "last_run_at = EXCLUDED.last_run_at, last_status = EXCLUDED.last_status"
+        ),
+        {"job": "backup", "now": datetime.now(timezone.utc).replace(tzinfo=None), "status": "ok"},
+    )
+'; then
+        echo "backup.sh: warning: backup heartbeat not written; log_scan will flag backup as stale" >&2
+    fi
+else
+    echo "backup.sh: warning: docker compose unavailable; backup heartbeat not written" >&2
+fi

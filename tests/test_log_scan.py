@@ -80,27 +80,74 @@ class TestStaleJobs:
     def test_fresh_heartbeat_not_stale(self):
         assert log_scan.stale_jobs(
             [("scheduled_alerts", NOW - timedelta(hours=1)),
-             ("log_scan", NOW - timedelta(hours=2))], now=NOW) == []
+             ("log_scan", NOW - timedelta(hours=2)),
+             ("reconcile_journals", NOW - timedelta(hours=3))], now=NOW) == []
 
     def test_older_than_36h_is_stale(self):
         assert log_scan.stale_jobs(
             [("scheduled_alerts", NOW - timedelta(hours=37)),
-             ("log_scan", NOW - timedelta(hours=1))], now=NOW) == ["scheduled_alerts"]
+             ("log_scan", NOW - timedelta(hours=1)),
+             ("reconcile_journals", NOW - timedelta(hours=1))], now=NOW) == ["scheduled_alerts"]
 
     def test_exactly_36h_is_not_stale(self):
         assert log_scan.stale_jobs(
             [("scheduled_alerts", NOW - timedelta(hours=36)),
-             ("log_scan", NOW - timedelta(hours=1))], now=NOW) == []
+             ("log_scan", NOW - timedelta(hours=1)),
+             ("reconcile_journals", NOW - timedelta(hours=1))], now=NOW) == []
 
     def test_job_that_never_ran_is_stale(self):
         # A dead-man check that only watches rows that exist cannot see a
         # cron that was never installed.
         assert log_scan.stale_jobs(
-            [("log_scan", NOW - timedelta(hours=1))], now=NOW) == ["scheduled_alerts"]
+            [("log_scan", NOW - timedelta(hours=1))], now=NOW) == [
+                "scheduled_alerts", "reconcile_journals"]
 
     def test_missing_row_and_none_last_run(self):
         assert log_scan.stale_jobs(
-            [("scheduled_alerts", None), ("log_scan", NOW)], now=NOW) == ["scheduled_alerts"]
+            [("scheduled_alerts", None), ("log_scan", NOW),
+             ("reconcile_journals", NOW)], now=NOW) == ["scheduled_alerts"]
+
+    # G-3: reconcile_journals (daily 07:30) writes a heartbeat on every
+    # run, so the dead-man check must flag it when it is missing/stale.
+    def test_reconcile_journals_missing_is_stale(self):
+        assert log_scan.stale_jobs(
+            [("scheduled_alerts", NOW - timedelta(hours=1)),
+             ("log_scan", NOW - timedelta(hours=1))], now=NOW) == ["reconcile_journals"]
+
+    def test_reconcile_journals_stale_after_36h(self):
+        assert log_scan.stale_jobs(
+            [("scheduled_alerts", NOW - timedelta(hours=1)),
+             ("log_scan", NOW - timedelta(hours=1)),
+             ("reconcile_journals", NOW - timedelta(hours=37))], now=NOW) == ["reconcile_journals"]
+
+    def test_reconcile_journals_within_36h_is_not_stale(self):
+        assert log_scan.stale_jobs(
+            [("scheduled_alerts", NOW - timedelta(hours=1)),
+             ("log_scan", NOW - timedelta(hours=1)),
+             ("reconcile_journals", NOW - timedelta(hours=36))], now=NOW) == []
+
+    # G-4: backup is a weekly job (Sundays 03:30) with an 8-day grace,
+    # like audit_retention — and, like it, a missing row is not stale
+    # (between install and the first weekly run there is legitimately
+    # no row yet).
+    def test_backup_weekly_grace(self):
+        pairs = [("audit_retention", NOW - timedelta(days=1)),
+                 ("backup", NOW - timedelta(days=7))]
+        assert log_scan.stale_jobs(
+            pairs, now=NOW, expected=log_scan.WEEKLY_JOBS,
+            never_ran_is_stale=False) == []
+
+    def test_backup_stale_after_8_days(self):
+        pairs = [("audit_retention", NOW - timedelta(days=1)),
+                 ("backup", NOW - timedelta(days=8, hours=1))]
+        assert log_scan.stale_jobs(
+            pairs, now=NOW, expected=log_scan.WEEKLY_JOBS,
+            never_ran_is_stale=False) == ["backup"]
+
+    def test_backup_never_ran_is_not_stale(self):
+        assert log_scan.stale_jobs(
+            [("audit_retention", NOW - timedelta(days=1))], now=NOW,
+            expected=log_scan.WEEKLY_JOBS, never_ran_is_stale=False) == []
 
 
 @pytest.fixture()
@@ -151,6 +198,9 @@ class TestMain:
         engine, session = scan_db
         _seed_heartbeat(session, "scheduled_alerts", 1)
         _seed_heartbeat(session, "log_scan", 1)
+        _seed_heartbeat(session, "reconcile_journals", 1)
+        # No backup row at all: weekly jobs only alert on a stale
+        # existing row, never on a missing one (G-4).
         log_file = tmp_path / "app.log"
         log_file.write_text(f"{_stamp(_now() - timedelta(hours=1))} INFO business_ops_tracker: ok\n")
         monkeypatch.setattr(log_scan, "SessionLocal", _fresh_db_session(scan_db))
@@ -162,6 +212,7 @@ class TestMain:
         engine, session = scan_db
         _seed_heartbeat(session, "scheduled_alerts", 40)  # stale
         _seed_heartbeat(session, "log_scan", 1)
+        _seed_heartbeat(session, "reconcile_journals", 1)
         log_file = tmp_path / "app.log"
         log_file.write_text("\n".join(_lines()) + "\n")
         monkeypatch.setattr(log_scan, "SessionLocal", _fresh_db_session(scan_db))
@@ -175,10 +226,68 @@ class TestMain:
         # The scan upserted its own heartbeat while it was there.
         assert _heartbeat(engine, "log_scan") is not None
 
+    # G-3: a missing or stale reconcile_journals heartbeat must reach
+    # the Chairman, not pass silently.
+    def test_missing_reconcile_heartbeat_notifies_chairman(self, scan_db, tmp_path, monkeypatch):
+        engine, session = scan_db
+        _seed_heartbeat(session, "scheduled_alerts", 1)
+        _seed_heartbeat(session, "log_scan", 1)
+        # No reconcile_journals row: the 07:30 cron never ran / was
+        # never installed.
+        log_file = tmp_path / "app.log"
+        log_file.write_text(f"{_stamp(_now() - timedelta(hours=1))} INFO ok\n")
+        monkeypatch.setattr(log_scan, "SessionLocal", _fresh_db_session(scan_db))
+        assert log_scan.main(["--log-file", str(log_file), "--hours", "24"]) == 0
+        notes = _notifications(engine)
+        assert len(notes) == 1
+        assert "reconcile_journals" in notes[0].message
+
+    def test_stale_reconcile_heartbeat_notifies_chairman(self, scan_db, tmp_path, monkeypatch):
+        engine, session = scan_db
+        _seed_heartbeat(session, "scheduled_alerts", 1)
+        _seed_heartbeat(session, "log_scan", 1)
+        _seed_heartbeat(session, "reconcile_journals", 40)  # stale (> 36 h)
+        log_file = tmp_path / "app.log"
+        log_file.write_text(f"{_stamp(_now() - timedelta(hours=1))} INFO ok\n")
+        monkeypatch.setattr(log_scan, "SessionLocal", _fresh_db_session(scan_db))
+        assert log_scan.main(["--log-file", str(log_file), "--hours", "24"]) == 0
+        notes = _notifications(engine)
+        assert len(notes) == 1
+        assert "reconcile_journals" in notes[0].message
+
+    # G-4: a stale backup heartbeat (weekly job, 8-day grace) must
+    # reach the Chairman; a missing one must not alert yet.
+    def test_stale_backup_heartbeat_notifies_chairman(self, scan_db, tmp_path, monkeypatch):
+        engine, session = scan_db
+        _seed_heartbeat(session, "scheduled_alerts", 1)
+        _seed_heartbeat(session, "log_scan", 1)
+        _seed_heartbeat(session, "reconcile_journals", 1)
+        _seed_heartbeat(session, "backup", 9 * 24)  # stale (> 8 days)
+        log_file = tmp_path / "app.log"
+        log_file.write_text(f"{_stamp(_now() - timedelta(hours=1))} INFO ok\n")
+        monkeypatch.setattr(log_scan, "SessionLocal", _fresh_db_session(scan_db))
+        assert log_scan.main(["--log-file", str(log_file), "--hours", "24"]) == 0
+        notes = _notifications(engine)
+        assert len(notes) == 1
+        assert "backup" in notes[0].message
+
+    def test_missing_backup_heartbeat_is_not_stale(self, scan_db, tmp_path, monkeypatch, capsys):
+        engine, session = scan_db
+        _seed_heartbeat(session, "scheduled_alerts", 1)
+        _seed_heartbeat(session, "log_scan", 1)
+        _seed_heartbeat(session, "reconcile_journals", 1)
+        log_file = tmp_path / "app.log"
+        log_file.write_text(f"{_stamp(_now() - timedelta(hours=1))} INFO ok\n")
+        monkeypatch.setattr(log_scan, "SessionLocal", _fresh_db_session(scan_db))
+        assert log_scan.main(["--log-file", str(log_file), "--hours", "24"]) == 0
+        assert _notifications(engine) == []
+        assert "stale heartbeats: none" in capsys.readouterr().out
+
     def test_app_log_file_env_is_used(self, scan_db, tmp_path, monkeypatch):
         engine, session = scan_db
         _seed_heartbeat(session, "scheduled_alerts", 1)
         _seed_heartbeat(session, "log_scan", 1)
+        _seed_heartbeat(session, "reconcile_journals", 1)
         log_file = tmp_path / "app.log"
         log_file.write_text(f"{_stamp(_now() - timedelta(hours=1))} INFO ok\n")
         monkeypatch.setenv("APP_LOG_FILE", str(log_file))
@@ -189,6 +298,7 @@ class TestMain:
         engine, session = scan_db
         _seed_heartbeat(session, "scheduled_alerts", 1)
         _seed_heartbeat(session, "log_scan", 1)
+        _seed_heartbeat(session, "reconcile_journals", 1)
         monkeypatch.setattr("sys.stdin", io.StringIO(f"{_stamp(_now() - timedelta(hours=1))} INFO ok\n"))
         monkeypatch.setattr(log_scan, "SessionLocal", _fresh_db_session(scan_db))
         assert log_scan.main(["--log-file", "-"]) == 0
@@ -218,6 +328,7 @@ class TestMain:
         session = sessionmaker(bind=engine)()
         _seed_heartbeat(session, "scheduled_alerts", 1)
         _seed_heartbeat(session, "log_scan", 1)
+        _seed_heartbeat(session, "reconcile_journals", 1)
         session.commit()
         log_file = tmp_path / "app.log"
         log_file.write_text(f"{_stamp(_now() - timedelta(hours=1))} ERROR something broke\n")

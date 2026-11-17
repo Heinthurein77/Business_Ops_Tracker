@@ -40,15 +40,20 @@ from src.utils import utcnow
 
 # A job whose heartbeat is older than this is presumed dead.
 STALE_AFTER_HOURS = 36
-# Jobs expected to write a heartbeat every run. audit_retention is a
-# weekly job, so it is watched separately (WEEKLY_JOBS) with a weekly
-# grace instead of the 36 h daily budget — see JOB_MAX_AGE_HOURS.
-EXPECTED_JOBS = ("scheduled_alerts", "log_scan")
+# Jobs expected to write a heartbeat every run. audit_retention and
+# backup are weekly jobs, so they are watched separately (WEEKLY_JOBS)
+# with a weekly grace instead of the 36 h daily budget — see
+# JOB_MAX_AGE_HOURS. G-3: reconcile_journals (daily 07:30) writes a
+# heartbeat on every run, so it belongs here — without it a dead
+# reconcile cron never alerts.
+EXPECTED_JOBS = ("scheduled_alerts", "log_scan", "reconcile_journals")
 # Weekly jobs and their dead-man grace: audit_retention runs Sundays,
 # so it gets 8 days (weekly + 1 day) instead of the 36 h daily budget.
+# G-4: backup (Sundays 03:30) gets the same 8-day grace.
 JOB_MAX_AGE_HOURS = {"scheduled_alerts": STALE_AFTER_HOURS, "log_scan": STALE_AFTER_HOURS,
-                     "audit_retention": 8 * 24}
-WEEKLY_JOBS = ("audit_retention",)
+                     "reconcile_journals": STALE_AFTER_HOURS,
+                     "audit_retention": 8 * 24, "backup": 8 * 24}
+WEEKLY_JOBS = ("audit_retention", "backup")
 
 _ERROR_RE = re.compile(r"\bERROR\b")
 _TIMESTAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})")
@@ -204,8 +209,8 @@ def check_heartbeats(db, now=None) -> list[str]:
     """Stale-job names from the database's heartbeat table.
 
     Daily jobs use the 36 h budget and alert when they never ran;
-    weekly jobs (audit_retention) use their own grace and only alert
-    on a stale existing row — between install and the first weekly
+    weekly jobs (audit_retention, backup) use their own grace and only
+    alert on a stale existing row — between install and the first weekly
     run there is legitimately no row yet.
     """
     rows = db.query(JobHeartbeat).all()
