@@ -11,7 +11,6 @@ them in __init__, so a fresh middleware is built after each patch.
 """
 import asyncio
 
-import pytest
 
 from src.config import settings
 from src.edge import EdgeMiddleware

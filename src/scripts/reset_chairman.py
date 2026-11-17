@@ -24,7 +24,7 @@ import argparse
 import os
 import secrets
 import sys
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 from src.auth import bump_token_version, hash_password

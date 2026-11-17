@@ -14,8 +14,6 @@ import os
 import stat
 import subprocess
 import sys
-from datetime import date
-from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -24,8 +22,8 @@ os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 
 import pytest
-from sqlalchemy import create_engine, event, inspect
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy import create_engine, event
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from src.models import AuditLog, Base, BusinessUnit, User
@@ -33,14 +31,6 @@ from src.models import AuditLog, Base, BusinessUnit, User
 ROOT = Path(__file__).resolve().parent.parent
 
 
-@pytest.fixture()
-def db():
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
-    yield session
-    session.close()
-    engine.dispose()
 
 
 @pytest.fixture()
@@ -119,7 +109,9 @@ class TestReadyz:
         from src.main import app
 
         bad_engine = create_engine("sqlite:////nonexistent_dir_xyz_12345/x.db")
-        monkeypatch.setattr("src.main.engine", bad_engine)
+        # m-16: /readyz pings through the dedicated probe_engine, not the
+        # main pool — patch the engine the probe actually uses.
+        monkeypatch.setattr("src.main.probe_engine", bad_engine)
         try:
             status, _, _ = asgi_request(app, "GET", "/readyz")
             assert status == 503

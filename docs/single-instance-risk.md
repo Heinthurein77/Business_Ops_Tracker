@@ -44,8 +44,9 @@ split (and effectively double) it; moving it to the DB comes first.
 1. Confirm: `curl http://127.0.0.1:8123/healthz` returns 200 while
    every API call 500s — `/healthz` does NOT touch the DB (known gap,
    D-1), so "healthy" with failing API calls means "DB down".
-2. Wait out a transient Neon blip (startup retries are not yet built;
-   a restart after the DB is back is the recovery).
+2. Wait out a transient Neon blip (startup retries ARE built —
+   main.py retries DB-dependent startup steps 5 times over ~60 s;
+   a restart after the DB is back is the recovery if those give up).
 3. If the data itself is damaged, restore — see
    `docs/backup-recovery.md` (Neon PITR first, weekly `pg_dump`
    second). RPO 1 h, RTO 4 h.

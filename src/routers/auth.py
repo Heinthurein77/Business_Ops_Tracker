@@ -1,3 +1,4 @@
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -55,6 +56,8 @@ from src.throttle import (
     normalize_username,
 )
 from src.utils import log_audit, utcnow
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 

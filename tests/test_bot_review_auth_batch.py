@@ -8,7 +8,6 @@ config guards); the tests here cover the rest, plus the end-to-end
 behaviour of the shared pieces.
 """
 import asyncio
-import io
 import stat
 from datetime import timedelta
 from pathlib import Path
@@ -25,7 +24,7 @@ from src.auth import hash_password, verify_password
 from src.database import get_db
 from src.main import app
 from src.models import AuditLog, Base, BusinessUnit, PasswordHistory, User
-from src.schemas import ForcePasswordChangeRequest, TotpConfirmRequest, TotpEnrollRequest
+from src.schemas import ForcePasswordChangeRequest, TotpEnrollRequest
 from src.utils import utcnow
 
 ROOT = Path(__file__).resolve().parent.parent

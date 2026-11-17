@@ -13,13 +13,11 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 from starlette.requests import Request
 
 from src.auth import hash_password
 from src.models import (
-    AuditLog, Base, BusinessUnit, DailyFinancial, Notification, User,
+    BusinessUnit, DailyFinancial, Notification, User,
 )
 from src.routers.ceo import submit_report as ceo_submit_report
 from src.utils import today_local
@@ -27,35 +25,29 @@ from src.utils import today_local
 PASSWORD = "TestPass123!"
 
 
-@pytest.fixture()
-def db():
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
+@pytest.fixture(autouse=True)
+def _seed_db(db):
     bu1 = BusinessUnit(id=1, code="BU1", name="Shop One")
     bu2 = BusinessUnit(id=2, code="BU2", name="Shop Two")
-    session.add_all([bu1, bu2])
+    db.add_all([bu1, bu2])
     chairman = User(id=701, username="chairman", hashed_password=hash_password(PASSWORD),
                     role="Chairman", is_active=True)
     ho = User(id=702, username="ho_user", hashed_password=hash_password(PASSWORD),
               role="HO", is_active=True)
     ceo = User(id=703, username="ceo_one", hashed_password=hash_password(PASSWORD),
                role="CEO", business_unit_id=1, is_active=True)
-    session.add_all([chairman, ho, ceo])
-    session.commit()
-    session.test_bu = bu1
-    session.test_bu2 = bu2
-    session.test_users = {"chairman": chairman, "ho": ho, "ceo": ceo}
-    yield session
-    session.close()
-    engine.dispose()
+    db.add_all([chairman, ho, ceo])
+    db.commit()
+    db.test_bu = bu1
+    db.test_bu2 = bu2
+    db.test_users = {"chairman": chairman, "ho": ho, "ceo": ceo}
 
 
 # ------------------------------------------------------------------ D-14(b): anomaly flag
 
 def _ceo_submit(db, user, **overrides):
     import src.routers.ceo as ceo_router
-    ceo_router._report_submit_timestamps.clear()
+    ceo_router._rate_limiter.reset()
     payload = dict(
         report_date="", revenue="100000", cash_flow="0", receivable="0", payable="0",
         other_amount="", financial_other_notes="", meetings_attended="Standup",

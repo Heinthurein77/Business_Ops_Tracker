@@ -49,27 +49,21 @@ def _drain(resp):
     return asyncio.run(_collect())
 
 
-@pytest.fixture
-def db():
-    """Minimal tracker fixture: two users + two BUs (the journal /
+@pytest.fixture(autouse=True)
+def _seed_db(db):
+    """Minimal tracker seed: two users + two BUs (the journal /
     document seeding died with the ERP report tests)."""
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
-    session.add_all([
+    db.add_all([
         User(id=1, username="chairman", hashed_password="x", role="Chairman",
              is_active=True, token_version=0),
         User(id=2, username="aye", hashed_password="x", full_name="Aye Aye",
              role="CEO", business_unit_id=1, is_active=True, token_version=0),
     ])
-    session.add_all([
+    db.add_all([
         BusinessUnit(id=1, code="BU1", name="Shop One"),
         BusinessUnit(id=2, code="BU2", name="Shop Two"),
     ])
-    session.commit()
-    yield session
-    session.close()
-    engine.dispose()
+    db.commit()
 
 
 class TestOpsExport:

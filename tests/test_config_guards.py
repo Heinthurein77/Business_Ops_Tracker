@@ -16,7 +16,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -128,6 +127,16 @@ class TestProdRefusals:
         del env["ALLOWED_HOSTS"]
         del env["ALLOWED_ORIGINS"]
         _assert_refused(env, tmp_path, "ALLOWED_HOSTS")
+
+    # m-07 (minor): a typo'd integer env var used to crash startup with a
+    # bare ValueError; _int() names the variable instead.
+    def test_non_integer_port_refused_with_named_error(self, tmp_path):
+        _assert_refused(_prod(PORT="eight-thousand"), tmp_path, "PORT must be an integer")
+
+    def test_non_integer_total_business_units_refused(self, tmp_path):
+        _assert_refused(
+            _prod(TOTAL_BUSINESS_UNITS="twenty-three"), tmp_path,
+            "TOTAL_BUSINESS_UNITS must be an integer")
 
 
 class TestGoodConfigsBoot:

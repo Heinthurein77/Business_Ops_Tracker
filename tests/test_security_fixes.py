@@ -9,7 +9,7 @@ no httpx/TestClient).
 """
 import asyncio
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 os.environ.setdefault("ENVIRONMENT", "test")
@@ -17,24 +17,14 @@ os.environ.setdefault("DATABASE_URL", "sqlite://")
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
 from src import throttle
 from src.auth import InsufficientRoleException
-from src.models import AuditLog, Base, Notification, User
+from src.models import AuditLog, User
 
 PUBLIC_IP = "8.8.8.8"
 
 
-@pytest.fixture()
-def db():
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
-    yield session
-    session.close()
-    engine.dispose()
 
 
 def add_user(db, username, role, is_active=True):

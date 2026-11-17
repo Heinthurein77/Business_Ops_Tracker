@@ -1,8 +1,4 @@
 import logging
-import re
-import threading
-import time
-from collections import defaultdict, deque
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
@@ -16,7 +12,7 @@ from sqlalchemy.orm import Session
 from src.auth import assert_token_current, require_roles, resolve_redirect_path
 from src.config import settings
 from src.database import get_db
-from src.models import ActivityLog, BusinessUnit, CeoProfile, DailyFinancial, FinancialNote, HealthStatus, MonthlyTarget, Notification, SocialLog, User
+from src.models import ActivityLog, BusinessUnit, CeoProfile, DailyFinancial, FinancialNote, HealthStatus, MonthlyTarget, SocialLog, User
 from src.r2_storage import delete_object, extract_r2_key
 from src.r2_storage import is_configured as r2_is_configured
 from src.r2_storage import upload_attachment_or_503, upload_fileobj
@@ -49,11 +45,15 @@ from src.utils import (
     format_local_datetime,
     log_audit,
     monthly_target_window_error,
+    notify,
+    parse_bool,
     parse_bounded_decimal,
+    parse_month_or_default,
     parse_monthly_target_amounts,
     report_date_window_error,
     serialize_ceo_profile,
     shift_month,
+    SubmitRateLimiter,
     today_local,
     todays_submission_events,
     validate_blood_pressure,
@@ -67,10 +67,10 @@ router = APIRouter(prefix="/api/ceo", tags=["ceo"])
 # and the R2 upload from being hammered.
 REPORT_SUBMIT_RATE_LIMIT = 5
 REPORT_SUBMIT_RATE_WINDOW_SECONDS = 60
-_report_submit_timestamps: dict[int, deque] = defaultdict(deque)
-# submit_report runs in FastAPI's threadpool (it's a plain `def`), so the
-# shared deque bookkeeping below must be serialized.
-_report_submit_lock = threading.Lock()
+# M-12: the guard itself lives in src/utils.py (SubmitRateLimiter); this
+# router owns one instance so CEO and HO keep separate budgets.
+_rate_limiter = SubmitRateLimiter(REPORT_SUBMIT_RATE_LIMIT, REPORT_SUBMIT_RATE_WINDOW_SECONDS)
+_is_rate_limited = _rate_limiter.is_limited
 
 MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 ALLOWED_ATTACHMENT_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "gif", "webp", "docx", "xlsx", "csv", "txt"}
@@ -79,30 +79,6 @@ logger = logging.getLogger(__name__)
 
 MAX_PROFILE_PHOTO_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
 ALLOWED_PROFILE_PHOTO_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
-
-
-def _is_rate_limited(user_id: int) -> bool:
-    now = time.monotonic()
-    with _report_submit_lock:
-        timestamps = _report_submit_timestamps[user_id]
-        while timestamps and now - timestamps[0] > REPORT_SUBMIT_RATE_WINDOW_SECONDS:
-            timestamps.popleft()
-        if len(timestamps) >= REPORT_SUBMIT_RATE_LIMIT:
-            return True
-        timestamps.append(now)
-        return False
-
-
-def _parse_decimal(raw: Optional[str]) -> Optional[Decimal]:
-    """Blank -> None. NaN / Infinity / abs(value) >= 1e13 (the money columns
-    are Numeric(16, 2)) / unparsable input -> None too, never a Decimal that
-    Postgres would store as NaN (poisoning every SUM) or overflow on. Rounded
-    to 2 decimals, the column's precision. See utils.parse_bounded_decimal."""
-    return parse_bounded_decimal(raw)
-
-
-def _parse_bool(raw: Optional[str]) -> bool:
-    return (raw or "").strip().lower() in ("true", "1", "yes", "on")
 
 
 @router.get("/dashboard")
@@ -114,16 +90,7 @@ def ceo_dashboard(
 ):
     report_date = today_local()
 
-    try:
-        calendar_year, calendar_month = (int(part) for part in month.split("-", 1))
-        date(calendar_year, calendar_month, 1)  # validates the month is real
-        if not (2000 <= calendar_year <= 2100):
-            # The calendar grid pads to whole weeks, so a month at the very
-            # edge of the supported date range (e.g. 9999-12) would overflow
-            # date arithmetic and 500 - clamp to a sane window instead.
-            raise ValueError("month out of supported range")
-    except (ValueError, TypeError):
-        calendar_year, calendar_month = report_date.year, report_date.month
+    calendar_year, calendar_month = parse_month_or_default(month, report_date)
 
     # Activity / health / social rows are the submitting CEO's own personal
     # data: every read of them below is scoped to `submitted_by == user.id`
@@ -590,11 +557,8 @@ def get_monthly_target(
     month) so the "Set Monthly Target" form can pre-fill with existing values
     instead of always starting blank."""
     today = today_local()
-    try:
-        year, month_num = (int(part) for part in month.split("-", 1))
-        target_month = date(year, month_num, 1)
-    except (ValueError, TypeError):
-        target_month = date(today.year, today.month, 1)
+    year, month_num = parse_month_or_default(month, today)
+    target_month = date(year, month_num, 1)
 
     target = (
         db.query(MonthlyTarget)
@@ -1082,7 +1046,7 @@ def submit_report(
     stress_level_val = _form_choice(stress_level, STRESS_LEVELS, "Stress level")
     energy_mood_val = _form_choice(energy_mood, ENERGY_MOODS, "Energy mood")
     weight_kg_val = _form_weight(weight_kg)
-    is_sick_val = _parse_bool(is_sick)
+    is_sick_val = parse_bool(is_sick)
     health_exercise_present = (
         health_gym_percent is not None or health_swimming_percent is not None or health_cycle_percent is not None
     )
@@ -1102,22 +1066,21 @@ def submit_report(
     health_other_notes = form_text(health_other_notes, "Health notes", MAX_NARRATIVE_TEXT_LEN)
     social_other_notes = form_text(social_other_notes, "Social notes", MAX_NARRATIVE_TEXT_LEN)
 
-    # SM-7: take the row locks for the day's rows BEFORE uploading, so a
-    # concurrent resubmit cannot slip in between the upload and the write
-    # and orphan the uploaded file (or overwrite it). The full row loads
-    # below re-use these same locks (same transaction, same session). For
-    # a first submission the rows do not exist yet, so no lock is taken —
-    # the double-submit 409 at commit time is the guard there, and its
-    # handler deletes the orphaned upload (see below).
-    for _model in (DailyFinancial, ActivityLog, HealthStatus, SocialLog):
-        db.query(_model).filter(
-            _model.business_unit_id == user.business_unit_id, _model.report_date == report_date
-        ).with_for_update().first()
-
-    # The attachment is checked and uploaded here, after the row locks
-    # above, so a slow upload no longer races a concurrent resubmit — the
-    # lock is held during the upload, but only on this BU's rows for this
-    # one day, so nothing else can contend on it.
+    # m-13: the attachment is validated and uploaded BEFORE any row is
+    # locked or written, and with NO database session held. get_db checks
+    # a pooled connection out (SELECT 1) before the handler runs, and the
+    # old code then took this day's row locks before the R2 upload — so a
+    # slow upload (up to ~90 s) held a pooled connection AND row locks.
+    # The pre-upload locks are not needed for orphan-safety: the write
+    # phase below re-takes the same row locks, a first-submission race
+    # still surfaces as the 409 at commit time (whose handler deletes
+    # the loser's upload), and a resubmission's post-commit cleanup
+    # deletes the previous attachment in every interleaving. So the
+    # upload now runs between validation and the writes, after
+    # db.close() releases the pooled connection; the write phase re-uses
+    # the same session object, which checks a fresh connection out on
+    # its next query (a new SessionLocal() here would hit a different
+    # database in tests that pass their own session).
     document_url = None
     if attachment is not None and attachment.filename:
         extension = attachment.filename.rsplit(".", 1)[-1].lower() if "." in attachment.filename else ""
@@ -1134,6 +1097,9 @@ def submit_report(
         if not content_matches_extension(extension, attachment.file):
             raise HTTPException(status_code=400, detail="File content does not match its file type")
 
+        # Release the pooled connection checked out by get_db before the
+        # (potentially slow) R2 upload; the session is reused below.
+        db.close()
         # D-4: an attachment that cannot be stored fails the submit (503)
         # instead of saving the report as if the evidence were attached.
         document_url = upload_attachment_or_503(attachment.file, attachment.filename)
@@ -1313,9 +1279,9 @@ def submit_report(
     if social is None:
         social = SocialLog(business_unit_id=user.business_unit_id, report_date=report_date)
         db.add(social)
-    social.event_flag = _parse_bool(event_flag)
-    social.meeting_flag = _parse_bool(meeting_flag)
-    social.golf_flag = _parse_bool(golf_flag)
+    social.event_flag = parse_bool(event_flag)
+    social.meeting_flag = parse_bool(meeting_flag)
+    social.golf_flag = parse_bool(golf_flag)
     social.other_notes = social_other_notes or None
     social.submitted_by = user.id
 
@@ -1439,15 +1405,13 @@ def submit_report(
         bu_label = bu.name if bu else f"BU {user.business_unit_id}"
         deviation = (float(revenue_val or 0) - anomaly_avg) / anomaly_avg * 100
         for ho_user in db.query(User).filter(User.role == "HO", User.is_active == True).all():  # noqa: E712
-            db.add(Notification(
-                user_id=ho_user.id, type="alert",
-                title=f"Revenue anomaly: {bu_label}",
-                message=(
-                    f"Revenue Ks {float(revenue_val or 0):,.0f} on {report_date.isoformat()} "
-                    f"vs 14-day average Ks {anomaly_avg:,.0f} ({deviation:+.0f}%) — please review."
-                ),
+            notify(
+                db, ho_user.id, "alert",
+                f"Revenue anomaly: {bu_label}",
+                f"Revenue Ks {float(revenue_val or 0):,.0f} on {report_date.isoformat()} "
+                f"vs 14-day average Ks {anomaly_avg:,.0f} ({deviation:+.0f}%) — please review.",
                 link=f"/admin/business-unit/{user.business_unit_id}",
-            ))
+            )
 
     # M-03: an accepted backdated resubmit (a day that already had a
     # report, re-filed inside the window) notifies Chairman/HO so a
@@ -1457,15 +1421,13 @@ def submit_report(
         bu_label = bu.name if bu else f"BU {user.business_unit_id}"
         for recipient in db.query(User).filter(
                 User.role.in_(["Chairman", "HO"]), User.is_active == True).all():  # noqa: E712
-            db.add(Notification(
-                user_id=recipient.id, type="alert",
-                title=f"Backdated report edit: {bu_label}",
-                message=(
-                    f"{user.username} resubmitted the {report_date.isoformat()} report for "
-                    f"{bu_label} — please review the change."
-                ),
+            notify(
+                db, recipient.id, "alert",
+                f"Backdated report edit: {bu_label}",
+                f"{user.username} resubmitted the {report_date.isoformat()} report for "
+                f"{bu_label} — please review the change.",
                 link=f"/admin/business-unit/{user.business_unit_id}",
-            ))
+            )
 
     # The anomaly flag above and the notifications in this section were
     # added after the main commit, and log_audit below writes on its own

@@ -81,12 +81,16 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 # itself (src/client_ip.py) via CLIENT_IP_HEADER / TRUSTED_PROXY_HOPS.
 # --no-server-header omits "Server: uvicorn".
 #
-# --timeout-keep-alive 5 / --limit-concurrency 100 (D-m6): a slow client
-# holding a connection open no longer ties up the single worker
+# --timeout-keep-alive 5 / --limit-concurrency 20 (D-m6, M-08): a slow
+# client holding a connection open no longer ties up the single worker
 # indefinitely. The buffering reverse proxy in front (Caddy, tls profile
 # in docker-compose.prod.yml) absorbs slow clients, so a 5 s keep-alive is
-# safe. Deliberately NO --workers: the in-process per-process export budget
-# (src/edge.py) is not safe to split across workers yet — it must move out
-# of process memory first (D-11). One worker is the documented limit; see
-# docs/security-decisions.md and the go-live runbook.
-CMD ["sh", "-c", "exec uvicorn src.main:app --host 0.0.0.0 --port ${PORT:-8000} --no-proxy-headers --no-server-header --timeout-keep-alive 5 --limit-concurrency 100"]
+# safe. The limit is 20, not 100: the DB pool is 5+5=10 (src/database.py),
+# so a 100-deep queue only made an 11th+ concurrent request wait out the
+# 10 s pool_timeout before 503ing. 20 concurrent requests with short DB
+# holds is the intended headroom — excess load fails fast instead of
+# queueing 10 s. Deliberately NO --workers: the in-process per-process
+# export budget (src/edge.py) is not safe to split across workers yet —
+# it must move out of process memory first (D-11). One worker is the
+# documented limit; see docs/security-decisions.md and the go-live runbook.
+CMD ["sh", "-c", "exec uvicorn src.main:app --host 0.0.0.0 --port ${PORT:-8000} --no-proxy-headers --no-server-header --timeout-keep-alive 5 --limit-concurrency 20"]

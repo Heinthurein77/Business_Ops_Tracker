@@ -1,3 +1,4 @@
+import logging
 import time
 
 from fastapi import HTTPException
@@ -7,6 +8,8 @@ from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError, Timeout
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from src.config import settings
+
+_db_logger = logging.getLogger("business_ops_tracker.database")
 
 # Deterministic names for unnamed indexes / unique constraints / foreign keys:
 # without this, Postgres invents them, and a later migration has to guess (or
@@ -24,12 +27,16 @@ NAMING_CONVENTION = {
 # vitals, password hashes — and those end up in the platform's log stream.
 _engine_kwargs = {"pool_pre_ping": True, "hide_parameters": True}
 
+# The Postgres connect args, shared by the main engine and the /readyz
+# probe engine (m-16) below. Empty for SQLite.
+_postgres_connect_args: dict = {}
+
 if settings.DATABASE_URL.startswith("sqlite"):
     _engine_kwargs["connect_args"] = {"check_same_thread": False}
 else:
     _url = make_url(settings.DATABASE_URL)
     _host, _port = _url.host or "", _url.port
-    _connect_args = {
+    _postgres_connect_args = {
         "connect_timeout": 10,
         "application_name": "business-ops-web",
         # Detect a dead connection through the provider's proxy in seconds
@@ -45,11 +52,11 @@ else:
     # port 25061) reject startup `options`; there the same limits should be set
     # per role instead (ALTER ROLE ... SET, see deploy/db_roles.sql).
     if "-pooler" not in _host and _port != 25061:
-        _connect_args["options"] = (
+        _postgres_connect_args["options"] = (
             "-c statement_timeout=15000 -c lock_timeout=5000 -c idle_in_transaction_session_timeout=60000"
         )
     _engine_kwargs.update(
-        connect_args=_connect_args,
+        connect_args=_postgres_connect_args,
         # A managed database allows a small fixed number of connections (about
         # 22 on the smallest DigitalOcean cluster) and a rolling deploy briefly
         # runs two instances, so keep each well under half of that.
@@ -69,6 +76,93 @@ else:
     )
 
 engine = create_engine(settings.DATABASE_URL, **_engine_kwargs)
+
+
+def build_probe_engine(url: str, connect_args: dict | None = None):
+    """The /readyz probe's own engine (m-16): pool_size=1, max_overflow=0,
+    pool_timeout=3, so a probe checkout can never eat the main pool and can
+    never linger past the probe's own 3 s join. SQLite needs no pool
+    arguments (its default pool ignores them / rejects them for :memory:)."""
+    kwargs: dict = {"pool_pre_ping": True, "hide_parameters": True}
+    if url.startswith("sqlite"):
+        kwargs["connect_args"] = {"check_same_thread": False}
+    else:
+        kwargs.update(
+            connect_args=connect_args or {},
+            pool_size=1,
+            max_overflow=0,
+            pool_timeout=3,
+        )
+    return create_engine(url, **kwargs)
+
+
+# The probe engine is a separate Engine (its own 1-connection pool), never
+# the main engine — _db_is_ready in src/main.py uses this one.
+probe_engine = build_probe_engine(settings.DATABASE_URL, _postgres_connect_args or None)
+
+
+# ---------------------------------------------------------------- M-09
+# A Neon "-pooler" host (or port 25061) silently drops the statement /
+# lock timeouts above — the pooler rejects startup `options`, and the
+# fallback is per-role ALTER ROLE in deploy/db_roles.sql, which is a
+# manual, not-yet-applied go-live step. Startup must not fail over this
+# (the pooler URL is what Neon shows by default, and the deployer may
+# legitimately use it), but it must warn loudly when the role timeouts
+# cannot be verified as set.
+
+def is_pooler_database_url(url: str) -> bool:
+    """True when the URL points at a transaction-mode pooler, where the
+    startup `options` carrying the query timeouts are not sent."""
+    try:
+        parsed = make_url(url)
+    except Exception:  # noqa: BLE001 - an unparsable URL is not a pooler URL
+        return False
+    return "-pooler" in (parsed.host or "") or parsed.port == 25061
+
+
+def check_pooler_timeouts(connection) -> list[str]:
+    """Asks a live connection for its effective statement_timeout /
+    lock_timeout and returns the names that are unset (Postgres reports
+    an unset timeout as '0'). Logs a prominent WARNING naming them, with
+    the fix (apply deploy/db_roles.sql, or prefer the direct Neon host —
+    see .env.example). `connection` only needs .execute(text(...)).scalar()."""
+    missing: list[str] = []
+    for name in ("statement_timeout", "lock_timeout"):
+        try:
+            value = connection.execute(text(f"SHOW {name}")).scalar()
+        except Exception as exc:  # noqa: BLE001 - a failed SHOW is "cannot verify"
+            _db_logger.warning("could not verify %s on a pooler connection: %s", name, exc)
+            missing.append(name)
+            continue
+        if value is None or str(value).strip() in ("", "0"):
+            missing.append(name)
+    if missing:
+        _db_logger.warning(
+            "Neon pooler DATABASE_URL in use and the role timeouts are NOT set (%s): "
+            "a runaway query has no statement/lock timeout and can hold a pooled "
+            "connection indefinitely. Apply deploy/db_roles.sql (ALTER ROLE ... SET) "
+            "or switch DATABASE_URL to the direct Neon host, which sends the "
+            "timeouts at connect time.",
+            ", ".join(missing),
+        )
+    return missing
+
+
+def verify_pooler_timeouts(db_engine=None) -> list[str]:
+    """Startup check (called from main.py's lifespan once the DB is up):
+    on a pooler URL, opens one connection and verifies the effective
+    timeouts. Returns the missing names (empty when fine / not a pooler
+    URL). Never raises — an unverifiable check is a warning, not a reason
+    to refuse startup."""
+    eng = db_engine if db_engine is not None else engine
+    if not is_pooler_database_url(settings.DATABASE_URL):
+        return []
+    try:
+        with eng.connect() as conn:
+            return check_pooler_timeouts(conn)
+    except Exception as exc:  # noqa: BLE001 - see above: warn, don't fail boot
+        _db_logger.warning("could not verify pooler timeouts at startup: %s", exc)
+        return ["statement_timeout", "lock_timeout"]
 
 if engine.dialect.name == "sqlite":
 

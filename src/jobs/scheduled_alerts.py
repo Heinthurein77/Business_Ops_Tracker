@@ -6,7 +6,7 @@ Run once daily from cron on the server, e.g.:
     # 8:30 AM every day (server time), inside the running container:
     30 8 * * * cd ~/business-ops-tracker && docker compose -f docker-compose.prod.yml exec -T app python -m src.jobs.scheduled_alerts >> ~/bot-alerts.log 2>&1
 
-All three checks are idempotent/throttled in src/routers/ops.py:
+All three checks are idempotent/throttled in src/services/ops_alerts.py:
 - Missing reports: one notification per CEO per run for today's missing report.
 - Document expiry: one alert per document per 7 days.
 - Action items: one reminder per item per 7 days when due today or overdue.
@@ -17,26 +17,17 @@ everyone, since nothing monitors that file.
 """
 import logging
 import sys
-from datetime import datetime
 
 from src.database import SessionLocal
-from src.models import JobHeartbeat, Notification, User
-from src.utils import utcnow
-from src.routers.ops import run_check_document_expiry, run_remind_action_items, run_remind_missing_reports
+from src.models import Notification, User
+from src.services.ops_alerts import (
+    run_check_document_expiry,
+    run_remind_action_items,
+    run_remind_missing_reports,
+)
+from src.utils import record_job_heartbeat as _record_heartbeat
 
 logger = logging.getLogger(__name__)
-
-
-def _record_heartbeat(db, job_name: str, status: str) -> None:
-    """Upsert this run into job_heartbeats (R-6 dead-man check). Best
-    effort by design: a heartbeat write must never mask the job's own
-    result, so any failure here is logged and swallowed."""
-    try:
-        db.merge(JobHeartbeat(job_name=job_name, last_run_at=utcnow(), last_status=status))
-        db.commit()
-    except Exception as exc:  # noqa: BLE001 - heartbeat must not fail the job
-        db.rollback()
-        print(f"heartbeat update failed for {job_name}: {exc}", file=sys.stderr)
 
 
 def _notify_failure(db, exc: Exception) -> None:

@@ -1,8 +1,4 @@
 import logging
-import re
-import threading
-import time
-from collections import defaultdict, deque
 from datetime import date
 from decimal import Decimal
 from typing import Optional
@@ -49,8 +45,10 @@ from src.utils import (
     format_local_datetime,
     log_audit,
     monthly_target_window_error,
-    parse_bounded_decimal,
+    parse_bool,
+    parse_month_or_default,
     parse_monthly_target_amounts,
+    SubmitRateLimiter,
     today_local,
     todays_submission_events,
     validate_blood_pressure,
@@ -62,39 +60,15 @@ router = APIRouter(prefix="/api/ho", tags=["ho"])
 # submitted at most a couple of times a day.
 REPORT_SUBMIT_RATE_LIMIT = 5
 REPORT_SUBMIT_RATE_WINDOW_SECONDS = 60
-_report_submit_timestamps: dict[int, deque] = defaultdict(deque)
-# submit_report runs in FastAPI's threadpool (it's a plain `def`), so the
-# shared deque bookkeeping below must be serialized.
-_report_submit_lock = threading.Lock()
+# M-12: the guard itself lives in src/utils.py (SubmitRateLimiter); this
+# router owns one instance so CEO and HO keep separate budgets.
+_rate_limiter = SubmitRateLimiter(REPORT_SUBMIT_RATE_LIMIT, REPORT_SUBMIT_RATE_WINDOW_SECONDS)
+_is_rate_limited = _rate_limiter.is_limited
 
 MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 ALLOWED_ATTACHMENT_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "gif", "webp", "docx", "xlsx", "csv", "txt"}
 
 logger = logging.getLogger(__name__)
-
-def _is_rate_limited(user_id: int) -> bool:
-    now = time.monotonic()
-    with _report_submit_lock:
-        timestamps = _report_submit_timestamps[user_id]
-        while timestamps and now - timestamps[0] > REPORT_SUBMIT_RATE_WINDOW_SECONDS:
-            timestamps.popleft()
-        if len(timestamps) >= REPORT_SUBMIT_RATE_LIMIT:
-            return True
-        timestamps.append(now)
-        return False
-
-
-def _parse_decimal(raw: Optional[str]) -> Optional[Decimal]:
-    """Blank -> None. NaN / Infinity / abs(value) >= 1e13 (the money columns
-    are Numeric(16, 2)) / unparsable input -> None too, never a Decimal that
-    Postgres would store as NaN (poisoning every SUM) or overflow on. Rounded
-    to 2 decimals, the column's precision. See utils.parse_bounded_decimal."""
-    return parse_bounded_decimal(raw)
-
-
-def _parse_bool(raw: Optional[str]) -> bool:
-    return (raw or "").strip().lower() in ("true", "1", "yes", "on")
-
 
 @router.get("/dashboard")
 def ho_dashboard(user: User = Depends(require_roles("HO")), db: Session = Depends(get_db)):
@@ -249,11 +223,8 @@ def get_monthly_target(month: str = "", user: User = Depends(require_roles("HO")
     month) — mirrors /api/ceo/monthly-target so the "Set Monthly Target" form
     can pre-fill the same way."""
     today = today_local()
-    try:
-        year, month_num = (int(part) for part in month.split("-", 1))
-        target_month = date(year, month_num, 1)
-    except (ValueError, TypeError):
-        target_month = date(today.year, today.month, 1)
+    year, month_num = parse_month_or_default(month, today)
+    target_month = date(year, month_num, 1)
 
     target = db.query(HeadOfficeMonthlyTarget).filter(HeadOfficeMonthlyTarget.target_month == target_month).first()
     if target is None:
@@ -409,19 +380,20 @@ def submit_report(
     health_other_notes = form_text(health_other_notes, "Health notes", MAX_NARRATIVE_TEXT_LEN)
     social_other_notes = form_text(social_other_notes, "Social notes", MAX_NARRATIVE_TEXT_LEN)
 
-    # SM-7: take the row locks for the day's rows BEFORE uploading, so a
-    # concurrent resubmit cannot slip in between the upload and the write
-    # and orphan the uploaded file (or overwrite it). The full row loads
-    # below re-use these same locks (same transaction, same session). For
-    # a first submission the rows do not exist yet, so no lock is taken —
-    # the double-submit 409 at commit time is the guard there, and its
-    # handler deletes the orphaned upload (see below).
-    for _model in (HeadOfficeDailyFinancial, HeadOfficeActivityLog, HeadOfficeHealthStatus, HeadOfficeSocialLog):
-        db.query(_model).filter(_model.report_date == report_date).with_for_update().first()
-
-    # The attachment is checked and uploaded here, after the row locks
-    # above, so a slow upload no longer races a concurrent resubmit — the
-    # lock is held during the upload, but only on this HO day's rows.
+    # m-13: the attachment is validated and uploaded BEFORE any row is
+    # locked or written, and with NO database session held — same shape
+    # as /api/ceo/submit-report. get_db checks a pooled connection out
+    # (SELECT 1) before the handler runs, and the old code then took
+    # this day's row locks before the R2 upload, so a slow upload (up
+    # to ~90 s) held a pooled connection AND row locks. The pre-upload
+    # locks are not needed for orphan-safety: the write phase below
+    # re-takes the same row locks, a first-submission race still
+    # surfaces as the 409 at commit time (whose handler deletes the
+    # loser's upload), and a resubmission's post-commit cleanup deletes
+    # the previous attachment in every interleaving. So the upload now
+    # runs between validation and the writes, after db.close() releases
+    # the pooled connection; the write phase re-uses the same session
+    # object, which checks a fresh connection out on its next query.
     document_url = None
     if attachment is not None and attachment.filename:
         extension = attachment.filename.rsplit(".", 1)[-1].lower() if "." in attachment.filename else ""
@@ -438,6 +410,9 @@ def submit_report(
         if not content_matches_extension(extension, attachment.file):
             raise HTTPException(status_code=400, detail="File content does not match its file type")
 
+        # Release the pooled connection checked out by get_db before the
+        # (potentially slow) R2 upload; the session is reused below.
+        db.close()
         # D-4: an attachment that cannot be stored fails the submit (503)
         # instead of saving the report as if the evidence were attached.
         document_url = upload_attachment_or_503(attachment.file, attachment.filename)
@@ -560,9 +535,9 @@ def submit_report(
     if social is None:
         social = HeadOfficeSocialLog(report_date=report_date)
         db.add(social)
-    social.event_flag = _parse_bool(event_flag)
-    social.meeting_flag = _parse_bool(meeting_flag)
-    social.golf_flag = _parse_bool(golf_flag)
+    social.event_flag = parse_bool(event_flag)
+    social.meeting_flag = parse_bool(meeting_flag)
+    social.golf_flag = parse_bool(golf_flag)
     social.other_notes = social_other_notes or None
     social.submitted_by = user.id
 

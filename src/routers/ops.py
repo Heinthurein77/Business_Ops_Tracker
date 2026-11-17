@@ -8,19 +8,23 @@ Access model mirrors the rest of the app:
 import logging
 import threading
 from contextlib import contextmanager
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import func
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.auth import get_current_user, require_roles
+from src.services.ops_alerts import (  # noqa: F401 - re-exported for callers/tests
+    _action_item_link,
+    run_check_document_expiry,
+    run_remind_action_items,
+    run_remind_missing_reports,
+)
 from src.database import get_db
-from src.utils import APP_TZ, _sanitize_excel_cell, log_audit, today_local, utcnow, validate_period
+from src.utils import _sanitize_excel_cell, log_audit, notify, today_local, utcnow, validate_period
 from src.models import (
     ActionItem,
     ActivityLog,
@@ -30,6 +34,7 @@ from src.models import (
     DailyFinancial,
     HeadOfficeActivityLog,
     LicenseDocument,
+    MonthlyTarget,
     Notification,
     StaffRecord,
     User,
@@ -89,66 +94,6 @@ def _escape_like(value: str) -> str:
     """Escape LIKE wildcards (Sm-1): `_` and `%` in a stored attachment
     key must match literally, never as a single-/multi-char wildcard."""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
-def _assert_token_current(db, user) -> None:
-    """SM-1 backend re-check, called immediately before the commit of
-    every money endpoint: a session revoked mid-request (logout /
-    password change on another device) must not still commit afterwards.
-
-    Workstream B defines ``assert_token_current(db, user)`` in src/auth
-    (it compares user.token_version against ``user._token_tv`` stashed on
-    the user object by get_current_user, raising 401 on mismatch). When
-    that helper is present it is used; otherwise this falls back to an
-    inline re-read of token_version. Duck-typed test users carry no
-    token at all (no ``_token_tv``) and are left alone."""
-    tv = getattr(user, "_token_tv", None)
-    if tv is None:
-        return
-    try:
-        from src.auth import assert_token_current as _atc
-    except ImportError:
-        _atc = None
-    if _atc is not None:
-        _atc(db, user)
-        return
-    row = db.query(User).filter(User.id == user.id).first()
-    if row is not None and row.token_version != tv:
-        raise HTTPException(401, "Session has expired — please sign in again")
-
-
-def _check_version(obj, expected_version, label: str) -> None:
-    """CM-8: an update that names the version it read must 409 when the
-    row has moved since. F-9: absent expected_version stays back-compat
-    (no check) because existing internal callers and tests omit it, but
-    it is logged — an update with no version is last-write-wins, and the
-    caller should send the version it read. Requiring the field would
-    break those callers; the warning is the visible half of the fix."""
-    if expected_version is None:
-        logger.warning(
-            "F-9: %s updated without expected_version — optimistic locking "
-            "skipped (last-write-wins); send the version that was read",
-            label)
-        return
-    if (obj.version or 0) != expected_version:
-        raise HTTPException(
-            409, f"{label} has changed since you loaded it (version {obj.version}) — "
-                 f"reload and try again")
-
-
-def _commit_or_409(db, what: str) -> None:
-    """CC-1: a CHECK violation (e.g. a batch quantity driven below zero)
-    is a retryable 409, not an unhandled 500. Other integrity errors
-    are re-raised unchanged."""
-    try:
-        db.commit()
-    except IntegrityError as exc:
-        db.rollback()
-        orig = str(getattr(exc, "orig", exc))
-        if "ck_" in orig or "check constraint" in orig.lower():
-            raise HTTPException(
-                409, f"{what} would violate a stock constraint — please retry")
-        raise
 
 
 # ---------------------------------------------------------------- helpers
@@ -233,16 +178,6 @@ def _validate_assignee(db: Session, user: User, assigned_to_id: Optional[int]) -
     return assignee
 
 
-def _action_item_link(assignee: Optional[User]) -> str:
-    """M-13: an action-item link must be reachable by the assignee. A CEO
-    sees their items on /ceo (CeoOpsSection on the CEO dashboard);
-    Chairman/HO use /admin/daily-ops. The old '/admin' link bounced a
-    CEO to their home page — /admin is Chairman/HO-only."""
-    if assignee is not None and assignee.role == "CEO":
-        return "/ceo"
-    return "/admin/daily-ops"
-
-
 @router.post("/action-items")
 def create_action_item(payload: ActionItemIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     bu_id = bu_scope(user, payload.business_unit_id)
@@ -262,11 +197,8 @@ def create_action_item(payload: ActionItemIn, user: User = Depends(get_current_u
     db.commit()
     db.refresh(item)
     if item.assigned_to_id and item.assigned_to_id != user.id:
-        db.add(Notification(
-            user_id=item.assigned_to_id, type="action_assigned",
-            title="New action item assigned",
-            message=item.title, link=_action_item_link(assignee),
-        ))
+        notify(db, item.assigned_to_id, "action_assigned",
+               "New action item assigned", item.title, link=_action_item_link(assignee))
         db.commit()
     _log_audit(db, user, "CREATE_ACTION_ITEM", f"id={item.id}")
     return serialize_action_item(db, item)
@@ -365,87 +297,12 @@ def remind_missing(user: User = Depends(require_admin), db: Session = Depends(ge
         return {"notified": run_remind_missing_reports(db)}
 
 
-def run_remind_missing_reports(db: Session) -> int:
-    """Job-callable: notify CEOs whose BU hasn't submitted today.
-
-    m-08: deduped per CEO per day — unlike the 7-day throttles on
-    document-expiry and action-item reminders, this used to send one
-    notification per run, so a manual re-run (or a cron + manual overlap)
-    duplicated reminders. "Today" is the Yangon business day, so the
-    cutoff is Yangon midnight expressed in UTC (created_at is naive UTC).
-    """
-    today = today_local()
-    day_start_utc = datetime.combine(today, time.min).replace(tzinfo=APP_TZ).astimezone(timezone.utc).replace(tzinfo=None)
-    submitted_bu_ids = {
-        row[0] for row in db.query(DailyFinancial.business_unit_id).filter(DailyFinancial.report_date == today).all()
-    }
-    ceos = db.query(User).filter(User.role == "CEO", User.is_active == True).all()  # noqa: E712
-    sent = 0
-    for ceo in ceos:
-        if ceo.business_unit_id and ceo.business_unit_id not in submitted_bu_ids:
-            already = db.query(Notification).filter(
-                Notification.user_id == ceo.id,
-                Notification.type == "missing_report",
-                Notification.created_at >= day_start_utc,
-            ).first()
-            if already is not None:
-                continue
-            db.add(Notification(
-                user_id=ceo.id, type="missing_report",
-                title="Report not submitted today",
-                message="Please submit today's business performance report.",
-                link="/ceo",
-            ))
-            sent += 1
-    db.commit()
-    return sent
-
-
 @router.post("/notifications/remind-actions")
 def remind_actions(user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Notify assignees of action items due today or overdue."""
     with _reminder_lock_or_409():
         _log_audit(db, user, "REMIND_ACTIONS", "")
         return run_remind_action_items(db)
-
-
-def run_remind_action_items(db: Session) -> dict:
-    """Job-callable: notify assignees of open action items due today or
-    overdue. Throttled per item to one reminder per 7 days (same pattern
-    as run_check_document_expiry's expiry_notified_at). Unassigned items
-    and items assigned to inactive users are skipped — there is nobody
-    to notify."""
-    today = today_local()
-    items = db.query(ActionItem).filter(
-        ActionItem.status.in_(["pending", "in_progress"]),
-        ActionItem.due_date.is_not(None),
-        ActionItem.due_date <= today,
-        ActionItem.assigned_to_id.is_not(None),
-    ).all()
-    sent = 0
-    for item in items:
-        if item.reminder_sent_at and item.reminder_sent_at > utcnow() - timedelta(days=7):
-            continue
-        assignee = db.query(User).filter(User.id == item.assigned_to_id, User.is_active == True).first()  # noqa: E712
-        if assignee is None:
-            continue
-        bu = db.query(BusinessUnit).filter(BusinessUnit.id == item.business_unit_id).first()
-        bu_name = bu.name if bu else f"BU {item.business_unit_id}"
-        overdue_days = (today - item.due_date).days
-        if overdue_days > 0:
-            title = f"Action item overdue: {item.title}"
-            message = (f"'{item.title}' ({bu_name}) was due {item.due_date.isoformat()} "
-                       f"({overdue_days} day{'s' if overdue_days != 1 else ''} overdue).")
-        else:
-            title = f"Action item due today: {item.title}"
-            message = f"'{item.title}' ({bu_name}) is due today ({item.due_date.isoformat()})."
-        db.add(Notification(user_id=assignee.id, type="action_due",
-                            title=title, message=message,
-                            link=_action_item_link(assignee)))
-        item.reminder_sent_at = utcnow()
-        sent += 1
-    db.commit()
-    return {"checked": len(items), "notified": sent}
 
 
 @router.get("/uploads/view")
@@ -762,36 +619,6 @@ def check_document_expiry(days: int = 30, user: User = Depends(require_admin), d
         return run_check_document_expiry(db, days)
 
 
-def run_check_document_expiry(db: Session, days: int = 30) -> dict:
-    """Job-callable: notify CEOs + Chairman/HO about documents expiring soon."""
-    today = today_local()
-    horizon = today + timedelta(days=days)
-    docs = db.query(LicenseDocument).filter(
-        LicenseDocument.expiry_date >= today, LicenseDocument.expiry_date <= horizon).all()
-    admins = db.query(User).filter(User.role.in_(["Chairman", "HO"]), User.is_active == True).all()  # noqa: E712
-    sent = 0
-    for d in docs:
-        if d.expiry_notified_at and d.expiry_notified_at > utcnow() - timedelta(days=7):
-            continue
-        bu = db.query(BusinessUnit).filter(BusinessUnit.id == d.business_unit_id).first()
-        bu_name = bu.name if bu else f"BU {d.business_unit_id}"
-        days_left = (d.expiry_date - today).days
-        title = f"Document expiring: {d.title} ({bu_name})"
-        message = f"{d.document_type} expires in {days_left} days ({d.expiry_date.isoformat()})."
-        ceos = db.query(User).filter(User.role == "CEO", User.business_unit_id == d.business_unit_id, User.is_active == True).all()  # noqa: E712
-        seen = set()
-        for u in admins + ceos:
-            if u.id in seen:
-                continue
-            seen.add(u.id)
-            db.add(Notification(user_id=u.id, type="document_expiry",
-                                title=title, message=message, link="/admin/daily-ops"))
-            sent += 1
-        d.expiry_notified_at = utcnow()
-    db.commit()
-    return {"checked": len(docs), "notified": sent}
-
-
 # ---------------------------------------------------------------- monthly chairman PDF report
 
 @router.get("/monthly-report")
@@ -818,8 +645,6 @@ def monthly_report(month: Optional[str] = None, user: User = Depends(require_adm
 
     # M-04: the Chairman PDF export — audit who pulled it, for which month.
     _log_audit(db, user, "MONTHLY_REPORT_EXPORT", f"month={month_start.isoformat()}")
-
-    from src.models import MonthlyTarget
 
     fin = (db.query(DailyFinancial.business_unit_id,
                     func.coalesce(func.sum(DailyFinancial.revenue), 0),
@@ -851,7 +676,7 @@ def monthly_report(month: Optional[str] = None, user: User = Depends(require_adm
     expiring_docs = [d for d in db.query(LicenseDocument).all()
                      if d.expiry_date and 0 <= (d.expiry_date - today).days <= 30]
 
-    from fpdf import FPDF
+    from fpdf import FPDF, XPos, YPos
 
     def t(text):
         """Strip characters the core latin-1 PDF font can't render."""
@@ -863,11 +688,11 @@ def monthly_report(month: Optional[str] = None, user: User = Depends(require_adm
     W = pdf.w - 20
 
     pdf.set_font("helvetica", "B", 18)
-    pdf.cell(W, 10, "Business Operations - Monthly Report", ln=1)
+    pdf.cell(W, 10, "Business Operations - Monthly Report", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_font("helvetica", "", 11)
     pdf.set_text_color(100, 100, 100)
     label = month_start.strftime("%B %Y")
-    pdf.cell(W, 6, f"{label}  |  Generated {today.isoformat()}", ln=1)
+    pdf.cell(W, 6, f"{label}  |  Generated {today.isoformat()}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_text_color(0, 0, 0)
     pdf.ln(4)
 
@@ -875,7 +700,7 @@ def monthly_report(month: Optional[str] = None, user: User = Depends(require_adm
         return f"Ks {v:,.0f}"
 
     pdf.set_font("helvetica", "B", 13)
-    pdf.cell(W, 8, "Portfolio Summary", ln=1)
+    pdf.cell(W, 8, "Portfolio Summary", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_font("helvetica", "", 11)
     summary = [
         ("Total revenue", money(totals["revenue"])),
@@ -886,11 +711,11 @@ def monthly_report(month: Optional[str] = None, user: User = Depends(require_adm
     ]
     for k, v in summary:
         pdf.cell(60, 6.5, k)
-        pdf.cell(0, 6.5, v, ln=1)
+        pdf.cell(0, 6.5, v, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.ln(3)
 
     pdf.set_font("helvetica", "B", 13)
-    pdf.cell(W, 8, "Business Unit Performance", ln=1)
+    pdf.cell(W, 8, "Business Unit Performance", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     headers = [("BU", 52), ("Revenue", 30), ("Cash Flow", 30), ("Target", 30), ("Ach. %", 18), ("Reports", 20)]
     pdf.set_font("helvetica", "B", 10)
     for h, w in headers:
@@ -908,7 +733,7 @@ def monthly_report(month: Optional[str] = None, user: User = Depends(require_adm
     pdf.ln(3)
 
     pdf.set_font("helvetica", "B", 13)
-    pdf.cell(W, 8, "Alerts", ln=1)
+    pdf.cell(W, 8, "Alerts", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_font("helvetica", "", 11)
     alerts = []
     no_report = [r["name"] for r in rows if r["reports"] == 0]
@@ -941,7 +766,7 @@ def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
                  from_date: Optional[date] = None, to_date: Optional[date] = None,
                  limit: int = OPS_EXPORT_MAX_ROWS,
                  user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Download one Operations Center tab as an .xlsx workbook.
+    """Download one Daily Ops tab as an .xlsx workbook.
 
     Row-capped at `limit` (max 5000); the actions tab defaults
     to the last 90 days unless from_date/to_date are given. Staff and

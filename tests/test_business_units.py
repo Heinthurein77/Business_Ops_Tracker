@@ -9,10 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
-from src.models import Base, BusinessUnit
+
+
+from src.models import BusinessUnit
 from src.routers.admin import (
     BUCreateIn, BUUpdateIn, create_business_unit, list_business_units,
     update_business_unit,
@@ -22,15 +22,10 @@ CHAIRMAN = SimpleNamespace(id=None, role="Chairman", business_unit_id=None)
 CEO = SimpleNamespace(id=None, role="CEO", business_unit_id=1)
 
 
-@pytest.fixture()
-def db():
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
-    session.add(BusinessUnit(code="BU1", name="Existing Shop"))
-    session.commit()
-    yield session
-    session.close()
+@pytest.fixture(autouse=True)
+def _seed_db(db):
+    db.add(BusinessUnit(code="BU1", name="Existing Shop"))
+    db.commit()
 
 
 def test_create_bu_validation(db):

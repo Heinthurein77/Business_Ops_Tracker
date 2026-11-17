@@ -162,8 +162,8 @@ the incident runbook §2 says to pause the cron job first.
 ## A-m4 — Capacity: know your first bottleneck
 
 **The first bottleneck is the database connection pool, not CPU.**
-Pool is `pool_size=4, max_overflow=4, pool_timeout=10s`
-(`src/database.py`) — 8 concurrent connections for the whole app — and
+Pool is `pool_size=5, max_overflow=5, pool_timeout=10s`
+(`src/database.py`) — 10 concurrent connections for the whole app — and
 PDF/Excel exports run synchronously in-request, holding a pooled
 connection while they generate. Under concurrent exports/dashboard loads
 the pool exhausts first: requests wait up to 10 s for a connection, then

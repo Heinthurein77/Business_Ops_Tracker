@@ -23,11 +23,11 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+
+
 
 from src.auth import InsufficientRoleException
-from src.models import ActivityLog, Base, BusinessUnit, DailyFinancial, HealthStatus, Notification, User
+from src.models import ActivityLog, BusinessUnit, DailyFinancial, HealthStatus, Notification, User
 from src.routers.admin import activity_dashboard, ceo_monthly_summary, require_admin, resolve_help_request
 from src.routers.ceo import ceo_dashboard, submit_report
 from src.schemas import ResolveHelpRequest
@@ -45,12 +45,9 @@ def _rel(days_ago: int) -> date:
 RESPONSE = "Approved — rent the truck, invoice to HO by Friday."
 
 
-@pytest.fixture()
-def db():
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
-    session.add_all([
+@pytest.fixture(autouse=True)
+def _seed_db(db):
+    db.add_all([
         BusinessUnit(id=1, code="BU1", name="Shop One"),
         BusinessUnit(id=2, code="BU2", name="Shop Two"),
     ])
@@ -65,26 +62,23 @@ def db():
                business_unit_id=1, is_active=True)
     ceo2 = User(id=702, username="ceo_two", hashed_password="x", role="CEO", full_name="CEO Two",
                 business_unit_id=2, is_active=True)
-    session.add_all([chairman, ho, ceo, ceo2])
-    session.commit()
+    db.add_all([chairman, ho, ceo, ceo2])
+    db.commit()
     # An open help request (BU1), a report with no ask, and an already
     # resolved request — the three states the resolution loop switches on.
-    session.add(ActivityLog(business_unit_id=1, report_date=_rel(4),
+    db.add(ActivityLog(business_unit_id=1, report_date=_rel(4),
                             meetings_attended="Route planning",
                             problems_today="Truck broke down", help_needed=HELP,
                             submitted_by=ceo.id))
-    session.add(ActivityLog(business_unit_id=1, report_date=_rel(3),
+    db.add(ActivityLog(business_unit_id=1, report_date=_rel(3),
                             meetings_attended="Quiet day", submitted_by=ceo.id))
-    session.add(ActivityLog(business_unit_id=1, report_date=_rel(2),
+    db.add(ActivityLog(business_unit_id=1, report_date=_rel(2),
                             meetings_attended="Supplier review", help_needed="Old ask",
                             help_resolved_at=datetime(_rel(2).year, _rel(2).month, _rel(2).day, 10, 30),
                             help_resolved_by=chairman.id, help_response="Sorted by phone.",
                             submitted_by=ceo.id))
-    session.commit()
-    session.test_users = {"chairman": chairman, "ho": ho, "ceo": ceo, "ceo2": ceo2}
-    yield session
-    session.close()
-    engine.dispose()
+    db.commit()
+    db.test_users = {"chairman": chairman, "ho": ho, "ceo": ceo, "ceo2": ceo2}
 
 
 _SUBMIT_DEFAULTS = dict(

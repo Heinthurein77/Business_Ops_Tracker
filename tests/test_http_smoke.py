@@ -46,7 +46,13 @@ def _chairman_totp_code():
 def http_db(tmp_path):
     """File-backed SQLite DB: FastAPI runs sync endpoints in a worker
     thread, so the in-memory engine (one DB per connection/thread) cannot
-    be shared between the fixture thread and the endpoint thread."""
+    be shared between the fixture thread and the endpoint thread.
+
+    NOTE (merge): this intentionally shadows the shared ``http_db`` in
+    root conftest.py — the smoke tests log in as the Chairman, and since
+    M-01 a Chairman without enrolled TOTP gets 403, so this fixture seeds
+    a TOTP-enrolled chairman (the shared fixture seeds a plain one).
+    """
     db_path = tmp_path / "http.db"
     engine = create_engine(
         f"sqlite:///{db_path}", connect_args={"check_same_thread": False})

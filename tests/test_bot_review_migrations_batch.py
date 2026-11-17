@@ -35,10 +35,11 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSIONS = ROOT / "alembic" / "versions"
-# Current head after the TOTP + password-history migration (2026-11-17):
-# 87cba6ac0f1f, on top of the action-item reminder column b7c2e9a4d1f5.
-CURRENT_HEAD = "87cba6ac0f1f"
-CURRENT_HEAD_PARENT = "b7c2e9a4d1f5"
+# Current head after the hot-query composite indexes (2026-11-17):
+# 6d20531e9b89, re-chained at merge time on top of the TOTP +
+# password-history migration 87cba6ac0f1f.
+CURRENT_HEAD = "6d20531e9b89"
+CURRENT_HEAD_PARENT = "87cba6ac0f1f"
 # The one-way ERP-removal drop migration: a downgrade to base stops here.
 CURRENT_HEAD_DOWN = "a720b6b7c616"
 

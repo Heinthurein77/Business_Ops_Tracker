@@ -8,11 +8,11 @@ rows (> 36 h = dead man, or a job that never wrote a row).
 
 Run once daily from cron on the server, e.g.:
 
-    # 7:00 AM every day (server time): scan the last 24 h of app logs.
+    # 9:00 AM every day (server time): scan the last 24 h of app logs.
     # The app logs to stdout, so the cron pipes `docker compose logs`
     # into the job's stdin; the job itself runs inside the container so
     # it can reach the database and notify the Chairman.
-    0 7 * * * cd ~/business-ops-tracker && docker compose -f docker-compose.prod.yml logs --since 24h app 2>/dev/null | docker compose -f docker-compose.prod.yml exec -T app python -m src.jobs.log_scan >> ~/bot-logscan.log 2>&1
+    0 9 * * * cd ~/business-ops-tracker && docker compose -f docker-compose.prod.yml logs --since 24h app 2>/dev/null | docker compose -f docker-compose.prod.yml exec -T app python -m src.jobs.log_scan >> ~/bot-logscan.log 2>&1
 
 Alerting: when the database is reachable, the Chairman is notified with
 an in-app Notification row (the same mechanism scheduled_alerts uses —
@@ -34,8 +34,8 @@ from datetime import datetime, timedelta
 from typing import Iterable
 
 from src.database import SessionLocal
-from src.models import JobHeartbeat, Notification, User
-from src.utils import utcnow
+from src.models import JobHeartbeat, User
+from src.utils import notify, record_job_heartbeat as _record_heartbeat, utcnow
 
 # A job whose heartbeat is older than this is presumed dead.
 STALE_AFTER_HOURS = 36
@@ -187,22 +187,12 @@ def check_heartbeats(db, now=None) -> list[str]:
             + stale_jobs(pairs, now=now, expected=WEEKLY_JOBS, never_ran_is_stale=False))
 
 
-def _record_heartbeat(db, job_name: str, status: str) -> None:
-    """Best effort: a heartbeat write must not fail the scan itself."""
-    try:
-        db.merge(JobHeartbeat(job_name=job_name, last_run_at=utcnow(), last_status=status))
-        db.commit()
-    except Exception as exc:  # noqa: BLE001 - heartbeat must not fail the job
-        db.rollback()
-        print(f"heartbeat update failed for {job_name}: {exc}", file=sys.stderr)
-
-
 def _notify_chairman(db, title: str, message: str) -> bool:
     """One in-app Notification per active Chairman. Returns True when at
     least one Chairman exists to notify."""
     chairmen = db.query(User).filter(User.role == "Chairman", User.is_active == True).all()  # noqa: E712
     for chairman in chairmen:
-        db.add(Notification(user_id=chairman.id, type="alert", title=title, message=message, link="/admin"))
+        notify(db, chairman.id, "alert", title, message, link="/admin")
     if chairmen:
         db.commit()
     return bool(chairmen)

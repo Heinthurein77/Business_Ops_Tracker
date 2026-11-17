@@ -1,0 +1,6 @@
+# Dev-only dependencies (lint gate, not runtime). Installed by
+# .github/workflows/tests.yml before the suite runs.
+# pyflakes (m-04): catches undefined names (the C-2 Decimal crash shipped
+# with a green suite because no linter ran) and unused imports. Pinned to
+# 3.4.0, the version the local suite is clean against.
+pyflakes==3.4.0
