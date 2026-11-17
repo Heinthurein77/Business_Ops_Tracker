@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -81,82 +81,92 @@ require_admin = require_roles("Chairman", "HO")
 require_chairman = require_roles("Chairman")
 
 
-def compute_period_totals(db: Session, target_date):
-    row = (
-        db.query(
-            func.coalesce(func.sum(DailyFinancial.revenue), 0),
-            func.coalesce(func.sum(DailyFinancial.expenses), 0),
-        )
-        .filter(DailyFinancial.report_date == target_date)
-        .first()
-    )
-    revenue = float(row[0] or 0)
-    expenses = float(row[1] or 0)
-    return revenue, expenses, revenue - expenses
-
-
-def compute_period_cash(db: Session, target_date) -> float:
-    total = (
-        db.query(func.coalesce(func.sum(DailyFinancial.cash_in_hand), 0))
-        .filter(DailyFinancial.report_date == target_date)
-        .scalar()
-    )
-    return float(total or 0)
-
-
-def compute_period_column_sum(db: Session, column, target_date) -> float:
-    total = db.query(func.coalesce(func.sum(column), 0)).filter(DailyFinancial.report_date == target_date).scalar()
-    return float(total or 0)
-
-
 def pct_change(current: float, previous: float) -> Optional[float]:
     if previous == 0:
         return None
     return round(((current - previous) / abs(previous)) * 100, 1)
 
 
-def gather_admin_overview(db: Session) -> dict:
+def _latest_by_bu(db: Session, model) -> dict:
+    """M-07: the latest row per BU for one table in ONE query, via a
+    portable window function (ROW_NUMBER() OVER (PARTITION BY
+    business_unit_id ORDER BY report_date DESC)) — no Postgres-only
+    DISTINCT ON, so the SQLite suite runs the same SQL. The per-BU loop
+    this replaces cost 4 queries x 23 BUs = 92 round-trips per overview."""
+    ranked = (
+        db.query(
+            model.id.label("row_id"),
+            func.row_number()
+            .over(partition_by=model.business_unit_id, order_by=model.report_date.desc())
+            .label("rn"),
+        )
+        .subquery()
+    )
+    latest_ids = select(ranked.c.row_id).where(ranked.c.rn == 1)
+    rows = db.query(model).filter(model.id.in_(latest_ids)).all()
+    return {row.business_unit_id: row for row in rows}
+
+
+def _period_sums(db: Session, target_date) -> dict:
+    """M-07: one day's revenue/expenses/cash/cash-flow/receivable/payable
+    sums in ONE query (was 6 separate SUM queries per day)."""
+    row = (
+        db.query(
+            func.coalesce(func.sum(DailyFinancial.revenue), 0),
+            func.coalesce(func.sum(DailyFinancial.expenses), 0),
+            func.coalesce(func.sum(DailyFinancial.cash_in_hand), 0),
+            func.coalesce(func.sum(DailyFinancial.cash_flow), 0),
+            func.coalesce(func.sum(DailyFinancial.receivable), 0),
+            func.coalesce(func.sum(DailyFinancial.payable), 0),
+        )
+        .filter(DailyFinancial.report_date == target_date)
+        .first()
+    )
+    keys = ("revenue", "expenses", "cash_in_hand", "cash_flow", "receivable", "payable")
+    return {key: float(value or 0) for key, value in zip(keys, row)}
+
+
+_ALL_OVERVIEW_PARTS = frozenset(
+    {"kpi", "wellbeing", "alerts", "compliance", "trend", "comparison", "operations", "missing"}
+)
+
+
+def gather_admin_overview(db: Session, parts=None) -> dict:
     """Single shared computation of all cross-BU data, reused by every
     admin-facing endpoint (landing dashboard, comparison, operations grid) so
-    each route stays a thin view over one consistent dataset."""
+    each route stays a thin view over one consistent dataset.
+
+    M-07: `parts` limits the work to the sections the caller actually
+    returns — /comparison needs only trend + comparison_data, /operations
+    only the operations grid, so neither pays for the KPI/wellbeing/alert
+    payloads any more. None (the /overview default) computes everything.
+    The returned dict carries "today"/"today_display" plus only the keys
+    of the requested parts."""
     today = today_local()
     yesterday = today - timedelta(days=1)
+    month_start = date(today.year, today.month, 1)
+    want = _ALL_OVERVIEW_PARTS if parts is None else frozenset(parts)
 
     business_units, _, ceo_by_bu = bu_lookup_maps(db)
     ceo_profiles_by_user = {p.user_id: p for p in db.query(CeoProfile).all()}
 
+    # M-07: month-to-date totals, not an unbounded SUM over all history.
     totals_row = db.query(
         func.coalesce(func.sum(DailyFinancial.revenue), 0),
         func.coalesce(func.sum(DailyFinancial.expenses), 0),
+    ).filter(
+        DailyFinancial.report_date >= month_start, DailyFinancial.report_date <= today
     ).first()
     total_revenue = float(totals_row[0] or 0)
     total_expenses = float(totals_row[1] or 0)
     group_net_profit = total_revenue - total_expenses
 
-    latest_financial_by_bu = {}
-    for bu in business_units:
-        latest = (
-            db.query(DailyFinancial)
-            .filter(DailyFinancial.business_unit_id == bu.id)
-            .order_by(DailyFinancial.report_date.desc())
-            .first()
-        )
-        if latest:
-            latest_financial_by_bu[bu.id] = latest
+    latest_financial_by_bu = _latest_by_bu(db, DailyFinancial)
 
     # Activity logs are submitted every day (weekday and weekend alike), so they are
     # the reliable source for "when was this BU last reported" — financials alone
     # go quiet on weekends even though the CEO still submitted their daily report.
-    latest_activity_by_bu = {}
-    for bu in business_units:
-        latest = (
-            db.query(ActivityLog)
-            .filter(ActivityLog.business_unit_id == bu.id)
-            .order_by(ActivityLog.report_date.desc())
-            .first()
-        )
-        if latest:
-            latest_activity_by_bu[bu.id] = latest
+    latest_activity_by_bu = _latest_by_bu(db, ActivityLog)
 
     today_financial_by_bu = {
         row.business_unit_id: row
@@ -167,211 +177,197 @@ def gather_admin_overview(db: Session) -> dict:
         for row in db.query(ActivityLog).filter(ActivityLog.report_date == today).all()
     }
 
-    latest_social_by_bu = {}
-    for bu in business_units:
-        latest = (
-            db.query(SocialLog)
-            .filter(SocialLog.business_unit_id == bu.id)
-            .order_by(SocialLog.report_date.desc())
-            .first()
+    latest_social_by_bu = _latest_by_bu(db, SocialLog)
+    latest_health_by_bu = _latest_by_bu(db, HealthStatus)
+
+    if "kpi" in want:
+        total_cash_in_hand = sum(float(f.cash_in_hand) for f in latest_financial_by_bu.values())
+        total_cash_flow = sum(float(f.cash_flow) for f in latest_financial_by_bu.values() if f.cash_flow is not None)
+        total_receivable = sum(float(f.receivable) for f in latest_financial_by_bu.values() if f.receivable is not None)
+        total_payable = sum(float(f.payable) for f in latest_financial_by_bu.values() if f.payable is not None)
+
+        # One SUM query per day (was 6 per day).
+        today_sums = _period_sums(db, today)
+        yesterday_sums = _period_sums(db, yesterday)
+        today_net = today_sums["revenue"] - today_sums["expenses"]
+        yesterday_net = yesterday_sums["revenue"] - yesterday_sums["expenses"]
+
+        kpi = {
+            "total_revenue": total_revenue,
+            "total_expenses": total_expenses,
+            "group_net_profit": group_net_profit,
+            "total_cash_in_hand": total_cash_in_hand,
+            "total_cash_flow": total_cash_flow,
+            "total_receivable": total_receivable,
+            "total_payable": total_payable,
+            "revenue_trend": pct_change(today_sums["revenue"], yesterday_sums["revenue"]),
+            "expenses_trend": pct_change(today_sums["expenses"], yesterday_sums["expenses"]),
+            "net_profit_trend": pct_change(today_net, yesterday_net),
+            "cash_trend": pct_change(today_sums["cash_in_hand"], yesterday_sums["cash_in_hand"]),
+            "cash_flow_trend": pct_change(today_sums["cash_flow"], yesterday_sums["cash_flow"]),
+            "receivable_trend": pct_change(today_sums["receivable"], yesterday_sums["receivable"]),
+            "payable_trend": pct_change(today_sums["payable"], yesterday_sums["payable"]),
+        }
+
+    if "wellbeing" in want:
+        # --- CEO well-being matrix (Health input) ---
+        wellbeing = []
+        for bu in business_units:
+            latest_health = latest_health_by_bu.get(bu.id)
+            ceo_user = ceo_by_bu.get(bu.id)
+            risk = compute_health_risk(latest_health)
+
+            risk_notes = health_risk_notes(latest_health)
+            wellbeing.append(
+                {
+                    "bu_id": bu.id,
+                    "bu_code": bu.code,
+                    "bu_name": bu.name,
+                    "ceo_username": ceo_user.username if ceo_user else "-",
+                    "daily_steps": latest_health.daily_steps if latest_health else None,
+                    "heart_rate": latest_health.heart_rate if latest_health else None,
+                    "bp_systolic": latest_health.bp_systolic if latest_health else None,
+                    "bp_diastolic": latest_health.bp_diastolic if latest_health else None,
+                    "risk": risk,
+                    "risk_reason": ", ".join(risk_notes) if risk_notes else "Elevated risk factors",
+                    "step_status": step_status(latest_health.daily_steps) if latest_health else None,
+                    "report_date": latest_health.report_date.isoformat() if latest_health else None,
+                    "reported_display": format_local_datetime(latest_health.updated_at) if latest_health else None,
+                }
+            )
+
+    critical_ceos = [w for w in wellbeing if w["risk"] == "red"] if "wellbeing" in want else []
+
+    if "alerts" in want:
+        # --- Financial alerts: red = missing mandatory submission (every day, no
+        # weekend exception), or the latest submitted figures are RED per
+        # evaluate_financial_health() (cash flow negative) — the same
+        # revenue/cash_flow/receivable/payable-driven check the Financial
+        # quadrant circle uses (via resolve_financial_status below), so this
+        # alert and that circle can never disagree. Used to check
+        # latest_fin.net_profit instead, but submit_report() has zeroed that
+        # legacy column on every write since the form dropped it, which made
+        # this branch permanently unreachable. ---
+        financial_alerts = []
+        for bu in business_units:
+            fin_today = today_financial_by_bu.get(bu.id)
+            latest_fin = latest_financial_by_bu.get(bu.id)
+            reason = None
+            alert_type = None
+            if fin_today is None:
+                reason = "Missing mandatory financial submission"
+                alert_type = "missing"
+            elif latest_fin is not None and latest_fin.cash_flow is not None:
+                status_code, _, warning_flags = evaluate_financial_health(
+                    latest_fin.revenue, latest_fin.cash_flow, latest_fin.receivable, latest_fin.payable
+                )
+                if status_code == "RED":
+                    reason = warning_flags[0] if warning_flags else "Latest submission shows critical financial risk"
+                    alert_type = "loss"
+            if reason:
+                financial_alerts.append(
+                    {
+                        "bu_id": bu.id,
+                        "bu_code": bu.code,
+                        "bu_name": bu.name,
+                        "ceo_username": ceo_by_bu[bu.id].username if bu.id in ceo_by_bu else "-",
+                        "reason": reason,
+                        "alert_type": alert_type,
+                        "cash_flow": float(latest_fin.cash_flow) if latest_fin and latest_fin.cash_flow is not None else None,
+                    }
+                )
+
+        # --- Activity alerts: red = no activity/health report at all today ---
+        activity_alerts = []
+        for bu in business_units:
+            if bu.id not in today_activity_by_bu:
+                activity_alerts.append(
+                    {
+                        "bu_id": bu.id,
+                        "bu_code": bu.code,
+                        "bu_name": bu.name,
+                        "ceo_username": ceo_by_bu[bu.id].username if bu.id in ceo_by_bu else "-",
+                        "reason": "No report submitted today",
+                    }
+                )
+
+    if "compliance" in want:
+        submission_compliance = {
+            "submitted": len(today_activity_by_bu),
+            "total": len(business_units),
+            "pct": round((len(today_activity_by_bu) / len(business_units)) * 100, 1) if business_units else 0,
+        }
+        yesterday_activity_count = db.query(ActivityLog).filter(ActivityLog.report_date == yesterday).count()
+        compliance_yesterday_pct = (
+            round((yesterday_activity_count / len(business_units)) * 100, 1) if business_units else 0
         )
-        if latest:
-            latest_social_by_bu[bu.id] = latest
+        submission_compliance["trend_pts"] = round(submission_compliance["pct"] - compliance_yesterday_pct, 1)
 
-    total_cash_in_hand = sum(float(f.cash_in_hand) for f in latest_financial_by_bu.values())
-    total_cash_flow = sum(float(f.cash_flow) for f in latest_financial_by_bu.values() if f.cash_flow is not None)
-    total_receivable = sum(float(f.receivable) for f in latest_financial_by_bu.values() if f.receivable is not None)
-    total_payable = sum(float(f.payable) for f in latest_financial_by_bu.values() if f.payable is not None)
-
-    today_revenue, today_expenses, today_net = compute_period_totals(db, today)
-    yesterday_revenue, yesterday_expenses, yesterday_net = compute_period_totals(db, yesterday)
-    today_cash = compute_period_cash(db, today)
-    yesterday_cash = compute_period_cash(db, yesterday)
-    today_cash_flow = compute_period_column_sum(db, DailyFinancial.cash_flow, today)
-    yesterday_cash_flow = compute_period_column_sum(db, DailyFinancial.cash_flow, yesterday)
-    today_receivable = compute_period_column_sum(db, DailyFinancial.receivable, today)
-    yesterday_receivable = compute_period_column_sum(db, DailyFinancial.receivable, yesterday)
-    today_payable = compute_period_column_sum(db, DailyFinancial.payable, today)
-    yesterday_payable = compute_period_column_sum(db, DailyFinancial.payable, yesterday)
-
-    kpi = {
-        "total_revenue": total_revenue,
-        "total_expenses": total_expenses,
-        "group_net_profit": group_net_profit,
-        "total_cash_in_hand": total_cash_in_hand,
-        "total_cash_flow": total_cash_flow,
-        "total_receivable": total_receivable,
-        "total_payable": total_payable,
-        "revenue_trend": pct_change(today_revenue, yesterday_revenue),
-        "expenses_trend": pct_change(today_expenses, yesterday_expenses),
-        "net_profit_trend": pct_change(today_net, yesterday_net),
-        "cash_trend": pct_change(today_cash, yesterday_cash),
-        "cash_flow_trend": pct_change(today_cash_flow, yesterday_cash_flow),
-        "receivable_trend": pct_change(today_receivable, yesterday_receivable),
-        "payable_trend": pct_change(today_payable, yesterday_payable),
-    }
-
-    # --- CEO well-being matrix (Health input) ---
-    wellbeing = []
-    latest_health_by_bu = {}
-    for bu in business_units:
-        latest_health = (
-            db.query(HealthStatus)
-            .filter(HealthStatus.business_unit_id == bu.id)
-            .order_by(HealthStatus.report_date.desc())
-            .first()
+    if "kpi" in want:
+        # --- Average net margin (net profit as % of revenue), today vs yesterday ---
+        margin_today = (today_net / today_sums["revenue"] * 100) if today_sums["revenue"] else None
+        margin_yesterday = (yesterday_net / yesterday_sums["revenue"] * 100) if yesterday_sums["revenue"] else None
+        kpi["avg_net_margin"] = round(margin_today, 1) if margin_today is not None else 0
+        kpi["margin_trend_pts"] = (
+            round(margin_today - margin_yesterday, 1)
+            if margin_today is not None and margin_yesterday is not None
+            else None
         )
-        if latest_health:
-            latest_health_by_bu[bu.id] = latest_health
-        ceo_user = ceo_by_bu.get(bu.id)
-        risk = compute_health_risk(latest_health)
 
-        risk_notes = health_risk_notes(latest_health)
-        wellbeing.append(
+    if "trend" in want:
+        # --- Chart 1: last 14 days of cash flow, broken down per business unit so
+        # the Comparison page can show one BU's own trend at a time rather than a
+        # single group-wide line. ---
+        chart_days = [today - timedelta(days=offset) for offset in range(13, -1, -1)]
+        trend_labels = [d.strftime("%d %b") for d in chart_days]
+
+        trend_rows = (
+            db.query(
+                DailyFinancial.business_unit_id,
+                DailyFinancial.report_date,
+                DailyFinancial.revenue,
+                DailyFinancial.cash_flow,
+                DailyFinancial.receivable,
+                DailyFinancial.payable,
+            )
+            .filter(DailyFinancial.report_date >= chart_days[0], DailyFinancial.report_date <= chart_days[-1])
+            .all()
+        )
+        vals_by_bu_date: dict = defaultdict(dict)
+        for bu_id, report_date, revenue, cash_flow, receivable, payable in trend_rows:
+            vals_by_bu_date[bu_id][report_date] = {
+                "revenue": float(revenue) if revenue is not None else 0.0,
+                "cash_flow": float(cash_flow) if cash_flow is not None else 0.0,
+                "receivable": float(receivable) if receivable is not None else 0.0,
+                "payable": float(payable) if payable is not None else 0.0,
+            }
+
+        def _series(bu_id, key):
+            return [round(vals_by_bu_date.get(bu_id, {}).get(d, {}).get(key, 0.0), 2) for d in chart_days]
+
+        trend_by_bu = [
             {
                 "bu_id": bu.id,
                 "bu_code": bu.code,
                 "bu_name": bu.name,
-                "ceo_username": ceo_user.username if ceo_user else "-",
-                "daily_steps": latest_health.daily_steps if latest_health else None,
-                "heart_rate": latest_health.heart_rate if latest_health else None,
-                "bp_systolic": latest_health.bp_systolic if latest_health else None,
-                "bp_diastolic": latest_health.bp_diastolic if latest_health else None,
-                "risk": risk,
-                "risk_reason": ", ".join(risk_notes) if risk_notes else "Elevated risk factors",
-                "step_status": step_status(latest_health.daily_steps) if latest_health else None,
-                "report_date": latest_health.report_date.isoformat() if latest_health else None,
-                "reported_display": format_local_datetime(latest_health.updated_at) if latest_health else None,
+                "revenue": _series(bu.id, "revenue"),
+                "cash_flow": _series(bu.id, "cash_flow"),
+                "receivable": _series(bu.id, "receivable"),
+                "payable": _series(bu.id, "payable"),
             }
-        )
+            for bu in business_units
+        ]
+        # Kept for backwards compatibility; new clients use trend_by_bu.
+        trend_cash_flow_by_bu = [
+            {"bu_id": b["bu_id"], "bu_code": b["bu_code"], "bu_name": b["bu_name"], "cash_flow": b["cash_flow"]}
+            for b in trend_by_bu
+        ]
 
-    critical_ceos = [w for w in wellbeing if w["risk"] == "red"]
-
-    # --- Financial alerts: red = missing mandatory submission (every day, no
-    # weekend exception), or the latest submitted figures are RED per
-    # evaluate_financial_health() (cash flow negative) — the same
-    # revenue/cash_flow/receivable/payable-driven check the Financial
-    # quadrant circle uses (via resolve_financial_status below), so this
-    # alert and that circle can never disagree. Used to check
-    # latest_fin.net_profit instead, but submit_report() has zeroed that
-    # legacy column on every write since the form dropped it, which made
-    # this branch permanently unreachable. ---
-    financial_alerts = []
-    for bu in business_units:
-        fin_today = today_financial_by_bu.get(bu.id)
-        latest_fin = latest_financial_by_bu.get(bu.id)
-        reason = None
-        alert_type = None
-        if fin_today is None:
-            reason = "Missing mandatory financial submission"
-            alert_type = "missing"
-        elif latest_fin is not None and latest_fin.cash_flow is not None:
-            status_code, _, warning_flags = evaluate_financial_health(
-                latest_fin.revenue, latest_fin.cash_flow, latest_fin.receivable, latest_fin.payable
-            )
-            if status_code == "RED":
-                reason = warning_flags[0] if warning_flags else "Latest submission shows critical financial risk"
-                alert_type = "loss"
-        if reason:
-            financial_alerts.append(
-                {
-                    "bu_id": bu.id,
-                    "bu_code": bu.code,
-                    "bu_name": bu.name,
-                    "ceo_username": ceo_by_bu[bu.id].username if bu.id in ceo_by_bu else "-",
-                    "reason": reason,
-                    "alert_type": alert_type,
-                    "cash_flow": float(latest_fin.cash_flow) if latest_fin and latest_fin.cash_flow is not None else None,
-                }
-            )
-
-    # --- Activity alerts: red = no activity/health report at all today ---
-    activity_alerts = []
-    for bu in business_units:
-        if bu.id not in today_activity_by_bu:
-            activity_alerts.append(
-                {
-                    "bu_id": bu.id,
-                    "bu_code": bu.code,
-                    "bu_name": bu.name,
-                    "ceo_username": ceo_by_bu[bu.id].username if bu.id in ceo_by_bu else "-",
-                    "reason": "No report submitted today",
-                }
-            )
-
-    submission_compliance = {
-        "submitted": len(today_activity_by_bu),
-        "total": len(business_units),
-        "pct": round((len(today_activity_by_bu) / len(business_units)) * 100, 1) if business_units else 0,
-    }
-    yesterday_activity_count = db.query(ActivityLog).filter(ActivityLog.report_date == yesterday).count()
-    compliance_yesterday_pct = (
-        round((yesterday_activity_count / len(business_units)) * 100, 1) if business_units else 0
-    )
-    submission_compliance["trend_pts"] = round(submission_compliance["pct"] - compliance_yesterday_pct, 1)
-
-    # --- Average net margin (net profit as % of revenue), today vs yesterday ---
-    margin_today = (today_net / today_revenue * 100) if today_revenue else None
-    margin_yesterday = (yesterday_net / yesterday_revenue * 100) if yesterday_revenue else None
-    kpi["avg_net_margin"] = round(margin_today, 1) if margin_today is not None else 0
-    kpi["margin_trend_pts"] = (
-        round(margin_today - margin_yesterday, 1)
-        if margin_today is not None and margin_yesterday is not None
-        else None
-    )
-
-    # --- Chart 1: last 14 days of cash flow, broken down per business unit so
-    # the Comparison page can show one BU's own trend at a time rather than a
-    # single group-wide line. ---
-    chart_days = [today - timedelta(days=offset) for offset in range(13, -1, -1)]
-    trend_labels = [d.strftime("%d %b") for d in chart_days]
-
-    trend_rows = (
-        db.query(
-            DailyFinancial.business_unit_id,
-            DailyFinancial.report_date,
-            DailyFinancial.revenue,
-            DailyFinancial.cash_flow,
-            DailyFinancial.receivable,
-            DailyFinancial.payable,
-        )
-        .filter(DailyFinancial.report_date >= chart_days[0], DailyFinancial.report_date <= chart_days[-1])
-        .all()
-    )
-    vals_by_bu_date: dict = defaultdict(dict)
-    for bu_id, report_date, revenue, cash_flow, receivable, payable in trend_rows:
-        vals_by_bu_date[bu_id][report_date] = {
-            "revenue": float(revenue) if revenue is not None else 0.0,
-            "cash_flow": float(cash_flow) if cash_flow is not None else 0.0,
-            "receivable": float(receivable) if receivable is not None else 0.0,
-            "payable": float(payable) if payable is not None else 0.0,
-        }
-
-    def _series(bu_id, key):
-        return [round(vals_by_bu_date.get(bu_id, {}).get(d, {}).get(key, 0.0), 2) for d in chart_days]
-
-    trend_by_bu = [
-        {
-            "bu_id": bu.id,
-            "bu_code": bu.code,
-            "bu_name": bu.name,
-            "revenue": _series(bu.id, "revenue"),
-            "cash_flow": _series(bu.id, "cash_flow"),
-            "receivable": _series(bu.id, "receivable"),
-            "payable": _series(bu.id, "payable"),
-        }
-        for bu in business_units
-    ]
-    # Kept for backwards compatibility; new clients use trend_by_bu.
-    trend_cash_flow_by_bu = [
-        {"bu_id": b["bu_id"], "bu_code": b["bu_code"], "bu_name": b["bu_name"], "cash_flow": b["cash_flow"]}
-        for b in trend_by_bu
-    ]
-
-    # --- Chart 2: grouped bar chart, latest receivable vs payable per BU ---
-    bar_categories = [bu.code for bu in business_units]
-    bar_receivable = [round(float(latest_financial_by_bu[bu.id].receivable), 2) if bu.id in latest_financial_by_bu and latest_financial_by_bu[bu.id].receivable is not None else 0 for bu in business_units]
-    bar_payable = [round(float(latest_financial_by_bu[bu.id].payable), 2) if bu.id in latest_financial_by_bu and latest_financial_by_bu[bu.id].payable is not None else 0 for bu in business_units]
+    if "trend" in want:
+        # --- Chart 2: grouped bar chart, latest receivable vs payable per BU ---
+        bar_categories = [bu.code for bu in business_units]
+        bar_receivable = [round(float(latest_financial_by_bu[bu.id].receivable), 2) if bu.id in latest_financial_by_bu and latest_financial_by_bu[bu.id].receivable is not None else 0 for bu in business_units]
+        bar_payable = [round(float(latest_financial_by_bu[bu.id].payable), 2) if bu.id in latest_financial_by_bu and latest_financial_by_bu[bu.id].payable is not None else 0 for bu in business_units]
 
     # --- Actual-vs-CEO-target budget status, shared by every BU grid below
     # (Executive Dashboard, Comparison, Operations) so the same red/yellow/
@@ -384,7 +380,6 @@ def gather_admin_overview(db: Session) -> dict:
     # see evaluate_cumulative_financial_health for the full rules. Computed
     # here as one bulk grouped query across all 23 BUs (compute_mtd_cumulative_by_bu)
     # rather than 23 separate per-BU sums. ---
-    month_start = date(today.year, today.month, 1)
     current_month_targets = {
         t.business_unit_id: t
         for t in db.query(MonthlyTarget).filter(MonthlyTarget.target_month == month_start).all()
@@ -430,134 +425,150 @@ def gather_admin_overview(db: Session) -> dict:
             }
         budget_by_bu[bu.id]["financial_notes_count"] = notes_count_by_bu.get(bu.id, 0)
 
-    # --- Business Unit Comparison dataset ---
-    comparison_data = []
-    for bu in business_units:
-        fin = latest_financial_by_bu.get(bu.id)
-        comparison_data.append(
-            {
-                "bu_id": bu.id,
-                "code": bu.code,
-                "name": bu.name,
-                "revenue": round(float(fin.revenue), 2) if fin and fin.revenue is not None else 0,
-                "cash_flow": round(float(fin.cash_flow), 2) if fin and fin.cash_flow is not None else 0,
-                "receivable": round(float(fin.receivable), 2) if fin and fin.receivable is not None else 0,
-                "payable": round(float(fin.payable), 2) if fin and fin.payable is not None else 0,
-                "report_date": fin.report_date.isoformat() if fin else None,
-                **budget_by_bu[bu.id],
-            }
-        )
+    if "comparison" in want:
+        # --- Business Unit Comparison dataset ---
+        comparison_data = []
+        for bu in business_units:
+            fin = latest_financial_by_bu.get(bu.id)
+            comparison_data.append(
+                {
+                    "bu_id": bu.id,
+                    "code": bu.code,
+                    "name": bu.name,
+                    "revenue": round(float(fin.revenue), 2) if fin and fin.revenue is not None else 0,
+                    "cash_flow": round(float(fin.cash_flow), 2) if fin and fin.cash_flow is not None else 0,
+                    "receivable": round(float(fin.receivable), 2) if fin and fin.receivable is not None else 0,
+                    "payable": round(float(fin.payable), 2) if fin and fin.payable is not None else 0,
+                    "report_date": fin.report_date.isoformat() if fin else None,
+                    **budget_by_bu[bu.id],
+                }
+            )
 
-    # --- Operations grid ---
-    operations = []
-    for bu in business_units:
-        fin = latest_financial_by_bu.get(bu.id)
-        today_fin = today_financial_by_bu.get(bu.id)
-        latest_activity = latest_activity_by_bu.get(bu.id)
-        latest_social = latest_social_by_bu.get(bu.id)
-        latest_health = latest_health_by_bu.get(bu.id)
-        activity_today = today_activity_by_bu.get(bu.id)
-        wb_entry = next((w for w in wellbeing if w["bu_code"] == bu.code), None)
-        health_status = wb_entry["risk"] if wb_entry else "unknown"
-        operations.append(
-            {
-                "bu_id": bu.id,
-                "bu_code": bu.code,
-                "bu_name": bu.name,
-                "ceo_username": wb_entry["ceo_username"] if wb_entry else "-",
-                "ceo_profile": serialize_ceo_profile(
-                    ceo_by_bu.get(bu.id),
-                    ceo_profiles_by_user.get(ceo_by_bu[bu.id].id) if bu.id in ceo_by_bu else None,
-                    today,
-                ),
-                "report_date": latest_activity.report_date.strftime("%d %b %Y") if latest_activity else None,
-                "report_time": format_local_time(latest_activity.updated_at) if latest_activity else None,
-                "revenue": float(fin.revenue) if fin else None,
-                "expenses": float(fin.expenses) if fin else None,
-                "net_profit": float(fin.net_profit) if fin else None,
-                "cash_in_hand": float(fin.cash_in_hand) if fin else None,
-                "cash_flow": float(fin.cash_flow) if fin and fin.cash_flow is not None else None,
-                "receivable": float(fin.receivable) if fin and fin.receivable is not None else None,
-                "payable": float(fin.payable) if fin and fin.payable is not None else None,
-                "other_amount": float(fin.other_amount) if fin and fin.other_amount is not None else None,
-                "daily_steps": latest_health.daily_steps if latest_health else None,
-                "step_status": step_status(latest_health.daily_steps) if latest_health else None,
-                "heart_rate": latest_health.heart_rate if latest_health else None,
-                "sleep_hours": float(latest_health.sleep_hours) if latest_health and latest_health.sleep_hours is not None else None,
-                "bp_systolic": latest_health.bp_systolic if latest_health else None,
-                "bp_diastolic": latest_health.bp_diastolic if latest_health else None,
-                "health_other_notes": latest_health.other_notes if latest_health else None,
-                "event_flag": latest_social.event_flag if latest_social else None,
-                "meeting_flag": latest_social.meeting_flag if latest_social else None,
-                "golf_flag": latest_social.golf_flag if latest_social else None,
-                "social_other_notes": latest_social.other_notes if latest_social else None,
-                "gym_percent": latest_activity.gym_percent if latest_activity else None,
-                "swimming_percent": latest_activity.swimming_percent if latest_activity else None,
-                "cycle_percent": latest_activity.cycle_percent if latest_activity else None,
-                "activity_other_notes": latest_activity.other_notes if latest_activity else None,
-                "risk": health_status,
-                "submitted_today": activity_today is not None,
-                "submitted_today_time": format_local_time(activity_today.updated_at) if activity_today else None,
-                # 4-quadrant BU health circle: Financial (top-left) / Social (top-right) /
-                # Activity (bottom-left) / Health (bottom-right). "unknown" from compute_health_risk
-                # is normalized to "grey" here so the frontend only ever sees the 4 quadrant colors.
-                # Same resolve_financial_status() helper Business Unit Detail uses, so the two
-                # can never disagree about the same BU on the same day.
-                "financial_status": resolve_financial_status(fin, today_fin, budget_by_bu[bu.id]["budget_status"]),
-                "social_status": social_quadrant_status(latest_social),
-                "activity_status": activity_quadrant_status(latest_activity),
-                "health_status": "grey" if health_status == "unknown" else health_status,
-                # Real actual-vs-CEO-target status (red/yellow/green), separate from
-                # financial_status above (which is cash-flow health, not budget adherence).
-                **budget_by_bu[bu.id],
-            }
-        )
-
-    # --- Missing submissions for the current operational week (Mon..today) ---
-    week_start = today - timedelta(days=today.weekday())
-    week_days = [week_start + timedelta(days=i) for i in range((today - week_start).days + 1)]
-
-    missing_submissions = []
-    for bu in business_units:
-        submitted_dates = {
-            row.report_date
-            for row in db.query(ActivityLog.report_date)
-            .filter(ActivityLog.business_unit_id == bu.id, ActivityLog.report_date >= week_start)
-            .all()
-        }
-        missing_days = [d for d in week_days if d not in submitted_dates]
-        if missing_days:
-            missing_submissions.append(
+    if "operations" in want:
+        # --- Operations grid ---
+        operations = []
+        for bu in business_units:
+            fin = latest_financial_by_bu.get(bu.id)
+            today_fin = today_financial_by_bu.get(bu.id)
+            latest_activity = latest_activity_by_bu.get(bu.id)
+            latest_social = latest_social_by_bu.get(bu.id)
+            latest_health = latest_health_by_bu.get(bu.id)
+            activity_today = today_activity_by_bu.get(bu.id)
+            health_status = compute_health_risk(latest_health)
+            ceo_user = ceo_by_bu.get(bu.id)
+            operations.append(
                 {
                     "bu_id": bu.id,
                     "bu_code": bu.code,
                     "bu_name": bu.name,
-                    "missing_dates": [d.strftime("%a %d %b") for d in missing_days],
-                    "missing_day_labels": [d.strftime("%a") for d in missing_days],
-                    "missing_count": len(missing_days),
-                    "days_in_week_so_far": len(week_days),
+                    "ceo_username": ceo_user.username if ceo_user else "-",
+                    "ceo_profile": serialize_ceo_profile(
+                        ceo_by_bu.get(bu.id),
+                        ceo_profiles_by_user.get(ceo_by_bu[bu.id].id) if bu.id in ceo_by_bu else None,
+                        today,
+                    ),
+                    "report_date": latest_activity.report_date.strftime("%d %b %Y") if latest_activity else None,
+                    "report_time": format_local_time(latest_activity.updated_at) if latest_activity else None,
+                    "revenue": float(fin.revenue) if fin else None,
+                    "expenses": float(fin.expenses) if fin else None,
+                    "net_profit": float(fin.net_profit) if fin else None,
+                    "cash_in_hand": float(fin.cash_in_hand) if fin else None,
+                    "cash_flow": float(fin.cash_flow) if fin and fin.cash_flow is not None else None,
+                    "receivable": float(fin.receivable) if fin and fin.receivable is not None else None,
+                    "payable": float(fin.payable) if fin and fin.payable is not None else None,
+                    "other_amount": float(fin.other_amount) if fin and fin.other_amount is not None else None,
+                    "daily_steps": latest_health.daily_steps if latest_health else None,
+                    "step_status": step_status(latest_health.daily_steps) if latest_health else None,
+                    "heart_rate": latest_health.heart_rate if latest_health else None,
+                    "sleep_hours": float(latest_health.sleep_hours) if latest_health and latest_health.sleep_hours is not None else None,
+                    "bp_systolic": latest_health.bp_systolic if latest_health else None,
+                    "bp_diastolic": latest_health.bp_diastolic if latest_health else None,
+                    "health_other_notes": latest_health.other_notes if latest_health else None,
+                    "event_flag": latest_social.event_flag if latest_social else None,
+                    "meeting_flag": latest_social.meeting_flag if latest_social else None,
+                    "golf_flag": latest_social.golf_flag if latest_social else None,
+                    "social_other_notes": latest_social.other_notes if latest_social else None,
+                    "gym_percent": latest_activity.gym_percent if latest_activity else None,
+                    "swimming_percent": latest_activity.swimming_percent if latest_activity else None,
+                    "cycle_percent": latest_activity.cycle_percent if latest_activity else None,
+                    "activity_other_notes": latest_activity.other_notes if latest_activity else None,
+                    "risk": health_status,
+                    "submitted_today": activity_today is not None,
+                    "submitted_today_time": format_local_time(activity_today.updated_at) if activity_today else None,
+                    # 4-quadrant BU health circle: Financial (top-left) / Social (top-right) /
+                    # Activity (bottom-left) / Health (bottom-right). "unknown" from compute_health_risk
+                    # is normalized to "grey" here so the frontend only ever sees the 4 quadrant colors.
+                    # Same resolve_financial_status() helper Business Unit Detail uses, so the two
+                    # can never disagree about the same BU on the same day.
+                    "financial_status": resolve_financial_status(fin, today_fin, budget_by_bu[bu.id]["budget_status"]),
+                    "social_status": social_quadrant_status(latest_social),
+                    "activity_status": activity_quadrant_status(latest_activity),
+                    "health_status": "grey" if health_status == "unknown" else health_status,
+                    # Real actual-vs-CEO-target status (red/yellow/green), separate from
+                    # financial_status above (which is cash-flow health, not budget adherence).
+                    **budget_by_bu[bu.id],
                 }
             )
 
-    return {
+    if "missing" in want:
+        # --- Missing submissions for the current operational week (Mon..today) ---
+        week_start = today - timedelta(days=today.weekday())
+        week_days = [week_start + timedelta(days=i) for i in range((today - week_start).days + 1)]
+
+        # M-07: one grouped query for the whole week (was one query per BU).
+        submitted_by_bu: dict = defaultdict(set)
+        for _bu_id, _report_date in (
+            db.query(ActivityLog.business_unit_id, ActivityLog.report_date)
+            .filter(ActivityLog.report_date >= week_start, ActivityLog.report_date <= today)
+            .all()
+        ):
+            submitted_by_bu[_bu_id].add(_report_date)
+
+        missing_submissions = []
+        for bu in business_units:
+            submitted_dates = submitted_by_bu.get(bu.id, set())
+            missing_days = [d for d in week_days if d not in submitted_dates]
+            if missing_days:
+                missing_submissions.append(
+                    {
+                        "bu_id": bu.id,
+                        "bu_code": bu.code,
+                        "bu_name": bu.name,
+                        "missing_dates": [d.strftime("%a %d %b") for d in missing_days],
+                        "missing_day_labels": [d.strftime("%a") for d in missing_days],
+                        "missing_count": len(missing_days),
+                        "days_in_week_so_far": len(week_days),
+                    }
+                )
+
+    result = {
         "today": today.isoformat(),
         "today_display": today.strftime("%A, %d %B %Y"),
-        "kpi": kpi,
-        "wellbeing": wellbeing,
-        "critical_ceos": critical_ceos,
-        "financial_alerts": financial_alerts,
-        "activity_alerts": activity_alerts,
-        "submission_compliance": submission_compliance,
-        "operations": operations,
-        "missing_submissions": missing_submissions,
-        "trend_labels": trend_labels,
-        "trend_cash_flow_by_bu": trend_cash_flow_by_bu,
-        "trend_by_bu": trend_by_bu,
-        "bar_categories": bar_categories,
-        "bar_receivable": bar_receivable,
-        "bar_payable": bar_payable,
-        "comparison_data": comparison_data,
     }
+    if "kpi" in want:
+        result["kpi"] = kpi
+    if "wellbeing" in want:
+        result["wellbeing"] = wellbeing
+        result["critical_ceos"] = critical_ceos
+    if "alerts" in want:
+        result["financial_alerts"] = financial_alerts
+        result["activity_alerts"] = activity_alerts
+    if "compliance" in want:
+        result["submission_compliance"] = submission_compliance
+    if "operations" in want:
+        result["operations"] = operations
+    if "missing" in want:
+        result["missing_submissions"] = missing_submissions
+    if "trend" in want:
+        result["trend_labels"] = trend_labels
+        result["trend_cash_flow_by_bu"] = trend_cash_flow_by_bu
+        result["trend_by_bu"] = trend_by_bu
+        result["bar_categories"] = bar_categories
+        result["bar_receivable"] = bar_receivable
+        result["bar_payable"] = bar_payable
+    if "comparison" in want:
+        result["comparison_data"] = comparison_data
+    return result
 
 
 @router.get("/overview")
@@ -577,7 +588,7 @@ def admin_overview(user: User = Depends(require_admin), db: Session = Depends(ge
 
 @router.get("/comparison")
 def admin_comparison(user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    ov = gather_admin_overview(db)
+    ov = gather_admin_overview(db, parts={"trend", "comparison"})
     return {
         "today_display": ov["today_display"],
         "trend_labels": ov["trend_labels"],
@@ -592,7 +603,7 @@ def admin_comparison(user: User = Depends(require_admin), db: Session = Depends(
 
 @router.get("/operations")
 def admin_operations(user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    ov = gather_admin_overview(db)
+    ov = gather_admin_overview(db, parts={"operations"})
     return {
         "today_display": ov["today_display"],
         "today_iso": ov["today"],

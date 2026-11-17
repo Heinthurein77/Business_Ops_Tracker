@@ -378,3 +378,130 @@ class TestHotQueryIndexes:
             assert cols == ["user_id", "is_read", "created_at"]
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------- M-07
+# Admin overview: ~115+ queries per request -> one window-function query
+# per latest-row table, one grouped missing-submissions query, MTD-bounded
+# totals, one SUM query per day, and per-endpoint parts.
+
+class TestAdminOverviewQueries:
+    def _seed_23_bus(self, db):
+        from datetime import date, timedelta
+        from decimal import Decimal
+
+        from src.models import (
+            ActivityLog, BusinessUnit, DailyFinancial, HealthStatus,
+            SocialLog, User,
+        )
+        from src.utils import today_local
+
+        today = today_local()
+        month_start = date(today.year, today.month, 1)
+        days = [today - timedelta(days=2), today - timedelta(days=1), today]
+        for i in range(1, 24):
+            db.add(BusinessUnit(id=i, code=f"BU{i}", name=f"Unit {i}"))
+        db.add(User(id=100, username="ceo_bu1", hashed_password="x",
+                    role="CEO", business_unit_id=1, is_active=True))
+        # A huge pre-month row: MTD totals must exclude it.
+        db.add(DailyFinancial(business_unit_id=1, report_date=date(2025, 6, 15),
+                              revenue=Decimal("1000000000"), expenses=Decimal("0"),
+                              net_profit=Decimal("0"), cash_in_hand=Decimal("0")))
+        for i in range(1, 24):
+            for offset, d in enumerate(days):
+                # BU23 submits nothing today (alerts + missing-submissions).
+                if i == 23 and d == today:
+                    continue
+                db.add(DailyFinancial(
+                    business_unit_id=i, report_date=d,
+                    revenue=Decimal(str((offset + 1) * 1000 * i)),
+                    expenses=Decimal(str(500 * i)),
+                    net_profit=Decimal("0"), cash_in_hand=Decimal(str(50 * i)),
+                    cash_flow=Decimal(str(100 * i)),
+                    receivable=Decimal(str(10 * i)),
+                    payable=Decimal(str(5 * i))))
+                db.add(ActivityLog(business_unit_id=i, report_date=d))
+            db.add(SocialLog(business_unit_id=i, report_date=today))
+            db.add(HealthStatus(
+                business_unit_id=i, report_date=today, daily_steps=8000,
+                physical_health="Sick" if i == 2 else "Healthy"))
+        db.commit()
+        return today, month_start, days
+
+    def _counted(self, engine, fn):
+        from sqlalchemy import event
+
+        count = {"n": 0}
+
+        def _before(conn, cursor, statement, parameters, context, executemany):
+            count["n"] += 1
+
+        event.listen(engine, "before_cursor_execute", _before)
+        try:
+            result = fn()
+        finally:
+            event.remove(engine, "before_cursor_execute", _before)
+        return result, count["n"]
+
+    def test_overview_few_queries_and_correct_payload(self):
+        from src.routers.admin import gather_admin_overview
+
+        engine, db = _make_db()
+        today, month_start, days = self._seed_23_bus(db)
+        ov, n = self._counted(engine, lambda: gather_admin_overview(db))
+        # Was ~115+ sequential round-trips for 23 BUs (4 latest-row loops
+        # + 23 missing-submission queries + ~12 aggregates + unbounded SUM).
+        assert n <= 25, f"overview still runs {n} queries"
+        # MTD totals exclude the 2025 row (revenue 1e9) and BU23's
+        # missing today row; computed from the seed with the month bound
+        # so the test stays correct on the 1st/2nd of a month too.
+        expected_mtd = sum(
+            (offset + 1) * 1000 * i
+            for i in range(1, 24)
+            for offset, d in enumerate(days)
+            if not (i == 23 and d == today) and d >= month_start)
+        assert ov["kpi"]["total_revenue"] == float(expected_mtd)
+        assert ov["kpi"]["total_revenue"] < 1e9
+        # Latest-row window queries: BU1's latest financial is today's row.
+        bu1 = next(c for c in ov["comparison_data"] if c["bu_id"] == 1)
+        assert bu1["revenue"] == 3000.0
+        assert bu1["report_date"] == today.isoformat()
+        # BU23 missed today: financial + activity alerts, and it is the
+        # only BU in missing_submissions.
+        assert {a["bu_id"] for a in ov["financial_alerts"]} == {23}
+        assert {a["bu_id"] for a in ov["activity_alerts"]} == {23}
+        assert [m["bu_id"] for m in ov["missing_submissions"]] == [23]
+        assert ov["missing_submissions"][0]["missing_count"] >= 1
+        assert ov["submission_compliance"]["submitted"] == 22
+        assert ov["submission_compliance"]["total"] == 23
+        # Wellbeing: BU2 is Sick -> red, and is the only critical CEO.
+        bu2 = next(w for w in ov["wellbeing"] if w["bu_id"] == 2)
+        assert bu2["risk"] == "red"
+        assert [c["bu_id"] for c in ov["critical_ceos"]] == [2]
+        # Trend: 14 labels; BU1 revenue series ends 1000/2000/3000.
+        assert len(ov["trend_labels"]) == 14
+        bu1_trend = next(t for t in ov["trend_by_bu"] if t["bu_id"] == 1)
+        assert bu1_trend["revenue"][-3:] == [1000.0, 2000.0, 3000.0]
+        assert bu1_trend["revenue"][:-3] == [0.0] * 11
+        db.close()
+        engine.dispose()
+
+    def test_parts_limit_work_and_queries(self):
+        from src.routers.admin import gather_admin_overview
+
+        engine, db = _make_db()
+        self._seed_23_bus(db)
+        ops, n_ops = self._counted(
+            engine, lambda: gather_admin_overview(db, parts={"operations"}))
+        assert set(ops) == {"today", "today_display", "operations"}
+        assert len(ops["operations"]) == 23
+        assert n_ops <= 14, f"operations still runs {n_ops} queries"
+        comp, n_comp = self._counted(
+            engine, lambda: gather_admin_overview(db, parts={"trend", "comparison"}))
+        assert set(comp) == {"today", "today_display", "trend_labels",
+                             "trend_cash_flow_by_bu", "trend_by_bu",
+                             "bar_categories", "bar_receivable", "bar_payable",
+                             "comparison_data"}
+        assert n_comp <= 15, f"comparison still runs {n_comp} queries"
+        db.close()
+        engine.dispose()
