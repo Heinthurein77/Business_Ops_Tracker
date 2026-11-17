@@ -484,7 +484,11 @@ def log_audit(
     from src.client_ip import get_client_ip
     from src.throttle import MAX_USERNAME_LEN, strip_control_chars
 
-    recorded_username = user.username if user else username
+    # M-04 follow-up: duck-typed callers (tests, and any future caller
+    # passing a minimal user object) may carry no .username — read it
+    # defensively so an audit write can never raise out of log_audit and
+    # fail the request it was recording (the D-8 guarantee above).
+    recorded_username = getattr(user, "username", None) if user is not None else username
     if recorded_username is not None:
         recorded_username = strip_control_chars(recorded_username)[:MAX_USERNAME_LEN]
 
@@ -496,7 +500,7 @@ def log_audit(
     details_limit = 4000 if "resubmit_changes_json=" in text else 1000
 
     entry = AuditLog(
-        user_id=user.id if user else None,
+        user_id=getattr(user, "id", None) if user is not None else None,
         username=recorded_username,
         action=action,
         details=text[:details_limit],
