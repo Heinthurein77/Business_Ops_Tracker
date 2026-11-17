@@ -11,7 +11,10 @@ name: postgres-check
 # against receive_po / send_invoice / record_payment and asserted
 # exactly one success + a 409 loser on Postgres. That file was deleted
 # with the ERP removal (2026-11-17) — the concurrency proof it ran
-# tested ERP endpoints that no longer exist.
+# tested ERP endpoints that no longer exist. Its tracker successor is
+# tests/test_review_d_postgres_concurrency.py (M-14, 2026-11-17), which
+# races two threads against POST /api/ceo/submit-report and asserts
+# exactly one success + a 409 loser on Postgres.
 # Runs on every push/PR to main and weekly (a typo in a CHECK expression
 # that is syntactically valid would otherwise surface only on Neon).
 on:
@@ -77,4 +80,4 @@ jobs:
         run: python -m alembic upgrade head
 
       - name: Postgres-only constraint checks
-        run: python -m pytest tests/test_bot_review_minors_postgres.py -q
+        run: python -m pytest tests/test_bot_review_minors_postgres.py tests/test_review_d_postgres_concurrency.py -q

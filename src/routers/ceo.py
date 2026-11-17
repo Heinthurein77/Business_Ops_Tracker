@@ -1125,186 +1125,196 @@ def submit_report(
         # instead of saving the report as if the evidence were attached.
         document_url = upload_attachment_or_503(attachment.file, attachment.filename)
 
-    financial = (
-        db.query(DailyFinancial)
-        .filter(DailyFinancial.business_unit_id == user.business_unit_id, DailyFinancial.report_date == report_date)
-        .with_for_update()
-        .first()
-    )
-    # Captured before being overwritten below, so a same-day resubmission's
-    # audit log entry can show exactly what changed rather than just that a
-    # submission happened — the only tamper-evidence for financial corrections.
-    previous_financial = (
-        {
-            "revenue": financial.revenue,
-            "cash_flow": financial.cash_flow,
-            "receivable": financial.receivable,
-            "payable": financial.payable,
-            "other_amount": financial.other_amount,
-            "financial_other_notes": financial.other_notes,
-        }
-        if financial is not None
-        else None
-    )
-    if financial is None:
-        financial = DailyFinancial(business_unit_id=user.business_unit_id, report_date=report_date)
-        db.add(financial)
+    # M-14: no_autoflush for the four lookup-or-create blocks below.
+    # Each block adds a new per-day row and the NEXT block's lookup
+    # would autoflush that pending INSERT — on a concurrent double
+    # submit the flush hits the per-day unique constraint OUTSIDE the
+    # try/except around db.commit() below and 500s instead of 409ing.
+    # With autoflush off, nothing is sent to the DB until the commit,
+    # whose IntegrityError handler is the 409 guard. The lookups only
+    # ever read already-committed rows (each block queries a different
+    # table), so deferring the flush changes no result.
+    with db.no_autoflush:
+        financial = (
+            db.query(DailyFinancial)
+            .filter(DailyFinancial.business_unit_id == user.business_unit_id, DailyFinancial.report_date == report_date)
+            .with_for_update()
+            .first()
+        )
+        # Captured before being overwritten below, so a same-day resubmission's
+        # audit log entry can show exactly what changed rather than just that a
+        # submission happened — the only tamper-evidence for financial corrections.
+        previous_financial = (
+            {
+                "revenue": financial.revenue,
+                "cash_flow": financial.cash_flow,
+                "receivable": financial.receivable,
+                "payable": financial.payable,
+                "other_amount": financial.other_amount,
+                "financial_other_notes": financial.other_notes,
+            }
+            if financial is not None
+            else None
+        )
+        if financial is None:
+            financial = DailyFinancial(business_unit_id=user.business_unit_id, report_date=report_date)
+            db.add(financial)
 
-    # expenses/net_profit/cash_in_hand are legacy columns no longer collected
-    # from the form — zeroed out rather than left stale so historical views
-    # (Comparison, Operations, Excel export) show $0 rather than old data.
-    financial.revenue = revenue_val
-    financial.other_amount = other_amount_val
-    financial.expenses = Decimal("0")
-    financial.net_profit = Decimal("0")
-    financial.cash_in_hand = Decimal("0")
-    financial.cash_flow = cash_flow_val
-    financial.receivable = receivable_val
-    financial.payable = payable_val
-    financial.other_notes = financial_other_notes or None
-    financial.submitted_by = user.id
+        # expenses/net_profit/cash_in_hand are legacy columns no longer collected
+        # from the form — zeroed out rather than left stale so historical views
+        # (Comparison, Operations, Excel export) show $0 rather than old data.
+        financial.revenue = revenue_val
+        financial.other_amount = other_amount_val
+        financial.expenses = Decimal("0")
+        financial.net_profit = Decimal("0")
+        financial.cash_in_hand = Decimal("0")
+        financial.cash_flow = cash_flow_val
+        financial.receivable = receivable_val
+        financial.payable = payable_val
+        financial.other_notes = financial_other_notes or None
+        financial.submitted_by = user.id
 
-    activity = (
-        db.query(ActivityLog)
-        .filter(ActivityLog.business_unit_id == user.business_unit_id, ActivityLog.report_date == report_date)
-        .with_for_update()
-        .first()
-    )
-    previous_activity = (
-        {
-            "meetings_attended": activity.meetings_attended,
-            "meetings_count": activity.meetings_count,
-            "site_visits": activity.site_visits,
-            "key_decisions": activity.key_decisions,
-            "key_achievement": activity.key_achievement,
-            "next_day_schedule": activity.next_day_schedule,
-            "problems_today": activity.problems_today,
-            "help_needed": activity.help_needed,
-            "gym_percent": activity.gym_percent,
-            "swimming_percent": activity.swimming_percent,
-            "cycle_percent": activity.cycle_percent,
-            "activity_other_notes": activity.other_notes,
-        }
-        if activity is not None
-        else None
-    )
-    # Captured for the help re-open rule below: if this day's request was
-    # already resolved and the CEO now changes the ask, the resolution is
-    # cleared (the old response no longer matches the request).
-    previous_help_needed = activity.help_needed if activity is not None else None
-    previous_help_resolved_at = activity.help_resolved_at if activity is not None else None
-    # SM-7: captured before being overwritten below, so a resubmission that
-    # replaces the attachment can delete the previous R2 object afterwards.
-    previous_document_url = activity.document_url if activity is not None else None
-    if activity is None:
-        activity = ActivityLog(business_unit_id=user.business_unit_id, report_date=report_date)
-        db.add(activity)
-    elif activity.submitted_by != user.id:
-        # Today's row was left by a previous CEO of this unit: every field is
-        # overwritten below, but the attachment link is only replaced when a
-        # new file is sent — never carry their document over as this CEO's.
-        activity.document_url = None
-    activity.meetings_attended = meetings_attended
-    activity.meetings_count = meetings_count_val
-    activity.site_visits = site_visits
-    activity.key_decisions = key_decisions
-    activity.key_achievement = key_achievement or None
-    activity.next_day_schedule = next_day_schedule
-    activity.problems_today = problems_today or None
-    activity.help_needed = help_needed or None
-    if previous_help_resolved_at is not None and activity.help_needed != previous_help_needed:
-        # Re-open: the ask changed after HO/Chairman answered it, so the
-        # recorded response no longer applies. An unchanged resubmission
-        # (e.g. fixing the day's revenue) keeps the resolution intact.
-        activity.help_resolved_at = None
-        activity.help_resolved_by = None
-        activity.help_response = None
-    if document_url:
-        activity.document_url = document_url
-    if not health_exercise_present:
-        # Pre-move clients still send exercise % as activity fields. The
-        # current form sends health_*_percent instead, and then the
-        # activity row's legacy percents are left exactly as stored —
-        # overwriting them with blanks would erase the fallback data
-        # older days rely on for display.
-        activity.gym_percent = gym_percent_val
-        activity.swimming_percent = swimming_percent_val
-        activity.cycle_percent = cycle_percent_val
-    activity.other_notes = activity_other_notes or None
-    activity.submitted_by = user.id
+        activity = (
+            db.query(ActivityLog)
+            .filter(ActivityLog.business_unit_id == user.business_unit_id, ActivityLog.report_date == report_date)
+            .with_for_update()
+            .first()
+        )
+        previous_activity = (
+            {
+                "meetings_attended": activity.meetings_attended,
+                "meetings_count": activity.meetings_count,
+                "site_visits": activity.site_visits,
+                "key_decisions": activity.key_decisions,
+                "key_achievement": activity.key_achievement,
+                "next_day_schedule": activity.next_day_schedule,
+                "problems_today": activity.problems_today,
+                "help_needed": activity.help_needed,
+                "gym_percent": activity.gym_percent,
+                "swimming_percent": activity.swimming_percent,
+                "cycle_percent": activity.cycle_percent,
+                "activity_other_notes": activity.other_notes,
+            }
+            if activity is not None
+            else None
+        )
+        # Captured for the help re-open rule below: if this day's request was
+        # already resolved and the CEO now changes the ask, the resolution is
+        # cleared (the old response no longer matches the request).
+        previous_help_needed = activity.help_needed if activity is not None else None
+        previous_help_resolved_at = activity.help_resolved_at if activity is not None else None
+        # SM-7: captured before being overwritten below, so a resubmission that
+        # replaces the attachment can delete the previous R2 object afterwards.
+        previous_document_url = activity.document_url if activity is not None else None
+        if activity is None:
+            activity = ActivityLog(business_unit_id=user.business_unit_id, report_date=report_date)
+            db.add(activity)
+        elif activity.submitted_by != user.id:
+            # Today's row was left by a previous CEO of this unit: every field is
+            # overwritten below, but the attachment link is only replaced when a
+            # new file is sent — never carry their document over as this CEO's.
+            activity.document_url = None
+        activity.meetings_attended = meetings_attended
+        activity.meetings_count = meetings_count_val
+        activity.site_visits = site_visits
+        activity.key_decisions = key_decisions
+        activity.key_achievement = key_achievement or None
+        activity.next_day_schedule = next_day_schedule
+        activity.problems_today = problems_today or None
+        activity.help_needed = help_needed or None
+        if previous_help_resolved_at is not None and activity.help_needed != previous_help_needed:
+            # Re-open: the ask changed after HO/Chairman answered it, so the
+            # recorded response no longer applies. An unchanged resubmission
+            # (e.g. fixing the day's revenue) keeps the resolution intact.
+            activity.help_resolved_at = None
+            activity.help_resolved_by = None
+            activity.help_response = None
+        if document_url:
+            activity.document_url = document_url
+        if not health_exercise_present:
+            # Pre-move clients still send exercise % as activity fields. The
+            # current form sends health_*_percent instead, and then the
+            # activity row's legacy percents are left exactly as stored —
+            # overwriting them with blanks would erase the fallback data
+            # older days rely on for display.
+            activity.gym_percent = gym_percent_val
+            activity.swimming_percent = swimming_percent_val
+            activity.cycle_percent = cycle_percent_val
+        activity.other_notes = activity_other_notes or None
+        activity.submitted_by = user.id
 
-    health = (
-        db.query(HealthStatus)
-        .filter(HealthStatus.business_unit_id == user.business_unit_id, HealthStatus.report_date == report_date)
-        .with_for_update()
-        .first()
-    )
-    previous_health = (
-        {
-            "daily_steps": health.daily_steps,
-            "heart_rate": health.heart_rate,
-            "sleep_hours": health.sleep_hours,
-            "bp_systolic": health.bp_systolic,
-            "bp_diastolic": health.bp_diastolic,
-            "stress_level": health.stress_level,
-            "energy_mood": health.energy_mood,
-            "weight_kg": health.weight_kg,
-            "is_sick": health.is_sick,
-            "gym_percent": health.gym_percent,
-            "swimming_percent": health.swimming_percent,
-            "cycle_percent": health.cycle_percent,
-            "health_other_notes": health.other_notes,
-        }
-        if health is not None
-        else None
-    )
-    if health is None:
-        health = HealthStatus(business_unit_id=user.business_unit_id, report_date=report_date)
-        db.add(health)
-    # physical_health/sleep_quality remain legacy fields no longer
-    # collected — left null. stress_level/energy_mood are collected again
-    # (one-tap chips), alongside weight, the sick toggle, and the exercise
-    # percents that moved here from the activity section.
-    health.daily_steps = daily_steps_val
-    health.heart_rate = heart_rate_val
-    health.sleep_hours = sleep_hours_val
-    health.bp_systolic = bp_systolic_val
-    health.bp_diastolic = bp_diastolic_val
-    health.stress_level = stress_level_val
-    health.energy_mood = energy_mood_val
-    health.weight_kg = weight_kg_val
-    health.is_sick = is_sick_val
-    if health_exercise_present:
-        health.gym_percent = health_gym_percent_val
-        health.swimming_percent = health_swimming_percent_val
-        health.cycle_percent = health_cycle_percent_val
-    health.other_notes = health_other_notes or None
-    health.submitted_by = user.id
+        health = (
+            db.query(HealthStatus)
+            .filter(HealthStatus.business_unit_id == user.business_unit_id, HealthStatus.report_date == report_date)
+            .with_for_update()
+            .first()
+        )
+        previous_health = (
+            {
+                "daily_steps": health.daily_steps,
+                "heart_rate": health.heart_rate,
+                "sleep_hours": health.sleep_hours,
+                "bp_systolic": health.bp_systolic,
+                "bp_diastolic": health.bp_diastolic,
+                "stress_level": health.stress_level,
+                "energy_mood": health.energy_mood,
+                "weight_kg": health.weight_kg,
+                "is_sick": health.is_sick,
+                "gym_percent": health.gym_percent,
+                "swimming_percent": health.swimming_percent,
+                "cycle_percent": health.cycle_percent,
+                "health_other_notes": health.other_notes,
+            }
+            if health is not None
+            else None
+        )
+        if health is None:
+            health = HealthStatus(business_unit_id=user.business_unit_id, report_date=report_date)
+            db.add(health)
+        # physical_health/sleep_quality remain legacy fields no longer
+        # collected — left null. stress_level/energy_mood are collected again
+        # (one-tap chips), alongside weight, the sick toggle, and the exercise
+        # percents that moved here from the activity section.
+        health.daily_steps = daily_steps_val
+        health.heart_rate = heart_rate_val
+        health.sleep_hours = sleep_hours_val
+        health.bp_systolic = bp_systolic_val
+        health.bp_diastolic = bp_diastolic_val
+        health.stress_level = stress_level_val
+        health.energy_mood = energy_mood_val
+        health.weight_kg = weight_kg_val
+        health.is_sick = is_sick_val
+        if health_exercise_present:
+            health.gym_percent = health_gym_percent_val
+            health.swimming_percent = health_swimming_percent_val
+            health.cycle_percent = health_cycle_percent_val
+        health.other_notes = health_other_notes or None
+        health.submitted_by = user.id
 
-    social = (
-        db.query(SocialLog)
-        .filter(SocialLog.business_unit_id == user.business_unit_id, SocialLog.report_date == report_date)
-        .with_for_update()
-        .first()
-    )
-    previous_social = (
-        {
-            "event_flag": social.event_flag,
-            "meeting_flag": social.meeting_flag,
-            "golf_flag": social.golf_flag,
-            "social_other_notes": social.other_notes,
-        }
-        if social is not None
-        else None
-    )
-    if social is None:
-        social = SocialLog(business_unit_id=user.business_unit_id, report_date=report_date)
-        db.add(social)
-    social.event_flag = _parse_bool(event_flag)
-    social.meeting_flag = _parse_bool(meeting_flag)
-    social.golf_flag = _parse_bool(golf_flag)
-    social.other_notes = social_other_notes or None
-    social.submitted_by = user.id
+        social = (
+            db.query(SocialLog)
+            .filter(SocialLog.business_unit_id == user.business_unit_id, SocialLog.report_date == report_date)
+            .with_for_update()
+            .first()
+        )
+        previous_social = (
+            {
+                "event_flag": social.event_flag,
+                "meeting_flag": social.meeting_flag,
+                "golf_flag": social.golf_flag,
+                "social_other_notes": social.other_notes,
+            }
+            if social is not None
+            else None
+        )
+        if social is None:
+            social = SocialLog(business_unit_id=user.business_unit_id, report_date=report_date)
+            db.add(social)
+        social.event_flag = _parse_bool(event_flag)
+        social.meeting_flag = _parse_bool(meeting_flag)
+        social.golf_flag = _parse_bool(golf_flag)
+        social.other_notes = social_other_notes or None
+        social.submitted_by = user.id
 
     try:
         db.commit()
