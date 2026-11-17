@@ -132,15 +132,18 @@ def _login(client, username, password="S3cure-Horse-99!", totp_code=None):
 class TestComposeMigrateDatabaseUrl:
     def test_migrate_service_database_url_uses_env_interpolation(self):
         lines = (ROOT / "docker-compose.prod.yml").read_text().splitlines()
-        # Line 73 is the migrate service's DATABASE_URL; line 115 is the
-        # app service's (known-good) one. They must be identical, and the
-        # value must be an interpolation with a hard failure when unset —
-        # never a literal.
-        assert lines[72].strip().startswith("DATABASE_URL:")
-        assert lines[114].strip().startswith("DATABASE_URL:")
-        assert lines[72] == lines[114]
-        assert "${DATABASE_URL:?" in lines[72]
-        assert "<redacted>" not in lines[72]
+        # The migrate service's DATABASE_URL and the app service's
+        # (known-good) one must be identical, and the value must be an
+        # interpolation with a hard failure when unset — never a literal.
+        # Located structurally: hardcoded line numbers go stale whenever
+        # a service block gains lines (m-15's logging block moved the
+        # migrate line from 73 to 80).
+        db_lines = [l for l in lines if l.strip().startswith("DATABASE_URL:")]
+        assert len(db_lines) == 2, f"expected migrate + app DATABASE_URL lines, got {db_lines!r}"
+        migrate_line, app_line = db_lines
+        assert migrate_line == app_line
+        assert "${DATABASE_URL:?" in migrate_line
+        assert "<redacted>" not in migrate_line
 
     def test_no_database_url_line_holds_a_literal_value(self):
         # Every DATABASE_URL / MIGRATION_DATABASE_URL assignment in the

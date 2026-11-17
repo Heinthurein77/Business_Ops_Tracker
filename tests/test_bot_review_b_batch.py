@@ -75,14 +75,14 @@ _SUBMIT_DEFAULTS = dict(
 
 def _ceo_submit(db, user, **overrides):
     import src.routers.ceo as ceo_router
-    ceo_router._report_submit_timestamps.clear()
+    ceo_router._rate_limiter.reset()
     kwargs = {**_SUBMIT_DEFAULTS, **overrides}
     return ceo_submit_report(request=REQUEST, user=user, db=db, **kwargs)
 
 
 def _ho_submit(db, user, **overrides):
     import src.routers.ho as ho_router
-    ho_router._report_submit_timestamps.clear()
+    ho_router._rate_limiter.reset()
     payload = dict(
         revenue="100000", cash_flow="20000", receivable="5000", payable="3000",
         other_amount="1000", financial_other_notes="", meetings_attended="Standup",
