@@ -5,11 +5,13 @@ Access model mirrors the rest of the app:
 - CEO: scoped to their own business unit
 - Chairman / HO ("admin"): all business units
 """
+import json
 import logging
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
@@ -26,6 +28,7 @@ from src.models import (
     CustomerMetric,
     DailyFinancial,
     HeadOfficeActivityLog,
+    IdempotencyKey,
     LicenseDocument,
     Notification,
     StaffRecord,
@@ -68,6 +71,82 @@ def _escape_like(value: str) -> str:
     """Escape LIKE wildcards (Sm-1): `_` and `%` in a stored attachment
     key must match literally, never as a single-/multi-char wildcard."""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+# ---------------------------------------------------------------- m-01: clamped pagination
+
+# One shared clamp for every ops list endpoint (m-01): raw limit/offset/
+# days used to flow straight into .offset().limit() / timedelta(), so a
+# caller could request ?limit=10000000 (unbounded .all() into memory) or
+# a huge days (timedelta overflow -> 500). Mirrors the codebase's own
+# pattern at admin.py report-logs (limit 1..500).
+def clamp_limit(limit: int) -> int:
+    return max(1, min(limit, 500))
+
+
+def clamp_offset(offset: int) -> int:
+    return max(0, offset)
+
+
+def clamp_days(days: int) -> int:
+    return max(1, min(days, 365))
+
+
+# ---------------------------------------------------------------- m-10: Idempotency-Key
+
+# Max key length: a client-generated UUID is 36 chars; 128 leaves room
+# for prefixed keys while keeping the column bounded.
+MAX_IDEMPOTENCY_KEY_LEN = 128
+
+
+def _idempotency_key(request: Optional[Request]) -> Optional[str]:
+    """The caller's Idempotency-Key header, or None when absent.
+
+    A key that is only whitespace counts as absent; an over-long key is
+    a 400 (it can never match a stored key, so failing fast beats
+    silently creating a duplicate row)."""
+    if request is None:
+        return None
+    key = (request.headers.get("Idempotency-Key") or "").strip()
+    if not key:
+        return None
+    if len(key) > MAX_IDEMPOTENCY_KEY_LEN:
+        raise HTTPException(400, "Idempotency-Key must be at most 128 characters")
+    return key
+
+
+def _idempotency_replay(db: Session, user, endpoint: str, key: str):
+    """The stored first response for (user, endpoint, key), or None."""
+    row = (
+        db.query(IdempotencyKey)
+        .filter(IdempotencyKey.user_id == user.id,
+                IdempotencyKey.endpoint == endpoint,
+                IdempotencyKey.idempotency_key == key)
+        .first()
+    )
+    if row is None:
+        return None
+    return JSONResponse(status_code=row.response_status,
+                        content=json.loads(row.response_body))
+
+
+def _idempotency_store(db: Session, user, endpoint: str, key: str,
+                       status: int, body: dict):
+    """Store the first response for (user, endpoint, key).
+
+    Returns None on success, or the winner's stored response when a
+    concurrent replay won the unique-constraint race first — the
+    caller then returns that replay instead of its own fresh row."""
+    try:
+        db.add(IdempotencyKey(
+            user_id=user.id, endpoint=endpoint, idempotency_key=key,
+            response_status=status, response_body=json.dumps(body),
+        ))
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return _idempotency_replay(db, user, endpoint, key)
+    return None
 
 
 def _assert_token_current(db, user) -> None:
@@ -188,12 +267,20 @@ def list_action_items(
         q = q.filter(ActionItem.status == status)
     if mine:
         q = q.filter(ActionItem.assigned_to_id == user.id)
-    items = q.order_by(ActionItem.due_date.is_(None), ActionItem.due_date, ActionItem.created_at.desc()).offset(offset).limit(limit).all()
+    items = q.order_by(ActionItem.due_date.is_(None), ActionItem.due_date, ActionItem.created_at.desc()).offset(clamp_offset(offset)).limit(clamp_limit(limit)).all()
     return {"items": [serialize_action_item(db, i) for i in items]}
 
 
 @router.post("/action-items")
-def create_action_item(payload: ActionItemIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_action_item(payload: ActionItemIn, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # m-10: a retried request with the same Idempotency-Key replays the
+    # first response instead of creating a second action item.
+    endpoint = "POST /api/ops/action-items"
+    key = _idempotency_key(request)
+    if key is not None:
+        replay = _idempotency_replay(db, user, endpoint, key)
+        if replay is not None:
+            return replay
     bu_id = bu_scope(user, payload.business_unit_id)
     if bu_id is None:
         raise HTTPException(400, "business_unit_id is required")
@@ -217,7 +304,12 @@ def create_action_item(payload: ActionItemIn, user: User = Depends(get_current_u
         ))
         db.commit()
     _log_audit(db, user, "CREATE_ACTION_ITEM", f"id={item.id}")
-    return serialize_action_item(db, item)
+    body = serialize_action_item(db, item)
+    if key is not None:
+        replay = _idempotency_store(db, user, endpoint, key, 200, body)
+        if replay is not None:
+            return replay
+    return body
 
 
 class ActionItemUpdate(BaseModel):
@@ -476,11 +568,11 @@ def list_staff(business_unit_id: Optional[int] = None, days: int = 30,
                limit: int = 200, offset: int = 0,
                user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     bu_id = bu_scope(user, business_unit_id)
-    since = today_local() - timedelta(days=days)
+    since = today_local() - timedelta(days=clamp_days(days))
     q = db.query(StaffRecord).filter(StaffRecord.report_date >= since)
     if bu_id is not None:
         q = q.filter(StaffRecord.business_unit_id == bu_id)
-    rows = q.order_by(StaffRecord.report_date.desc()).offset(offset).limit(limit).all()
+    rows = q.order_by(StaffRecord.report_date.desc()).offset(clamp_offset(offset)).limit(clamp_limit(limit)).all()
     return {"items": [
         {"id": r.id, "business_unit_id": r.business_unit_id, "report_date": r.report_date.isoformat(),
          "total_staff": r.total_staff, "present": r.present, "absent": r.absent,
@@ -528,11 +620,11 @@ def list_customers(business_unit_id: Optional[int] = None, days: int = 30,
                    limit: int = 200, offset: int = 0,
                    user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     bu_id = bu_scope(user, business_unit_id)
-    since = today_local() - timedelta(days=days)
+    since = today_local() - timedelta(days=clamp_days(days))
     q = db.query(CustomerMetric).filter(CustomerMetric.report_date >= since)
     if bu_id is not None:
         q = q.filter(CustomerMetric.business_unit_id == bu_id)
-    rows = q.order_by(CustomerMetric.report_date.desc()).offset(offset).limit(limit).all()
+    rows = q.order_by(CustomerMetric.report_date.desc()).offset(clamp_offset(offset)).limit(clamp_limit(limit)).all()
     return {"items": [
         {"id": r.id, "business_unit_id": r.business_unit_id, "report_date": r.report_date.isoformat(),
          "footfall": r.footfall, "transactions": r.transactions, "complaints": r.complaints,
@@ -611,7 +703,7 @@ def list_documents(business_unit_id: Optional[int] = None, expiring_soon: bool =
     q = db.query(LicenseDocument)
     if bu_id is not None:
         q = q.filter(LicenseDocument.business_unit_id == bu_id)
-    rows = q.order_by(LicenseDocument.expiry_date.asc()).offset(offset).limit(limit).all()
+    rows = q.order_by(LicenseDocument.expiry_date.asc()).offset(clamp_offset(offset)).limit(clamp_limit(limit)).all()
     items = [serialize_document(db, d) for d in rows]
     if expiring_soon:
         items = [i for i in items if i["days_left"] is not None and i["days_left"] <= 30]
@@ -619,7 +711,14 @@ def list_documents(business_unit_id: Optional[int] = None, expiring_soon: bool =
 
 
 @router.post("/documents")
-def create_document(payload: DocumentIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_document(payload: DocumentIn, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # m-10: same Idempotency-Key replay as create_action_item.
+    endpoint = "POST /api/ops/documents"
+    key = _idempotency_key(request)
+    if key is not None:
+        replay = _idempotency_replay(db, user, endpoint, key)
+        if replay is not None:
+            return replay
     bu_id = bu_scope(user, payload.business_unit_id)
     if bu_id is None:
         raise HTTPException(400, "business_unit_id is required")
@@ -633,7 +732,12 @@ def create_document(payload: DocumentIn, user: User = Depends(get_current_user),
     db.commit()
     db.refresh(d)
     _log_audit(db, user, "CREATE_DOCUMENT", f"id={d.id}")
-    return serialize_document(db, d)
+    body = serialize_document(db, d)
+    if key is not None:
+        replay = _idempotency_store(db, user, endpoint, key, 200, body)
+        if replay is not None:
+            return replay
+    return body
 
 
 @router.delete("/documents/{document_id}")
@@ -652,12 +756,17 @@ def delete_document(document_id: int, user: User = Depends(get_current_user), db
 def check_document_expiry(days: int = 30, user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Notify each BU's CEO + all Chairman/HO about documents expiring within
     `days`. Throttled per document to one alert per 7 days."""
+    # m-01: clamp before the audit line so the logged value is the one used.
+    days = clamp_days(days)
     _log_audit(db, user, "CHECK_DOCUMENT_EXPIRY", f"days={days}")
     return run_check_document_expiry(db, days)
 
 
 def run_check_document_expiry(db: Session, days: int = 30) -> dict:
     """Job-callable: notify CEOs + Chairman/HO about documents expiring soon."""
+    # m-01: the cron job calls this directly, so clamp here too — a huge
+    # days used to overflow timedelta() and 500 the 08:30 run.
+    days = clamp_days(days)
     today = today_local()
     horizon = today + timedelta(days=days)
     docs = db.query(LicenseDocument).filter(

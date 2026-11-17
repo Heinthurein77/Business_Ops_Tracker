@@ -35,10 +35,13 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSIONS = ROOT / "alembic" / "versions"
-# Current head after the action-item reminder column (2026-11-17):
-# b7c2e9a4d1f5, on top of the ERP-removal drop a720b6b7c616.
-CURRENT_HEAD = "b7c2e9a4d1f5"
-CURRENT_HEAD_DOWN = "a720b6b7c616"
+# Current head after the idempotency_keys table (m-10, 2026-11-17):
+# 621509460777, on top of the action-item reminder column b7c2e9a4d1f5.
+CURRENT_HEAD = "621509460777"
+CURRENT_HEAD_DOWN = "b7c2e9a4d1f5"
+# The one-way ERP-removal drop migration: downgrade base peels off every
+# reversible migration above it, then refuses here.
+ONE_WAY_REVISION = "a720b6b7c616"
 
 
 # ------------------------------------------------------------------ helpers
@@ -137,13 +140,14 @@ def test_upgrade_head_then_downgrade_base_is_clean(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert not [t for t in tables if t.startswith("_alembic_tmp_")], (
         "leftover batch temp tables after upgrade head")
-    # 22 tracker data tables + alembic_version (48 ERP tables dropped).
+    # 23 tracker data tables + alembic_version (48 ERP tables dropped).
     assert tables == {
         "action_items", "activity_logs", "alembic_version", "audit_logs",
         "business_units", "ceo_profiles", "customer_metrics",
         "daily_financials", "financial_notes", "health_statuses",
         "ho_activity_logs", "ho_daily_financials", "ho_health_statuses",
-        "ho_monthly_targets", "ho_social_logs", "job_heartbeats",
+        "ho_monthly_targets", "ho_social_logs", "idempotency_keys",
+        "job_heartbeats",
         "license_documents", "monthly_targets", "notifications",
         "password_reset_requests", "social_logs", "staff_records", "users",
     }, f"unexpected tables after upgrade head: {sorted(tables)}"
@@ -154,14 +158,16 @@ def test_upgrade_head_then_downgrade_base_is_clean(tmp_path):
     down = _run_alembic(url, "downgrade", "base")
     assert down.returncode != 0, "downgrade past the ERP-removal migration must refuse"
     assert "one-way" in (down.stdout + down.stderr)
-    # Nothing was dropped: the downgrade peeled off only the reversible
-    # migrations above the one-way drop migration, then refused there —
-    # so the DB sits one step below head (same tables, same data).
+    # Nothing else was dropped: the downgrade peeled off only the
+    # reversible migrations above the one-way drop migration (the
+    # idempotency_keys table and the reminder column), then refused
+    # there — so the DB sits at the one-way revision, minus the
+    # idempotency_keys table only.
     assert _query(db_path, "SELECT version_num FROM alembic_version") == [
-        (CURRENT_HEAD_DOWN,)]
+        (ONE_WAY_REVISION,)]
     tables_after = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
-    assert tables_after == tables
+    assert tables_after == tables - {"idempotency_keys"}
     assert not [t for t in tables_after if t.startswith("_alembic_tmp_")]
     conn.close()
 
