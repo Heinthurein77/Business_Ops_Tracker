@@ -917,8 +917,15 @@ def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
             headers={"Content-Disposition": f'attachment; filename="ops_{tab}.xlsx"'},
         )
 
-    def scoped(q, model):
-        return q.filter(model.business_unit_id == bu_id).all() if bu_id is not None else q.all()
+    def scoped(q, model, limit):
+        # The BU filter must be applied BEFORE .limit(): SQLAlchemy
+        # forbids .filter() on a query that already has LIMIT applied, so
+        # filtering here (after the caller already limited) 500d the CEO
+        # path while the Chairman path — which never filters — worked fine
+        # and hid the bug.
+        if bu_id is not None:
+            q = q.filter(model.business_unit_id == bu_id)
+        return q.limit(limit).all()
 
     def user_names(ids):
         """PM-3: one IN query for many user names (was: one query per row)."""
@@ -931,8 +938,8 @@ def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
     if tab == "actions":
         q = apply_date_filter(
             db.query(ActionItem).order_by(ActionItem.created_at.desc()),
-            ActionItem.created_at, OPS_EXPORT_DEFAULT_DAYS).limit(limit)
-        rows = scoped(q, ActionItem)
+            ActionItem.created_at, OPS_EXPORT_DEFAULT_DAYS)
+        rows = scoped(q, ActionItem, limit)
         names = user_names([i.assigned_to_id for i in rows])
         return build("Action Items",
                      ["Title", "BU", "Status", "Due Date", "Assigned To", "Created"],
@@ -944,8 +951,8 @@ def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
     if tab == "documents":
         q = apply_date_filter(
             db.query(LicenseDocument).order_by(LicenseDocument.expiry_date.asc()),
-            LicenseDocument.expiry_date).limit(limit)
-        rows = scoped(q, LicenseDocument)
+            LicenseDocument.expiry_date)
+        rows = scoped(q, LicenseDocument, limit)
         return build("Documents",
                      ["Title", "Type", "BU", "Issue Date", "Expiry Date", "Days Left", "Notes"],
                      [[d.title, d.document_type, bu_names.get(d.business_unit_id, ""),
@@ -955,16 +962,16 @@ def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
                        d.notes or ""] for d in rows])
 
     if tab == "staff":
-        q = db.query(StaffRecord).order_by(StaffRecord.report_date.desc()).limit(500)
-        rows = scoped(q, StaffRecord)
+        q = db.query(StaffRecord).order_by(StaffRecord.report_date.desc())
+        rows = scoped(q, StaffRecord, 500)
         return build("Staff",
                      ["Date", "BU", "Total", "Present", "Absent", "New Hires", "Resignations"],
                      [[s.report_date.isoformat() if s.report_date else "", bu_names.get(s.business_unit_id, ""),
                        s.total_staff, s.present, s.absent, s.new_hires, s.resignations] for s in rows])
 
     if tab == "customers":
-        q = db.query(CustomerMetric).order_by(CustomerMetric.report_date.desc()).limit(500)
-        rows = scoped(q, CustomerMetric)
+        q = db.query(CustomerMetric).order_by(CustomerMetric.report_date.desc())
+        rows = scoped(q, CustomerMetric, 500)
         return build("Customers",
                      ["Date", "BU", "Footfall", "Transactions", "Complaints", "Satisfaction (1-5)"],
                      [[c.report_date.isoformat() if c.report_date else "", bu_names.get(c.business_unit_id, ""),

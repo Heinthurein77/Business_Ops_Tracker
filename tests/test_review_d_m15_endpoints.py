@@ -27,6 +27,7 @@ from src.auth import hash_password as make_hash
 from src.database import get_db
 from src.main import app
 from src.models import (
+    ActionItem,
     Base,
     BusinessUnit,
     DailyFinancial,
@@ -365,3 +366,38 @@ class TestOpsDocuments:
 
     def test_check_expiry_ceo_denied(self, ceo):
         assert ceo.post("/api/ops/documents/check-expiry").status_code == 403
+
+
+# ---------------------------------------------------------------- ops Excel export (merge follow-up)
+
+class TestOpsExportExcel:
+    def test_ceo_export_all_tabs_ok(self, ceo):
+        # Merge follow-up: scoped() called .filter() AFTER .limit() —
+        # SQLAlchemy forbids filtering a limited query, so every CEO
+        # export 500d while the Chairman path (no filter, plain .all())
+        # worked fine and hid the bug.
+        for tab in ("actions", "documents", "staff", "customers"):
+            r = ceo.get(f"/api/ops/export-excel?tab={tab}")
+            assert r.status_code == 200, (tab, r.text)
+            assert "spreadsheetml.sheet" in r.headers.get("content-type", "")
+
+    def test_ceo_export_is_bu_scoped(self, ceo, http_db):
+        # A CEO's export must contain only their own BU's rows, not the
+        # other BU's — the filter that 500d was also the scoping itself.
+        # (xlsx is a zip, so parse it with openpyxl rather than grepping
+        # the raw bytes.)
+        from io import BytesIO
+
+        from openpyxl import load_workbook
+
+        http_db.add(ActionItem(business_unit_id=2, title="other BU item",
+                               status="pending", created_by_id=4))
+        http_db.add(ActionItem(business_unit_id=1, title="own BU item",
+                               status="pending", created_by_id=3))
+        http_db.commit()
+        r = ceo.get("/api/ops/export-excel?tab=actions")
+        assert r.status_code == 200, r.text
+        ws = load_workbook(BytesIO(r.content)).active
+        titles = [row[0] for row in ws.iter_rows(min_row=2, values_only=True)]
+        assert "own BU item" in titles
+        assert "other BU item" not in titles
