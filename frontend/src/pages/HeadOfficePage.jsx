@@ -104,9 +104,6 @@ export default function HeadOfficePage() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  // SC-1: the report saved but its journal did not post — a persistent
-  // warning with a retry, never the success banner.
-  const [journalWarning, setJournalWarning] = useState('');
   // SM-5: when the dashboard data was last refreshed.
   const [updatedAt, setUpdatedAt] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -299,16 +296,9 @@ export default function HeadOfficePage() {
 
     setSubmitting(true);
     try {
-      const res = await api.submitHoReport(formData);
-      // SC-1: the report is saved but its journal did not post — do NOT
-      // show the success banner. Keep the form as-is for a retry.
-      if (res && res.auto_post_failed) {
-        setJournalWarning(`Report saved, but the journal did NOT post${res.auto_post_error ? ` — ${res.auto_post_error}` : ''}. Your numbers are filed; re-post the journal from Journal Failures, or resubmit the report.`);
-      } else {
-        setJournalWarning('');
-        setSuccess(true);
-        clearDraft('ho-daily-report');
-      }
+      await api.submitHoReport(formData);
+      setSuccess(true);
+      clearDraft('ho-daily-report');
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Failed to submit report');
@@ -452,13 +442,6 @@ export default function HeadOfficePage() {
               <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
             </svg>
             <span>Your daily report for {reportDateDisplay} has been submitted successfully.</span>
-          </div>
-        )}
-        {isHo && journalWarning && (
-          <div className={`${GLASS} px-5 py-4 text-sm text-amber-800 dark:text-amber-300 flex items-center gap-3 flex-wrap`}>
-            <span className="flex-1">{journalWarning}</span>
-            <button onClick={() => handleSubmit()} disabled={submitting} className="shrink-0 text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50">Resubmit report</button>
-            <button onClick={() => setJournalWarning('')} className="shrink-0 text-xs font-bold text-amber-700 dark:text-amber-400 hover:underline">Dismiss</button>
           </div>
         )}
         {error && (

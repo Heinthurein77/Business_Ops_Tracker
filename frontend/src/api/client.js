@@ -36,9 +36,8 @@ async function handle(response) {
       // the login page say "your session expired" instead of a bare
       // redirect, and the event lets AuthContext drop the user immediately
       // (ProtectedRoute then sends the tab to /login). In-flight form
-      // data is NOT lost: the daily-report / PO / invoice forms persist
-      // their drafts to localStorage (see utils/drafts.js) and restore
-      // them after re-login.
+      // data is NOT lost: the daily-report forms persist their drafts to
+      // localStorage (see utils/drafts.js) and restore them after re-login.
       try {
         sessionStorage.setItem('bot-session-expired', '1');
         window.dispatchEvent(new CustomEvent('session-expired'));
@@ -49,44 +48,17 @@ async function handle(response) {
   return body;
 }
 
-// F-3 / CM-6: every money POST carries an Idempotency-Key so the server
-// can return the stored response instead of re-executing when a request
-// is retried after a lost response. One key per logical action: postMoney
-// generates the key once and reuses it across that action's retry, while
-// a new action gets a fresh key. postJson also sends a fresh key unless
-// the caller supplies one, so any postJson money call is covered too.
-function newIdempotencyKey() {
-  try {
-    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
-  } catch { /* fall through to the Math.random fallback below */ }
-  return `key-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
 function getJson(path) {
   return fetch(path, { credentials: 'include' }).then(handle);
 }
 
-function postJson(path, data, options = {}) {
+function postJson(path, data) {
   return fetch(path, {
     method: 'POST',
     credentials: 'include',
-    headers: { ...JSON_HEADERS, 'Idempotency-Key': options.idempotencyKey || newIdempotencyKey() },
+    headers: JSON_HEADERS,
     body: JSON.stringify(data ?? {}),
   }).then(handle);
-}
-
-// Money actions (the endpoints that read Idempotency-Key server-side):
-// one key per logical action, reused if the request has to be retried
-// after a network failure. Only network-level failures are retried —
-// an HTTP error means the server answered, so it is never re-sent.
-async function postMoney(path, data) {
-  const key = newIdempotencyKey();
-  try {
-    return await postJson(path, data, { idempotencyKey: key });
-  } catch (err) {
-    if (err instanceof TypeError) return postJson(path, data, { idempotencyKey: key });
-    throw err;
-  }
 }
 
 function postForm(path, formData) {
@@ -154,13 +126,6 @@ export const api = {
   listPasswordResets: () => getJson('/api/admin/password-resets'),
   approvePasswordReset: (id) => postJson(`/api/admin/password-resets/${id}/approve`),
   rejectPasswordReset: (id) => postJson(`/api/admin/password-resets/${id}/reject`),
-  // ---- Journal failures (SC-1): operations whose journal never posted ----
-  journalFailures: () => getJson('/api/admin/journal-failures'),
-  // Re-post endpoint (workstream A): POST /api/accounting/journal/retry
-  // {"source": "...", "source_id": <id>} — returns already_posted:true if a
-  // journal has since appeared, 404 if the source is unknown, 409 if it
-  // still cannot post.
-  retryJournal: (source, sourceId) => postMoney('/api/accounting/journal/retry', { source, source_id: sourceId }),
   exportExcelUrl: (startDate, endDate) => {
     const params = new URLSearchParams();
     if (startDate) params.set('start_date', startDate);
@@ -169,7 +134,7 @@ export const api = {
     return `/api/admin/export-excel${query ? `?${query}` : ''}`;
   },
 
-  // ---- Operations extensions ----
+  // ---- Operations extensions (tracker daily ops) ----
   listActionItems: (params = {}) => {
     const q = new URLSearchParams();
     if (params.business_unit_id) q.set('business_unit_id', params.business_unit_id);
@@ -190,29 +155,6 @@ export const api = {
   markNotificationRead: (id) => postJson(`/api/ops/notifications/${id}/read`),
   markAllNotificationsRead: () => postJson('/api/ops/notifications/read-all'),
   remindMissingReports: () => postJson('/api/ops/notifications/remind-missing'),
-
-  listInventory: (params = {}) => {
-    const q = new URLSearchParams();
-    if (params.business_unit_id) q.set('business_unit_id', params.business_unit_id);
-    if (params.low_only) q.set('low_only', 'true');
-    const query = q.toString();
-    return getJson(`/api/ops/inventory${query ? `?${query}` : ''}`);
-  },
-  createInventoryItem: (payload) => postJson('/api/ops/inventory', payload),
-  recordStockMovement: (id, payload) => postJson(`/api/ops/inventory/${id}/movements`, payload),
-  deleteInventoryItem: (id) => fetch(`/api/ops/inventory/${id}`, {
-    method: 'DELETE', credentials: 'include',
-  }).then(handle),
-
-  listExpenses: (params = {}) => {
-    const q = new URLSearchParams();
-    if (params.business_unit_id) q.set('business_unit_id', params.business_unit_id);
-    if (params.status) q.set('status', params.status);
-    const query = q.toString();
-    return getJson(`/api/ops/expenses${query ? `?${query}` : ''}`);
-  },
-  submitExpense: (payload) => postJson('/api/ops/expenses', payload),
-  reviewExpense: (id, payload) => postMoney(`/api/ops/expenses/${id}/review`, payload),
 
   submitStaff: (payload) => postJson('/api/ops/staff', payload),
   listStaff: (params = {}) => {
@@ -244,41 +186,6 @@ export const api = {
     method: 'DELETE', credentials: 'include',
   }).then(handle),
   checkDocumentExpiry: () => postJson('/api/ops/documents/check-expiry'),
-  // ---- Procurement (ERP Phase 3) ----
-  listSuppliers: (buId) => getJson(`/api/ops/suppliers${buId ? `?business_unit_id=${buId}` : ''}`),
-  createSupplier: (payload) => postJson('/api/ops/suppliers', payload),
-  deleteSupplier: (id) => fetch(`/api/ops/suppliers/${id}`, { method: 'DELETE', credentials: 'include' }).then(handle),
-  listPOs: (buId) => getJson(`/api/ops/purchase-orders${buId ? `?business_unit_id=${buId}` : ''}`),
-  createPO: (payload) => postMoney('/api/ops/purchase-orders', payload),
-  orderPO: (id) => postJson(`/api/ops/purchase-orders/${id}/order`),
-  receivePO: (id) => postMoney(`/api/ops/purchase-orders/${id}/receive`),
-  payPO: (id) => postMoney(`/api/ops/purchase-orders/${id}/pay`),
-  cancelPO: (id) => postJson(`/api/ops/purchase-orders/${id}/cancel`),
-  transferStock: (itemId, payload) => postMoney(`/api/ops/inventory/${itemId}/transfer`, payload),
-  // ---- Sales & receivables (ERP Phase 4) ----
-  listSalesCustomers: (buId) => getJson(`/api/ops/sales-customers${buId ? `?business_unit_id=${buId}` : ''}`),
-  createSalesCustomer: (payload) => postJson('/api/ops/sales-customers', payload),
-  deleteSalesCustomer: (id) => fetch(`/api/ops/sales-customers/${id}`, { method: 'DELETE', credentials: 'include' }).then(handle),
-  listInvoices: (buId) => getJson(`/api/ops/invoices${buId ? `?business_unit_id=${buId}` : ''}`),
-  createInvoice: (payload) => postMoney('/api/ops/invoices', payload),
-  sendInvoice: (id) => postMoney(`/api/ops/invoices/${id}/send`),
-  cancelInvoice: (id) => postJson(`/api/ops/invoices/${id}/cancel`),
-  recordInvoicePayment: (id, payload) => postMoney(`/api/ops/invoices/${id}/payments`, payload),
-  aging: (buId) => getJson(`/api/ops/aging${buId ? `?business_unit_id=${buId}` : ''}`),
-  // ---- HR & payroll (ERP Phase 5) ----
-  listEmployees: (buId) => getJson(`/api/ops/employees${buId ? `?business_unit_id=${buId}` : ''}`),
-  createEmployee: (payload) => postJson('/api/ops/employees', payload),
-  deleteEmployee: (id) => fetch(`/api/ops/employees/${id}`, { method: 'DELETE', credentials: 'include' }).then(handle),
-  listLeave: (buId) => getJson(`/api/ops/leave-requests${buId ? `?business_unit_id=${buId}` : ''}`),
-  createLeave: (payload) => postJson('/api/ops/leave-requests', payload),
-  reviewLeave: (id, payload) => postJson(`/api/ops/leave-requests/${id}/review`, payload),
-  listPayroll: (buId) => getJson(`/api/ops/payroll-runs${buId ? `?business_unit_id=${buId}` : ''}`),
-  createPayroll: (payload) => postJson('/api/ops/payroll-runs', payload),
-  updatePayrollLine: (runId, lineId, payload) => fetch(`/api/ops/payroll-runs/${runId}/lines/${lineId}`, {
-    method: 'PATCH', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
-  }).then(handle),
-  approvePayroll: (id) => postJson(`/api/ops/payroll-runs/${id}/approve`),
-  payPayroll: (id) => postMoney(`/api/ops/payroll-runs/${id}/pay`),
   monthlyReportUrl: (month) => `/api/ops/monthly-report${month ? `?month=${month}` : ''}`,
   opsExportUrl: (tab, buId) => {
     const q = new URLSearchParams({ tab: tab || 'actions' });
@@ -286,187 +193,12 @@ export const api = {
     return `/api/ops/export-excel?${q.toString()}`;
   },
 
-  // ---- Accounting (ERP Phase 1) ----
-  accBusinessUnits: () => getJson('/api/accounting/business-units'),
-  accProvision: (buId, template) => postJson(`/api/accounting/provision/${buId}?template=${template}`),
-  accCoa: (buId) => getJson(`/api/accounting/coa?business_unit_id=${buId}`),
-  accCreateAccount: (payload) => postJson('/api/accounting/accounts', payload),
-  accUpdateAccount: (id, payload) => fetch(`/api/accounting/accounts/${id}`, {
-    method: 'PATCH', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
-  }).then(handle),
-  accJournal: (buId, params = {}) => {
-    const q = new URLSearchParams({ business_unit_id: buId });
-    if (params.status) q.set('status', params.status);
-    if (params.source) q.set('source', params.source);
-    if (params.period) q.set('period', params.period);
-    return getJson(`/api/accounting/journal?${q.toString()}`);
-  },
-  accCreateJournal: (payload) => postJson('/api/accounting/journal', payload),
-  accPostJournal: (id) => postMoney(`/api/accounting/journal/${id}/post`),
-  accReverseJournal: (id) => postJson(`/api/accounting/journal/${id}/reverse`),
-  accDeleteJournal: (id) => fetch(`/api/accounting/journal/${id}`, {
-    method: 'DELETE', credentials: 'include',
-  }).then(handle),
-  accTrialBalance: (buId, period) => getJson(`/api/accounting/trial-balance?business_unit_id=${buId}${period ? `&period=${period}` : ''}`),
-  accLedger: (accountId, period) => getJson(`/api/accounting/ledger?account_id=${accountId}${period ? `&period=${period}` : ''}`),
-  accPL: (buId, period) => getJson(`/api/accounting/reports/pl?business_unit_id=${buId}${period ? `&period=${period}` : ''}`),
-  accBS: (buId, period) => getJson(`/api/accounting/reports/balance-sheet?business_unit_id=${buId}${period ? `&period=${period}` : ''}`),
-  accPeriods: (buId) => getJson(`/api/accounting/periods?business_unit_id=${buId}`),
-  accClosePeriod: (payload) => postJson('/api/accounting/periods/close', payload),
-  accReopenPeriod: (payload) => postJson('/api/accounting/periods/reopen', payload),
-  accConsolidatedPL: (period) => getJson(`/api/accounting/reports/consolidated-pl${period ? `?period=${period}` : ''}`),
-  accConsolidatedBS: (period) => getJson(`/api/accounting/reports/consolidated-bs${period ? `?period=${period}` : ''}`),
-  accBuComparison: (period) => getJson(`/api/accounting/reports/bu-comparison${period ? `?period=${period}` : ''}`),
-  // ---- Fixed assets & banking (ERP Phase 6) ----
-  accFixedAssets: (buId) => getJson(`/api/accounting/fixed-assets?business_unit_id=${buId}`),
-  accCreateAsset: (payload) => postJson('/api/accounting/fixed-assets', payload),
-  accDisposeAsset: (id) => postJson(`/api/accounting/fixed-assets/${id}/dispose`),
-  accDepreciate: (payload) => postJson('/api/accounting/fixed-assets/depreciate', payload),
-  accBankAccounts: (buId) => getJson(`/api/accounting/bank-accounts?business_unit_id=${buId}`),
-  accCreateBankAccount: (payload) => postJson('/api/accounting/bank-accounts', payload),
-  accBankTxns: (bankId) => getJson(`/api/accounting/bank-accounts/${bankId}/transactions`),
-  accAddBankTxn: (bankId, payload) => postJson(`/api/accounting/bank-accounts/${bankId}/transactions`, payload),
-  accSetReconciled: (txnId, isReconciled) => fetch(`/api/accounting/bank-transactions/${txnId}`, {
-    method: 'PATCH', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify({ is_reconciled: isReconciled }),
-  }).then(handle),
-  accReconciliation: (bankId) => getJson(`/api/accounting/bank-accounts/${bankId}/reconciliation`),
-  // ---- Go-live setup (opening balances, posting rules, exports) ----
-  accPostingRules: () => getJson('/api/accounting/posting-rules'),
-  accSavePostingRule: (payload) => fetch('/api/accounting/posting-rules', {
-    method: 'PUT', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
-  }).then(handle),
-  accOpeningTemplateUrl: (buId) => `/api/accounting/opening-balance/template?business_unit_id=${buId}`,
-  accUploadOpeningBalance: async (buId, asOf, file) => {
-    const fd = new FormData();
-    fd.append('file', file);
-    const res = await fetch(`/api/accounting/opening-balance?business_unit_id=${buId}&as_of=${asOf}`, {
-      method: 'POST', credentials: 'include', body: fd,
-    });
-    return handle(res);
-  },
-  accExportUrl: (report, format, buId, period) => {
-    const q = new URLSearchParams({ report, format });
-    if (buId) q.set('business_unit_id', buId);
-    if (period) q.set('period', period);
-    return `/api/accounting/reports/export?${q.toString()}`;
-  },
-  // ---- ERP B/C/D additions ----
-  accFinanceSummary: () => getJson('/api/accounting/finance-summary'),
-  accTaxReport: (buId, period) => getJson(`/api/accounting/reports/tax?business_unit_id=${buId}&period=${period}`),
-  accCashFlow: (buId, period) => getJson(`/api/accounting/reports/cash-flow?business_unit_id=${buId}&period=${period}`),
-  accYearClose: (buId, year) => fetch('/api/accounting/year-close', {
-    method: 'POST', credentials: 'include', headers: JSON_HEADERS,
-    body: JSON.stringify({ business_unit_id: buId, year }),
-  }).then(handle),
-  accBudgets: (buId, period) => getJson(`/api/accounting/budgets?business_unit_id=${buId}&period=${period}`),
-  accSaveBudget: (payload) => fetch('/api/accounting/budgets', {
-    method: 'PUT', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
-  }).then(handle),
-  accDeleteBudget: (id) => fetch(`/api/accounting/budgets/${id}`, { method: 'DELETE', credentials: 'include' }).then(handle),
-  accExchangeRates: (currency = 'USD') => getJson(`/api/accounting/exchange-rates?currency=${currency}`),
-  accCreateRate: (payload) => fetch('/api/accounting/exchange-rates', {
-    method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
-  }).then(handle),
-  accIntercompany: () => getJson('/api/accounting/intercompany'),
-  accCreateIntercompany: (payload) => fetch('/api/accounting/intercompany', {
-    method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
-  }).then(handle),
-  accSettleIntercompany: (id) => fetch(`/api/accounting/intercompany/${id}/settle`, {
-    method: 'POST', credentials: 'include',
-    headers: { 'Idempotency-Key': newIdempotencyKey() },
-  }).then(handle),
-  opsUploadReceipt: async (expenseId, file) => {
-    const fd = new FormData();
-    fd.append('file', file);
-    const res = await fetch(`/api/ops/expenses/${expenseId}/receipt`, { method: 'POST', credentials: 'include', body: fd });
-    return handle(res);
-  },
   // ---- Business units (management) ----
   adminBusinessUnits: () => getJson('/api/admin/business-units'),
   adminCreateBU: (payload) => postJson('/api/admin/business-units', payload),
   adminUpdateBU: (id, payload) => fetch(`/api/admin/business-units/${id}`, {
     method: 'PATCH', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
   }).then(handle),
-  opsPayslipUrl: (runId, lineId) => `/api/ops/payroll-runs/${runId}/lines/${lineId}/payslip`,
-  opsStatementUrl: (customerId, format) => `/api/ops/sales-customers/${customerId}/statement?format=${format}`,
-  // ---- Nature modules (batches, projects, shipments, production, real estate, principal) ----
-  modBatches: (itemId) => getJson(`/api/modules/inventory/${itemId}/batches`),
-  modReceiveBatch: (itemId, payload) => fetch(`/api/modules/inventory/${itemId}/batches`, {
-    method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
-  }).then(handle),
-  modExpiring: (buId, days = 30) => getJson(`/api/modules/expiring?days=${days}${buId ? `&business_unit_id=${buId}` : ''}`),
-  modProjects: (buId) => getJson(`/api/modules/projects${buId ? `?business_unit_id=${buId}` : ''}`),
-  modCreateProject: (payload) => fetch('/api/modules/projects', {
-    method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
-  }).then(handle),
-  modProjectStatus: (id, status) => fetch(`/api/modules/projects/${id}/status?status=${status}`, { method: 'POST', credentials: 'include' }).then(handle),
-  modProjectPL: (id) => getJson(`/api/modules/projects/${id}/pl`),
-  modShipments: (buId) => getJson(`/api/modules/shipments${buId ? `?business_unit_id=${buId}` : ''}`),
-  modCreateShipment: (payload) => fetch('/api/modules/shipments', {
-    method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
-  }).then(handle),
-  modShipmentStatus: (id, status) => fetch(`/api/modules/shipments/${id}/status?status=${status}`, { method: 'POST', credentials: 'include' }).then(handle),
-  modBoms: (buId) => getJson(`/api/modules/boms${buId ? `?business_unit_id=${buId}` : ''}`),
-  modCreateBom: (payload) => fetch('/api/modules/boms', {
-    method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
-  }).then(handle),
-  modProduction: (buId) => getJson(`/api/modules/production-orders${buId ? `?business_unit_id=${buId}` : ''}`),
-  modCreateProduction: (payload) => fetch('/api/modules/production-orders', {
-    method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
-  }).then(handle),
-  modCompleteProduction: (id) => fetch(`/api/modules/production-orders/${id}/complete`, { method: 'POST', credentials: 'include' }).then(handle),
-  modUnits: (buId) => getJson(`/api/modules/property-units${buId ? `?business_unit_id=${buId}` : ''}`),
-  modCreateUnit: (payload) => fetch('/api/modules/property-units', {
-    method: 'POST', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
-  }).then(handle),
-  modSellUnit: (id, payload) => fetch(`/api/modules/property-units/${id}/sell`, {
-    method: 'POST', credentials: 'include',
-    headers: { ...JSON_HEADERS, 'Idempotency-Key': newIdempotencyKey() },
-    body: JSON.stringify(payload),
-  }).then(handle),
-  modLeases: (buId) => getJson(`/api/modules/leases${buId ? `?business_unit_id=${buId}` : ''}`),
-  modCreateLease: (payload) => fetch('/api/modules/leases', {
-    method: 'POST', credentials: 'include',
-    headers: { ...JSON_HEADERS, 'Idempotency-Key': newIdempotencyKey() },
-    body: JSON.stringify(payload),
-  }).then(handle),
-  modBillLease: (id, period) => fetch(`/api/modules/leases/${id}/bill${period ? `?period=${period}` : ''}`, { method: 'POST', credentials: 'include', headers: { 'Idempotency-Key': newIdempotencyKey() } }).then(handle),
-  modPrincipalReport: (buId, period) => getJson(`/api/modules/principal-report?${new URLSearchParams({ ...(buId ? { business_unit_id: buId } : {}), ...(period ? { period } : {}) })}`),
-  // ---- ERP completion: POS, quotations, returns, transfers, serials, advances, attendance ----
-  listPosSales: (buId, saleDate) => getJson(`/api/ops/pos-sales?${new URLSearchParams({ ...(buId ? { business_unit_id: buId } : {}), ...(saleDate ? { sale_date: saleDate } : {}) })}`),
-  createPosSale: (payload) => postMoney('/api/ops/pos-sales', payload),
-  voidPosSale: (id) => postMoney(`/api/ops/pos-sales/${id}/void`),
-  posDailySummary: (buId, day) => getJson(`/api/ops/pos-sales/daily-summary?${new URLSearchParams({ ...(buId ? { business_unit_id: buId } : {}), ...(day ? { date: day } : {}) })}`),
-  listQuotations: (buId) => getJson(`/api/ops/quotations${buId ? `?business_unit_id=${buId}` : ''}`),
-  createQuotation: (payload) => postJson('/api/ops/quotations', payload),
-  setQuotationStatus: (id, status) => postJson(`/api/ops/quotations/${id}/status`, { status }),
-  convertQuotation: (id) => postJson(`/api/ops/quotations/${id}/convert`),
-  invoicePdfUrl: (id) => `/api/ops/sales-invoices/${id}/pdf`,
-  deliveryNoteUrl: (id) => `/api/ops/sales-invoices/${id}/delivery-note`,
-  listSalesReturns: (buId, invoiceId) => getJson(`/api/ops/sales-returns?${new URLSearchParams({ ...(buId ? { business_unit_id: buId } : {}), ...(invoiceId ? { invoice_id: invoiceId } : {}) })}`),
-  createSalesReturn: (payload) => postMoney('/api/ops/sales-returns', payload),
-  listPurchaseReturns: (buId, poId) => getJson(`/api/ops/purchase-returns?${new URLSearchParams({ ...(buId ? { business_unit_id: buId } : {}), ...(poId ? { po_id: poId } : {}) })}`),
-  createPurchaseReturn: (payload) => postMoney('/api/ops/purchase-returns', payload),
-  modStockTransfers: (params = {}) => getJson(`/api/modules/stock-transfers?${new URLSearchParams({ ...(params.from ? { from_business_unit_id: params.from } : {}), ...(params.to ? { to_business_unit_id: params.to } : {}), ...(params.status ? { status: params.status } : {}) })}`),
-  modCreateTransfer: (payload) => postJson('/api/modules/stock-transfers', payload),
-  modSendTransfer: (id) => postMoney(`/api/modules/stock-transfers/${id}/send`),
-  modReceiveTransfer: (id) => postMoney(`/api/modules/stock-transfers/${id}/receive`),
-  modCancelTransfer: (id) => postJson(`/api/modules/stock-transfers/${id}/cancel`),
-  listSerials: (itemId, status) => getJson(`/api/ops/inventory/${itemId}/serials${status ? `?status=${status}` : ''}`),
-  addSerials: (itemId, payload) => postJson(`/api/ops/inventory/${itemId}/serials`, payload),
-  lookupSerial: (sn) => getJson(`/api/ops/serials/lookup?serial_no=${encodeURIComponent(sn)}`),
-  setSerialStatus: (id, status) => postJson(`/api/ops/serials/${id}/status`, { status }),
-  listAdvances: (buId, status) => getJson(`/api/ops/staff-advances?${new URLSearchParams({ ...(buId ? { business_unit_id: buId } : {}), ...(status ? { status } : {}) })}`),
-  createAdvance: (payload) => postJson('/api/ops/staff-advances', payload),
-  approveAdvance: (id) => postMoney(`/api/ops/staff-advances/${id}/approve`),
-  rejectAdvance: (id) => postJson(`/api/ops/staff-advances/${id}/reject`),
-  approvePO: (id) => postJson(`/api/ops/purchase-orders/${id}/approve`),
-  rejectPOApproval: (id) => postJson(`/api/ops/purchase-orders/${id}/reject-approval`),
-  accApproveJournal: (id) => postMoney(`/api/accounting/journal/${id}/approve`),
-  accRejectJournalApproval: (id) => postMoney(`/api/accounting/journal/${id}/reject-approval`),
-  bulkAttendance: (payload) => postJson('/api/ops/attendance/bulk', payload),
-  listAttendance: (buId, month) => getJson(`/api/ops/attendance?${new URLSearchParams({ ...(buId ? { business_unit_id: buId } : {}), ...(month ? { month } : {}) })}`),
-  leaveBalances: (buId, year) => getJson(`/api/ops/leave-balances?${new URLSearchParams({ ...(buId ? { business_unit_id: buId } : {}), ...(year ? { year } : {}) })}`),
 };
 
 export { ApiError };

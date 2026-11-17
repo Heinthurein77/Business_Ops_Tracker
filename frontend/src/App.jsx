@@ -13,8 +13,7 @@ import CeoReportLogsPage from './pages/CeoReportLogsPage';
 import AdminDashboardPage from './pages/AdminDashboardPage';
 import ComparisonPage from './pages/ComparisonPage';
 import OperationsPage from './pages/OperationsPage';
-import OpsPage from './pages/OpsPage';
-import AccountingPage from './pages/AccountingPage';
+import DailyOpsPage from './pages/DailyOpsPage';
 import ActivityDashboardPage from './pages/ActivityDashboardPage';
 import CeoCalendarPage from './pages/CeoCalendarPage';
 import HealthDashboardPage from './pages/HealthDashboardPage';
@@ -25,7 +24,6 @@ import BusinessUnitDetailPage from './pages/BusinessUnitDetailPage';
 import HeadOfficePage from './pages/HeadOfficePage';
 import ManageUsersPage from './pages/ManageUsersPage';
 import BusinessUnitsPage from './pages/BusinessUnitsPage';
-import JournalFailuresPage from './pages/JournalFailuresPage';
 
 function RootRedirect() {
   const { user, loading } = useAuth();
@@ -109,18 +107,10 @@ export default function App() {
             }
           />
           <Route
-            path="/accounting"
-            element={
-              <ProtectedRoute roles={['Chairman', 'HO', 'Accountant']}>
-                <AccountingPage />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/admin/operations-center"
+            path="/admin/daily-ops"
             element={
               <ProtectedRoute roles={['Chairman', 'HO']}>
-                <OpsPage />
+                <DailyOpsPage />
               </ProtectedRoute>
             }
           />
@@ -201,14 +191,6 @@ export default function App() {
             element={
               <ProtectedRoute roles={['Chairman']}>
                 <ManageUsersPage />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/admin/journal-failures"
-            element={
-              <ProtectedRoute roles={['Chairman', 'HO']}>
-                <JournalFailuresPage />
               </ProtectedRoute>
             }
           />

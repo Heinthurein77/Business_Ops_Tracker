@@ -4,8 +4,7 @@
  * open shows silently stale data indefinitely. Every dashboard renders
  * this next to its title: the time its data was last loaded, plus a manual
  * refresh button that re-runs the page's load(). It does not poll — the
- * user refreshes deliberately, and mutate actions refetch before acting
- * (see the money handlers in OpsPage.jsx).
+ * user refreshes deliberately, and mutate actions refetch before acting.
  */
 export default function LastUpdated({ updatedAt, onRefresh, refreshing }) {
   const label = updatedAt

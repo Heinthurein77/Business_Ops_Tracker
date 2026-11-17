@@ -1,4 +1,3 @@
-import { viewUploadUrl } from '../utils/safeUrl';
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client';
 import { GLASS } from '../utils/glassTheme';
@@ -16,8 +15,6 @@ const labelCls = 'block text-sm font-medium text-slate-700 mb-1.5';
 
 export default function CeoOpsSection() {
   const [tasks, setTasks] = useState([]);
-  const [expenses, setExpenses] = useState([]);
-  const [expForm, setExpForm] = useState({ title: '', amount: '', category: '' });
   const [staffForm, setStaffForm] = useState({ total_staff: '', present: '', absent: '' });
   const [custForm, setCustForm] = useState({ footfall: '', transactions: '', complaints: '', satisfaction_score: '' });
   const [notice, setNotice] = useState('');
@@ -26,7 +23,6 @@ export default function CeoOpsSection() {
   const load = useCallback(async () => {
     try {
       setTasks((await api.listActionItems({ mine: true })).items);
-      setExpenses((await api.listExpenses({})).items.slice(0, 5));
     } catch { /* silent */ }
   }, []);
 
@@ -39,15 +35,6 @@ export default function CeoOpsSection() {
 
   async function completeTask(t) {
     await api.updateActionItem(t.id, { status: 'done' });
-    load();
-  }
-
-  async function submitExpense(e) {
-    e.preventDefault();
-    if (!expForm.title.trim() || !expForm.amount) return;
-    await api.submitExpense({ title: expForm.title.trim(), amount: Number(expForm.amount), category: expForm.category || undefined });
-    setExpForm({ title: '', amount: '', category: '' });
-    flash('Expense submitted for approval.');
     load();
   }
 
@@ -98,34 +85,7 @@ export default function CeoOpsSection() {
         </ul>
       </section>
 
-      <div className="grid lg:grid-cols-3 gap-8">
-        <section className={`${GLASS} p-6`}>
-          <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 mb-1">Approvals</p>
-          <h2 className="font-bold text-slate-900 tracking-tight text-lg mb-4">Submit Expense</h2>
-          <form onSubmit={submitExpense} className="space-y-3">
-            <div><label className={labelCls}>Title</label><input className={inputCls} value={expForm.title} onChange={(e) => setExpForm({ ...expForm, title: e.target.value })} placeholder="e.g. Delivery fuel" /></div>
-            <div><label className={labelCls}>Amount (Ks)</label><input type="number" className={inputCls} value={expForm.amount} onChange={(e) => setExpForm({ ...expForm, amount: e.target.value })} placeholder="0" /></div>
-            <div><label className={labelCls}>Category</label><input className={inputCls} value={expForm.category} onChange={(e) => setExpForm({ ...expForm, category: e.target.value })} placeholder="transport / supplies / other" /></div>
-            <button type="submit" className="w-full bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold py-2.5 rounded-lg transition-colors">Submit for approval</button>
-          </form>
-          {expenses.length > 0 && (
-            <ul className="mt-4 space-y-1.5">
-              {expenses.map((e) => (
-                <li key={e.id} className="flex items-center justify-between gap-2 text-xs">
-                  <span className="text-slate-600 truncate">{e.title} · Ks {Number(e.amount).toLocaleString()}</span>
-                  <span className="flex items-center gap-1.5 flex-shrink-0">
-                    {e.status === 'pending' && e.stage_label && <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300">{e.stage_label}</span>}
-                    {viewUploadUrl(e.receipt_url)
-                      ? <a href={viewUploadUrl(e.receipt_url)} target="_blank" rel="noreferrer" className="font-semibold text-brand-600 hover:underline">Receipt</a>
-                      : <label className="font-semibold text-slate-400 hover:text-brand-600 cursor-pointer">+ Receipt<input type="file" accept="image/*,.pdf" className="hidden" onChange={async (ev) => { const f = ev.target.files?.[0]; if (f) { try { await api.opsUploadReceipt(e.id, f); load(); } catch (err) { flash(err.message); } } }} /></label>}
-                    <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[e.status]}`}>{e.status}</span>
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-
+      <div className="grid lg:grid-cols-2 gap-8">
         <section className={`${GLASS} p-6`}>
           <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 mb-1">Team</p>
           <h2 className="font-bold text-slate-900 tracking-tight text-lg mb-4">Staff Today</h2>
