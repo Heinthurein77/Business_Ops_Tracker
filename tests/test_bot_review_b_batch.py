@@ -282,3 +282,152 @@ class TestAuditGapsClosed:
         resp = view_upload(key="activity-attachments/abc123.png", user=ceo, db=db)
         assert resp.status_code == 302
         assert "VIEW_UPLOAD" in self._audit_actions(db)
+
+
+# ------------------------------------------------------------------ M-05 / M-06
+
+def _scan_engine():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    session.add(User(id=1, username="chairman", hashed_password="x",
+                     role="Chairman", is_active=True))
+    session.commit()
+    session.close()
+    return engine
+
+
+def _seed_heartbeat(engine, job, age_hours, status="ok"):
+    from datetime import timezone as _tz
+    from src.models import JobHeartbeat
+    session = sessionmaker(bind=engine)()
+    session.merge(JobHeartbeat(
+        job_name=job,
+        last_run_at=datetime.now(_tz.utc).replace(tzinfo=None) - timedelta(hours=age_hours),
+        last_status=status))
+    session.commit()
+    session.close()
+
+
+def _notifications(engine):
+    session = sessionmaker(bind=engine)()
+    try:
+        return session.query(Notification).all()
+    finally:
+        session.close()
+
+
+def _stamp(dt):
+    return dt.strftime("%Y-%m-%d %H:%M:%S,000")
+
+
+class TestJobFailureBlindness:
+    def test_failed_heartbeat_is_stale_even_when_fresh(self):
+        import src.jobs.log_scan as log_scan
+        now = datetime(2026, 11, 9, 12, 0, 0)
+        assert log_scan.stale_jobs(
+            [("scheduled_alerts", now - timedelta(hours=1), "failed"),
+             ("log_scan", now - timedelta(hours=1), "ok")], now=now) == ["scheduled_alerts"]
+
+    def test_ok_heartbeat_is_not_stale(self):
+        import src.jobs.log_scan as log_scan
+        now = datetime(2026, 11, 9, 12, 0, 0)
+        assert log_scan.stale_jobs(
+            [("scheduled_alerts", now - timedelta(hours=1), "ok"),
+             ("log_scan", now - timedelta(hours=1), "ok")], now=now) == []
+
+    def test_two_tuple_heartbeats_still_work(self):
+        import src.jobs.log_scan as log_scan
+        now = datetime(2026, 11, 9, 12, 0, 0)
+        assert log_scan.stale_jobs(
+            [("scheduled_alerts", now - timedelta(hours=1)),
+             ("log_scan", now - timedelta(hours=1))], now=now) == []
+
+    def test_check_heartbeats_reads_last_status(self):
+        import src.jobs.log_scan as log_scan
+        engine = _scan_engine()
+        _seed_heartbeat(engine, "scheduled_alerts", 1, status="failed")
+        _seed_heartbeat(engine, "log_scan", 1, status="ok")
+        session = sessionmaker(bind=engine)()
+        try:
+            assert log_scan.check_heartbeats(session) == ["scheduled_alerts"]
+        finally:
+            session.close()
+            engine.dispose()
+
+    def test_failed_heartbeat_notifies_chairman_via_main(self, tmp_path, monkeypatch):
+        import src.jobs.log_scan as log_scan
+        engine = _scan_engine()
+        _seed_heartbeat(engine, "scheduled_alerts", 1, status="failed")
+        _seed_heartbeat(engine, "log_scan", 1, status="ok")
+        log_file = tmp_path / "app.log"
+        log_file.write_text(f"{_stamp(datetime.now() - timedelta(hours=1))} INFO ok\n")
+        monkeypatch.setattr(log_scan, "SessionLocal", sessionmaker(bind=engine))
+        assert log_scan.main(["--log-file", str(log_file), "--hours", "24"]) == 0
+        notes = _notifications(engine)
+        assert len(notes) == 1
+        assert "scheduled_alerts" in notes[0].message
+        engine.dispose()
+
+    def test_scheduled_alerts_failure_notifies_chairman_and_ho(self, monkeypatch, caplog):
+        import src.jobs.scheduled_alerts as scheduled_alerts
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        session = sessionmaker(bind=engine)()
+        session.add_all([
+            User(id=1, username="chairman", hashed_password="x", role="Chairman", is_active=True),
+            User(id=2, username="ho", hashed_password="x", role="HO", is_active=True),
+        ])
+        session.commit()
+        session.close()
+        monkeypatch.setattr(scheduled_alerts, "SessionLocal", sessionmaker(bind=engine))
+        monkeypatch.setattr(scheduled_alerts, "run_remind_missing_reports",
+                            lambda db: (_ for _ in ()).throw(RuntimeError("boom")))
+        with caplog.at_level("ERROR", logger="src.jobs.scheduled_alerts"):
+            assert scheduled_alerts.main() == 1
+        assert "scheduled_alerts failed" in caplog.text
+        notes = _notifications(engine)
+        assert {n.user_id for n in notes} == {1, 2}
+        assert all(n.title == "Scheduled alerts failed" for n in notes)
+        engine.dispose()
+
+
+class TestLogScanBlindness:
+    def test_empty_stdin_returns_one_and_notifies(self, monkeypatch):
+        import io
+        import src.jobs.log_scan as log_scan
+        engine = _scan_engine()
+        _seed_heartbeat(engine, "scheduled_alerts", 1)
+        _seed_heartbeat(engine, "log_scan", 1)
+        monkeypatch.setattr("sys.stdin", io.StringIO(""))
+        monkeypatch.setattr(log_scan, "SessionLocal", sessionmaker(bind=engine))
+        assert log_scan.main(["--log-file", "-"]) == 1
+        notes = _notifications(engine)
+        assert len(notes) == 1
+        assert "no log lines read" in notes[0].message
+        engine.dispose()
+
+    def test_empty_log_file_returns_one(self, tmp_path, monkeypatch):
+        import src.jobs.log_scan as log_scan
+        engine = _scan_engine()
+        _seed_heartbeat(engine, "scheduled_alerts", 1)
+        _seed_heartbeat(engine, "log_scan", 1)
+        log_file = tmp_path / "empty.log"
+        log_file.write_text("")
+        monkeypatch.setattr(log_scan, "SessionLocal", sessionmaker(bind=engine))
+        assert log_scan.main(["--log-file", str(log_file)]) == 1
+        engine.dispose()
+
+    def test_clean_log_but_db_down_returns_one(self, tmp_path, monkeypatch, capsys):
+        import src.jobs.log_scan as log_scan
+        log_file = tmp_path / "app.log"
+        log_file.write_text(f"{_stamp(datetime.now() - timedelta(hours=1))} INFO ok\n")
+
+        def _raise():
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(log_scan, "SessionLocal", _raise)
+        assert log_scan.main(["--log-file", str(log_file)]) == 1
+        err = capsys.readouterr().err
+        assert "heartbeat check unavailable" in err
+        assert "ALERT" in err

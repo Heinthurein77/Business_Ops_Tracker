@@ -22,7 +22,9 @@ non-zero so cron's own mail / log shows it.
 
 Exit codes: 0 = clean, or alerts were delivered as Notifications;
 1 = alerts found but nobody could be notified (no DB / no Chairman),
-or the log file could not be read.
+or the log file could not be read, or zero log lines were read (the
+scan was blind — M-06), even when the Chairman was notified in-app
+about the blindness: a blind scan must never look clean to cron.
 """
 import argparse
 import os
@@ -129,24 +131,33 @@ def stale_jobs(heartbeats, now=None, max_age_hours: int = STALE_AFTER_HOURS,
                expected=EXPECTED_JOBS, never_ran_is_stale: bool = True) -> list[str]:
     """Names of expected jobs whose heartbeat is stale. Pure.
 
-    ``heartbeats`` is an iterable of (job_name, last_run_at) with
-    last_run_at None when the job never wrote a row. A job that never
-    ran is stale: a dead-man check that only watches rows that exist
-    cannot see a cron that was never installed. Per-job grace comes
-    from JOB_MAX_AGE_HOURS (weekly jobs get longer); max_age_hours is
-    the fallback for jobs not listed there. never_ran_is_stale=False is
-    for weekly jobs: between install and the first weekly run there is
-    legitimately no row yet, so only a stale existing row alerts.
+    ``heartbeats`` is an iterable of (job_name, last_run_at) or
+    (job_name, last_run_at, last_status) tuples, with last_run_at None
+    when the job never wrote a row. A job that never ran is stale: a
+    dead-man check that only watches rows that exist cannot see a cron
+    that was never installed. Per-job grace comes from JOB_MAX_AGE_HOURS
+    (weekly jobs get longer); max_age_hours is the fallback for jobs not
+    listed there. never_ran_is_stale=False is for weekly jobs: between
+    install and the first weekly run there is legitimately no row yet, so
+    only a stale existing row alerts.
+
+    M-05: a job whose last run FAILED is stale even when its heartbeat
+    is fresh — scheduled_alerts records "failed" with a fresh
+    last_run_at, so age alone can never catch a job failing every day.
     """
     now = now or utcnow()
     seen = {}
-    for job_name, last_run_at in heartbeats:
-        seen[job_name] = last_run_at
+    for item in heartbeats:
+        job_name, last_run_at = item[0], item[1]
+        last_status = item[2] if len(item) > 2 else None
+        seen[job_name] = (last_run_at, last_status)
     stale = []
     for job_name in expected:
-        last = seen.get(job_name)
+        last, status = seen.get(job_name, (None, None))
         age = JOB_MAX_AGE_HOURS.get(job_name, max_age_hours)
-        if last is None:
+        if status == "failed":
+            stale.append(job_name)
+        elif last is None:
             if never_ran_is_stale:
                 stale.append(job_name)
         elif (now - last) > timedelta(hours=age):
@@ -171,7 +182,7 @@ def check_heartbeats(db, now=None) -> list[str]:
     run there is legitimately no row yet.
     """
     rows = db.query(JobHeartbeat).all()
-    pairs = [(row.job_name, row.last_run_at) for row in rows]
+    pairs = [(row.job_name, row.last_run_at, row.last_status) for row in rows]
     return (stale_jobs(pairs, now=now)
             + stale_jobs(pairs, now=now, expected=WEEKLY_JOBS, never_ran_is_stale=False))
 
@@ -251,6 +262,17 @@ def main(argv=None) -> int:
             db = None
 
     problems = []
+    if not raw_lines:
+        # M-06: zero lines read means the scan is blind — e.g. the app
+        # container is down, so `docker compose logs` yields nothing
+        # (stderr is discarded in the crontab). That must not report
+        # clean, whatever the (empty) counts say.
+        problems.append("no log lines read (log source empty — app may be down)")
+    if not db_available:
+        # M-06: the heartbeat check itself was unavailable, so the
+        # dead-man check cannot vouch for any job — a problem on its own,
+        # not just when combined with a log signal.
+        problems.append("heartbeat check unavailable (database unreachable)")
     if counts["errors"]:
         problems.append(f"{counts['errors']} ERROR line(s)")
     if counts["lockouts"]:
@@ -275,11 +297,14 @@ def main(argv=None) -> int:
         return 0
 
     alert = "Log scan found problems: " + "; ".join(problems) + ". " + summary
+    # M-06: a blind scan (zero lines read) exits 1 even when the Chairman
+    # was notified in-app — the scheduler must see the failure too.
+    blind = not raw_lines
     if db_available and db is not None:
         try:
             if _notify_chairman(db, "Log scan: problems found", alert):
                 print("log_scan: Chairman notified", file=sys.stderr)
-                return 0
+                return 1 if blind else 0
             print("log_scan: no active Chairman to notify", file=sys.stderr)
         except Exception as exc:  # noqa: BLE001 - fall through to stderr alert
             print(f"log_scan: Chairman notification failed ({exc})", file=sys.stderr)
