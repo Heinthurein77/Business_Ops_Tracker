@@ -1813,6 +1813,29 @@ def export_excel(
         health_query = health_query.filter(HealthStatus.report_date <= range_end)
         social_query = social_query.filter(SocialLog.report_date <= range_end)
 
+    # M-10: COUNT the merged (business_unit_id, report_date) keys first and
+    # refuse before any .all() loads the four tables into memory. The
+    # post-merge check below stays as a belt-and-braces guard.
+    def _keys(model):
+        q = db.query(model.business_unit_id, model.report_date)
+        if range_start:
+            q = q.filter(model.report_date >= range_start)
+        if range_end:
+            q = q.filter(model.report_date <= range_end)
+        return q
+
+    merged_count = (
+        db.query(func.count())
+        .select_from(
+            _keys(DailyFinancial)
+            .union(_keys(ActivityLog), _keys(HealthStatus), _keys(SocialLog))
+            .subquery()
+        )
+        .scalar()
+    )
+    if merged_count > 10000:
+        raise HTTPException(400, "Export too large (over 10,000 rows) — narrow the date range")
+
     financials = financial_query.all()
     activities = activity_query.all()
     healths = health_query.all()

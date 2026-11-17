@@ -505,3 +505,124 @@ class TestAdminOverviewQueries:
         assert n_comp <= 15, f"comparison still runs {n_comp} queries"
         db.close()
         engine.dispose()
+
+
+# ---------------------------------------------------------------- M-10
+# Admin Excel export: COUNT the merged keys first, 400 before any .all().
+
+class TestAdminExportCap:
+    def _seed_wide(self, db, n_rows=10001):
+        from datetime import date, timedelta
+        from decimal import Decimal
+
+        from src.models import ActivityLog, BusinessUnit, DailyFinancial, User
+
+        db.add(BusinessUnit(id=1, code="BU1", name="Unit 1"))
+        admin = User(id=900, username="admin", hashed_password="x",
+                     role="Admin", is_active=True)
+        db.add(admin)
+        base = date(2020, 1, 1)
+        db.add_all([
+            DailyFinancial(business_unit_id=1, report_date=base + timedelta(days=i),
+                           revenue=Decimal("10"), expenses=Decimal("1"),
+                           net_profit=Decimal("0"), cash_in_hand=Decimal("0"))
+            for i in range(n_rows)
+        ])
+        db.add(ActivityLog(business_unit_id=1, report_date=base))
+        db.commit()
+        return admin, base
+
+    def _counted(self, engine, fn):
+        from sqlalchemy import event
+
+        count = {"n": 0}
+
+        def _before(conn, cursor, statement, parameters, context, executemany):
+            count["n"] += 1
+
+        event.listen(engine, "before_cursor_execute", _before)
+        try:
+            result = fn()
+        finally:
+            event.remove(engine, "before_cursor_execute", _before)
+        return result, count["n"]
+
+    def test_wide_range_400_without_loading_rows(self):
+        from fastapi import HTTPException
+        from starlette.requests import Request
+
+        from src.routers.admin import export_excel
+
+        engine, db = _make_db()
+        admin, base = self._seed_wide(db)
+        request = Request({"type": "http", "headers": [], "client": ("8.8.8.8", 5555)})
+
+        def _call():
+            return export_excel(request=request, start_date="2020-01-01",
+                                end_date="2099-12-31", user=admin, db=db)
+
+        with pytest.raises(HTTPException) as exc:
+            self._counted(engine, _call)
+        assert exc.value.status_code == 400
+        db.close()
+        engine.dispose()
+
+    def test_wide_range_statement_count(self):
+        from fastapi import HTTPException
+        from starlette.requests import Request
+
+        from src.routers.admin import export_excel
+
+        engine, db = _make_db()
+        admin, base = self._seed_wide(db)
+        request = Request({"type": "http", "headers": [], "client": ("8.8.8.8", 5555)})
+        try:
+            self._counted(
+                engine,
+                lambda: export_excel(request=request, start_date="2020-01-01",
+                                     end_date="2099-12-31", user=admin, db=db))
+            raise AssertionError("expected HTTPException 400")
+        except HTTPException as exc:
+            assert exc.status_code == 400
+        # Re-run with a fresh counter to measure exactly what the 400 path
+        # executes: 2 BU-lookup queries + 1 COUNT union. Any .all() would
+        # add 4 more statements.
+        _, n = self._counted(
+            engine,
+            lambda: pytest.raises(HTTPException, export_excel, request=request,
+                                  start_date="2020-01-01", end_date="2099-12-31",
+                                  user=admin, db=db))
+        # pytest.raises inside _counted swallows the exception; n counts the
+        # statements of that call.
+        assert n == 3, f"400 path ran {n} statements (expected 3: lookups + COUNT)"
+        db.close()
+        engine.dispose()
+
+    def test_exactly_10000_rows_succeeds(self):
+        from datetime import timedelta
+        from io import BytesIO
+
+        from openpyxl import load_workbook
+        from starlette.requests import Request
+
+        from src.routers.admin import export_excel
+
+        engine, db = _make_db()
+        admin, base = self._seed_wide(db)
+        request = Request({"type": "http", "headers": [], "client": ("8.8.8.8", 5555)})
+        end = base + timedelta(days=9999)
+        import asyncio
+
+        async def _drain(resp):
+            chunks = []
+            async for chunk in resp.body_iterator:
+                chunks.append(chunk)
+            return b"".join(chunks)
+
+        response = export_excel(request=request, start_date=base.isoformat(),
+                                end_date=end.isoformat(), user=admin, db=db)
+        wb = load_workbook(BytesIO(asyncio.run(_drain(response))))
+        sheet = wb.active
+        assert sheet.max_row == 10001  # header + exactly 10,000 data rows
+        db.close()
+        engine.dispose()
