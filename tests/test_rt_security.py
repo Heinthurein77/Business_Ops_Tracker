@@ -25,23 +25,18 @@ os.environ.setdefault("DATABASE_URL", "sqlite://")
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
 from src import throttle
 from src.auth import assert_token_current, bump_token_version
 from src.edge import EdgeMiddleware
-from src.models import AuditLog, Base, BusinessUnit, User
+from src.models import AuditLog, BusinessUnit, User
 
 PUBLIC_IP = "8.8.8.8"
 
 
-@pytest.fixture()
-def db():
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
-    session.add_all([
+@pytest.fixture(autouse=True)
+def _seed_db(db):
+    db.add_all([
         BusinessUnit(id=1, code="BU1", name="Shop One"),
         BusinessUnit(id=2, code="BU2", name="Shop Two"),
     ])
@@ -49,12 +44,9 @@ def db():
                business_unit_id=1, is_active=True)
     ho = User(id=803, username="ho_user", hashed_password="x", role="HO", is_active=True)
     chairman = User(id=804, username="chairman", hashed_password="x", role="Chairman", is_active=True)
-    session.add_all([ceo, ho, chairman])
-    session.commit()
-    session.test_users = {"ceo": ceo, "ho": ho, "chairman": chairman}
-    yield session
-    session.close()
-    engine.dispose()
+    db.add_all([ceo, ho, chairman])
+    db.commit()
+    db.test_users = {"ceo": ceo, "ho": ho, "chairman": chairman}
 
 
 def _now():

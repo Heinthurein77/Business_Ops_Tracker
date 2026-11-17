@@ -5,21 +5,11 @@ import os
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
 os.environ.setdefault("ENVIRONMENT", "test")
 
-from src.models import Base  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-
-
-def _make_db():
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
-    return engine, session
 
 
 # ---------------------------------------------------------------- M-12 / m-21
@@ -48,24 +38,21 @@ class TestSharedHelpers:
         assert parse_month_or_default("9999-12", today) == (2026, 11)
         assert parse_month_or_default("1999-01", today) == (2026, 11)
 
-    def test_notify_adds_one_row(self):
+    def test_notify_adds_one_row(self, db):
         from src.models import Notification
         from src.utils import notify
 
-        _, db = _make_db()
         row = notify(db, 7, "alert", "Title", "Body", link="/admin")
         db.commit()
         saved = db.query(Notification).one()
         assert saved is row
         assert (saved.user_id, saved.type, saved.title, saved.message, saved.link) == (
             7, "alert", "Title", "Body", "/admin")
-        db.close()
 
-    def test_bu_lookup_maps_newest_active_ceo_wins(self):
+    def test_bu_lookup_maps_newest_active_ceo_wins(self, db):
         from src.models import BusinessUnit, User
         from src.utils import bu_lookup_maps
 
-        _, db = _make_db()
         db.add_all([
             BusinessUnit(id=1, code="BU1", name="One"),
             BusinessUnit(id=2, code="BU2", name="Two"),
@@ -86,7 +73,6 @@ class TestSharedHelpers:
         # "newest wins" ordering only ever picks among actives.)
         assert ceo_by_bu[1].username == "first"
         assert ceo_by_bu[2].username == "other"
-        db.close()
 
     def test_submit_rate_limiter(self):
         import time
@@ -115,11 +101,10 @@ class TestSharedHelpers:
         assert isinstance(ho_router._rate_limiter, SubmitRateLimiter)
         assert ceo_router._rate_limiter is not ho_router._rate_limiter
 
-    def test_record_job_heartbeat_upserts_and_swallows_failure(self):
+    def test_record_job_heartbeat_upserts_and_swallows_failure(self, db):
         from src.models import JobHeartbeat
         from src.utils import record_job_heartbeat
 
-        _, db = _make_db()
         record_job_heartbeat(db, "test_job", "ok")
         row = db.query(JobHeartbeat).filter_by(job_name="test_job").one()
         assert row.last_status == "ok"
@@ -128,7 +113,6 @@ class TestSharedHelpers:
         db.close()
         # A broken session must not raise: the heartbeat never masks the job.
         record_job_heartbeat(db, "test_job", "ok")
-        db.close()
 
 
 class TestOpsAlertsService:
@@ -443,10 +427,10 @@ class TestAdminOverviewQueries:
             event.remove(engine, "before_cursor_execute", _before)
         return result, count["n"]
 
-    def test_overview_few_queries_and_correct_payload(self):
+    def test_overview_few_queries_and_correct_payload(self, db):
         from src.routers.admin import gather_admin_overview
 
-        engine, db = _make_db()
+        engine = db.test_engine
         today, month_start, days = self._seed_23_bus(db)
         ov, n = self._counted(engine, lambda: gather_admin_overview(db))
         # Was ~115+ sequential round-trips for 23 BUs (4 latest-row loops
@@ -483,13 +467,11 @@ class TestAdminOverviewQueries:
         bu1_trend = next(t for t in ov["trend_by_bu"] if t["bu_id"] == 1)
         assert bu1_trend["revenue"][-3:] == [1000.0, 2000.0, 3000.0]
         assert bu1_trend["revenue"][:-3] == [0.0] * 11
-        db.close()
-        engine.dispose()
 
-    def test_parts_limit_work_and_queries(self):
+    def test_parts_limit_work_and_queries(self, db):
         from src.routers.admin import gather_admin_overview
 
-        engine, db = _make_db()
+        engine = db.test_engine
         self._seed_23_bus(db)
         ops, n_ops = self._counted(
             engine, lambda: gather_admin_overview(db, parts={"operations"}))
@@ -503,8 +485,6 @@ class TestAdminOverviewQueries:
                              "bar_categories", "bar_receivable", "bar_payable",
                              "comparison_data"}
         assert n_comp <= 15, f"comparison still runs {n_comp} queries"
-        db.close()
-        engine.dispose()
 
 
 # ---------------------------------------------------------------- M-10
@@ -547,13 +527,13 @@ class TestAdminExportCap:
             event.remove(engine, "before_cursor_execute", _before)
         return result, count["n"]
 
-    def test_wide_range_400_without_loading_rows(self):
+    def test_wide_range_400_without_loading_rows(self, db):
         from fastapi import HTTPException
         from starlette.requests import Request
 
         from src.routers.admin import export_excel
 
-        engine, db = _make_db()
+        engine = db.test_engine
         admin, base = self._seed_wide(db)
         request = Request({"type": "http", "headers": [], "client": ("8.8.8.8", 5555)})
 
@@ -564,16 +544,14 @@ class TestAdminExportCap:
         with pytest.raises(HTTPException) as exc:
             self._counted(engine, _call)
         assert exc.value.status_code == 400
-        db.close()
-        engine.dispose()
 
-    def test_wide_range_statement_count(self):
+    def test_wide_range_statement_count(self, db):
         from fastapi import HTTPException
         from starlette.requests import Request
 
         from src.routers.admin import export_excel
 
-        engine, db = _make_db()
+        engine = db.test_engine
         admin, base = self._seed_wide(db)
         request = Request({"type": "http", "headers": [], "client": ("8.8.8.8", 5555)})
         try:
@@ -595,10 +573,8 @@ class TestAdminExportCap:
         # pytest.raises inside _counted swallows the exception; n counts the
         # statements of that call.
         assert n == 3, f"400 path ran {n} statements (expected 3: lookups + COUNT)"
-        db.close()
-        engine.dispose()
 
-    def test_exactly_10000_rows_succeeds(self):
+    def test_exactly_10000_rows_succeeds(self, db):
         from datetime import timedelta
         from io import BytesIO
 
@@ -607,7 +583,6 @@ class TestAdminExportCap:
 
         from src.routers.admin import export_excel
 
-        engine, db = _make_db()
         admin, base = self._seed_wide(db)
         request = Request({"type": "http", "headers": [], "client": ("8.8.8.8", 5555)})
         end = base + timedelta(days=9999)
@@ -624,8 +599,6 @@ class TestAdminExportCap:
         wb = load_workbook(BytesIO(asyncio.run(_drain(response))))
         sheet = wb.active
         assert sheet.max_row == 10001  # header + exactly 10,000 data rows
-        db.close()
-        engine.dispose()
 
 
 # ---------------------------------------------------------------- m-13
@@ -725,8 +698,6 @@ class TestSubmitUploadHoldsNoSession:
             ActivityLog.business_unit_id == 1,
             ActivityLog.report_date == today_local()).one()
         assert act.document_url == "https://bucket.r2.dev/activity-attachments/evidence.pdf"
-        db.close()
-        engine.dispose()
 
     def test_ho_upload_runs_with_no_connection_held(self, tmp_path, monkeypatch):
         import io
@@ -769,5 +740,3 @@ class TestSubmitUploadHoldsNoSession:
         act = db.query(HeadOfficeActivityLog).filter(
             HeadOfficeActivityLog.report_date == today_local()).one()
         assert act.document_url == "https://bucket.r2.dev/activity-attachments/ho.pdf"
-        db.close()
-        engine.dispose()
