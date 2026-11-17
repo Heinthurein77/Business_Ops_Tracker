@@ -67,46 +67,28 @@ from src.utils import utcnow
 
 JOB_NAME = "reconcile_journals"
 
-# (source, operation kind, human label) — the retry endpoint takes
-# {"source": ..., "source_id": ...}, so every entry carries exactly that.
+# Journal sources this job watches (see _has_posted) — the retry
+# endpoint takes {"source": ..., "source_id": ...}, so every failure
+# entry carries exactly that pair.
 SOURCES = ("pos_sale", "sales_return", "purchase_return", "stock_transfer", "expense", "daily_financial", "ho_daily_financial")
 
 
-def _posted_pairs(db: Session) -> set:
-    """(source, source_id) pairs with at least one posted, unreversed
-    journal entry. Reversed entries do not count — a resubmission that
-    reversed the old entry and then failed to repost must still show up."""
-    rows = (
-        db.query(JournalEntry.source, JournalEntry.source_id)
-        .filter(
-            JournalEntry.source.in_(SOURCES),
-            JournalEntry.status == "posted",
-            JournalEntry.reversed_by_id == None,  # noqa: E711
-            JournalEntry.source_id != None,  # noqa: E711
-        )
-        .all()
+def _has_posted(db: Session, source: str, source_id: int, bu_id: int | None = None) -> bool:
+    """EXISTS check for at least one posted, unreversed journal entry
+    for (source, source_id) — optionally in one BU only (the formal
+    transfer per-leg check, G-6: one EXISTS per candidate row instead
+    of loading the whole posted-journal table into Python twice per
+    run). Reversed entries do not count — a resubmission that reversed
+    the old entry and then failed to repost must still show up."""
+    q = db.query(JournalEntry.id).filter(
+        JournalEntry.source == source,
+        JournalEntry.source_id == source_id,
+        JournalEntry.status == "posted",
+        JournalEntry.reversed_by_id == None,  # noqa: E711
     )
-    return {(source, source_id) for source, source_id in rows}
-
-
-def _posted_transfer_legs(db: Session) -> set:
-    """(source_id, business_unit_id) pairs with at least one posted,
-    unreversed stock_transfer journal entry. Formal transfers post one
-    entry per BU side (send leg in the source BU, receive leg in the
-    destination BU), so the check must be per leg, not per transfer:
-    any posted entry for the transfer id would otherwise mask a failed
-    receive leg behind a posted send leg (F-2)."""
-    rows = (
-        db.query(JournalEntry.source_id, JournalEntry.business_unit_id)
-        .filter(
-            JournalEntry.source == "stock_transfer",
-            JournalEntry.status == "posted",
-            JournalEntry.reversed_by_id == None,  # noqa: E711
-            JournalEntry.source_id != None,  # noqa: E711
-        )
-        .all()
-    )
-    return {(source_id, bu_id) for source_id, bu_id in rows}
+    if bu_id is not None:
+        q = q.filter(JournalEntry.business_unit_id == bu_id)
+    return bool(db.query(q.exists()).scalar())
 
 
 def _bu_names(db: Session) -> dict:
@@ -120,7 +102,6 @@ def _money(value) -> float:
 def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
     """Operations in a posted-adjacent state with no matching posted
     journal. Most recent first, capped at `limit`."""
-    posted = _posted_pairs(db)
     bus = _bu_names(db)
     failures: list[dict] = []
 
@@ -138,7 +119,7 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
         )
         if total <= 0:
             continue  # no journal is due on a zero sale (poster skips it)
-        if ("pos_sale", sale.id) in posted:
+        if _has_posted(db, "pos_sale", sale.id):
             continue
         failures.append({
             "kind": "pos_sale",
@@ -161,7 +142,7 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
         )
         if total <= 0:
             continue
-        if ("sales_return", r.id) in posted:
+        if _has_posted(db, "sales_return", r.id):
             continue
         failures.append({
             "kind": "sales_return",
@@ -184,7 +165,7 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
         )
         if total <= 0:
             continue
-        if ("purchase_return", r.id) in posted:
+        if _has_posted(db, "purchase_return", r.id):
             continue
         failures.append({
             "kind": "purchase_return",
@@ -203,7 +184,11 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
     # NOT a failure just because the receive journal does not exist yet.
     # The retry endpoint re-posts each missing side separately, so one
     # entry per transfer (source_id = transfer id) suffices.
-    legs_posted = _posted_transfer_legs(db)
+    # (no legs_posted set any more — the per-leg check below is one
+    # EXISTS per side; formal transfers post one entry per BU side, so
+    # the check must be per leg, not per transfer: any posted entry
+    # for the transfer id would otherwise mask a failed receive leg
+    # behind a posted send leg (F-2).)
     for t in (
         db.query(StockTransfer)
         .filter(StockTransfer.status.in_(("in_transit", "received")))
@@ -218,9 +203,9 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
         if cost <= 0:
             continue
         missing_legs = []
-        if (t.id, t.from_business_unit_id) not in legs_posted:
+        if not _has_posted(db, "stock_transfer", t.id, t.from_business_unit_id):
             missing_legs.append("send")
-        if t.status == "received" and (t.id, t.to_business_unit_id) not in legs_posted:
+        if t.status == "received" and not _has_posted(db, "stock_transfer", t.id, t.to_business_unit_id):
             missing_legs.append("receive")
         if not missing_legs:
             continue
@@ -286,7 +271,7 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
         if m:
             group["to_bu_ids"].add(int(m.group(1)))
     for item_id, group in quick_by_item.items():
-        if ("stock_transfer", item_id) in posted:
+        if _has_posted(db, "stock_transfer", item_id):
             continue  # at least one quick transfer of this item posted
         item = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
         if item is None:
@@ -329,7 +314,7 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
     ):
         if (e.amount or 0) <= 0:
             continue
-        if ("expense", e.id) in posted:
+        if _has_posted(db, "expense", e.id):
             continue
         failures.append({
             "kind": "expense",
@@ -347,7 +332,7 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
     for df in (
         db.query(DailyFinancial).filter(DailyFinancial.revenue > 0).order_by(DailyFinancial.id.desc()).limit(limit).all()
     ):
-        if ("daily_financial", df.id) in posted:
+        if _has_posted(db, "daily_financial", df.id):
             continue
         failures.append({
             "kind": "daily_financial",
@@ -369,7 +354,7 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
         .limit(limit)
         .all()
     ):
-        if ("ho_daily_financial", df.id) in posted:
+        if _has_posted(db, "ho_daily_financial", df.id):
             continue
         failures.append({
             "kind": "ho_daily_financial",
