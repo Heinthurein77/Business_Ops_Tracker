@@ -192,8 +192,17 @@ def test_pg_fk_set_null_keeps_audit_row_after_user_delete(engine):
     _exec(engine, "INSERT INTO audit_logs (id, user_id, username, action, details, timestamp) "
                   "VALUES (90007, 90007, 'pg_gone', 'LOGIN_SUCCESS', 'pg check', CURRENT_TIMESTAMP)")
     try:
-        assert not _attempt(engine, "DELETE FROM users WHERE id = 90007"), \
-            "deleting a user referenced by audit_logs unexpectedly failed"
+        # NOTE: do NOT use _attempt() for this delete — it rolls its
+        # transaction back either way, so the delete would never persist
+        # and user_id could never become NULL. _exec() commits, letting
+        # ON DELETE SET NULL take effect. (CI run 44037284247 failed
+        # exactly here: 8 passed, this one failed with "user_id was not
+        # SET NULL" only because the delete had been rolled back.)
+        try:
+            _exec(engine, "DELETE FROM users WHERE id = 90007")
+        except IntegrityError:
+            raise AssertionError(
+                "deleting a user referenced by audit_logs unexpectedly failed")
         assert _scalar(engine,
             "SELECT user_id FROM audit_logs WHERE id = 90007") is None, \
             "audit_logs.user_id was not SET NULL on user delete"

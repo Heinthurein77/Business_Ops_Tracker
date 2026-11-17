@@ -1,5 +1,6 @@
 import os
 import tempfile
+from pathlib import Path
 
 from dotenv import load_dotenv
 from sqlalchemy.engine import make_url
@@ -268,7 +269,17 @@ class Settings:
         # next deploy wipes every uploaded file. Local dev/Docker has no
         # such redeploy churn, so falling back there is safe and means
         # uploads actually work out of the box without any cloud account.
-        self.LOCAL_UPLOAD_DIR: str = os.getenv("LOCAL_UPLOAD_DIR", "/app/uploads")
+        # Default is repo-root/uploads: in the Docker image the repo root IS
+        # /app, so this is still /app/uploads there; anywhere else (local
+        # dev, CI) it is a writable directory instead of the filesystem
+        # root, which a non-root user cannot create. The old "/app/uploads"
+        # default broke CI run 44037284297: main.py makedirs()es this path
+        # at import time, so collection failed with PermissionError:
+        # '/app' on the runner. An explicit LOCAL_UPLOAD_DIR still wins.
+        self.LOCAL_UPLOAD_DIR: str = os.getenv(
+            "LOCAL_UPLOAD_DIR",
+            str(Path(__file__).resolve().parent.parent / "uploads"),
+        )
 
         # --- Business Rules ---
         self.TOTAL_BUSINESS_UNITS: int = int(os.getenv("TOTAL_BUSINESS_UNITS", "23"))
