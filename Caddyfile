@@ -23,5 +23,12 @@
 	# The app listens on :8000 inside the compose network; the 8123
 	# localhost mapping in docker-compose.prod.yml stays for direct
 	# health checks (curl http://127.0.0.1:8123/healthz).
-	reverse_proxy app:8000
+	# m-14: health-aware routing — a hung (not exited) app stops
+	# receiving traffic instead of serving 502s/slow responses until
+	# someone notices. /readyz proves the DB answers (src/main.py).
+	reverse_proxy app:8000 {
+		health_uri /readyz
+		health_interval 30s
+		health_timeout 5s
+	}
 }

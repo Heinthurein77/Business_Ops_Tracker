@@ -64,6 +64,13 @@ services:
     # One-shot: exits after `alembic upgrade head`. Re-running it is a
     # no-op once the DB is at head. Uses the schema-owner URL when set.
     command: ["alembic", "upgrade", "head"]
+    # Log rotation (m-15): same 10 MB x 3 bound as the app service —
+    # Docker's json-file driver grows without bound by default.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       ENVIRONMENT: production
       # TZ defence in depth (SM-12/PM-7): app logic uses APP_TIMEZONE,
@@ -182,6 +189,13 @@ services:
     image: caddy:2-alpine
     container_name: bot_caddy
     restart: unless-stopped
+    # Log rotation (m-15): same 10 MB x 3 bound as the app service —
+    # Docker's json-file driver grows without bound by default.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       DOMAIN: ${DOMAIN:?DOMAIN must be set (e.g. export DOMAIN=erp.example.com)}
     ports:
@@ -192,7 +206,8 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      - app
+      app:
+        condition: service_healthy
 
 volumes:
   bot_uploads_data:
