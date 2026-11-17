@@ -467,31 +467,54 @@ def view_upload(key: str = Query(...), user: User = Depends(get_current_user),
         raise HTTPException(400, "Invalid attachment key")
     owner_bu_id = None
     is_profile_photo = key.startswith("profile-photos/")
-    # Sm-1: the key is matched with LIKE, so `_`/`%` in it must be
-    # escaped or a crafted key could match a different record's URL
+    # m-26: ownership is matched on EXACT key equality, not LIKE. Stored
+    # values are full URLs (presigned R2, public-base, or the
+    # /uploads/<key> local fallback) — extract_r2_key recovers the key
+    # from any of those shapes, and only an exact match counts, so a
+    # short/partial key can no longer match an arbitrary row's URL
     # substring (and .first() with no order_by made the pick arbitrary).
-    like_key = _escape_like(key)
+    # Only the key columns are fetched, not full rows.
+    from src.r2_storage import extract_r2_key
+
+    def _key_matches(stored_url):
+        if not stored_url:
+            return False
+        return stored_url == key or extract_r2_key(stored_url) == key
+
     if is_profile_photo:
-        profile = db.query(CeoProfile).filter(
-            CeoProfile.profile_pic_url.like(f"%{like_key}%", escape="\\")).first()
-        if profile is None:
+        profile_owner_id = None
+        for user_id, stored_url in db.query(
+                CeoProfile.user_id, CeoProfile.profile_pic_url).filter(
+                CeoProfile.profile_pic_url.isnot(None)).all():
+            if _key_matches(stored_url):
+                profile_owner_id = user_id
+                break
+        if profile_owner_id is None:
             raise HTTPException(404, "Attachment not found")
-        if user.role not in ("Chairman", "HO") and profile.user_id != user.id:
+        if user.role not in ("Chairman", "HO") and profile_owner_id != user.id:
             raise HTTPException(403, "Not your profile photo")
     else:
-        activity = db.query(ActivityLog).filter(
-            ActivityLog.document_url.like(f"%{like_key}%", escape="\\")).first()
-        if activity is not None:
-            owner_bu_id = activity.business_unit_id
-        else:
-            ho_activity = db.query(HeadOfficeActivityLog).filter(
-                HeadOfficeActivityLog.document_url.like(f"%{like_key}%", escape="\\")).first()
-            if ho_activity is not None:
+        for bu_id, stored_url in db.query(
+                ActivityLog.business_unit_id, ActivityLog.document_url).filter(
+                ActivityLog.document_url.isnot(None)).all():
+            if _key_matches(stored_url):
+                owner_bu_id = bu_id
+                break
+        if owner_bu_id is None:
+            ho_found = any(
+                _key_matches(stored_url)
+                for (stored_url,) in db.query(HeadOfficeActivityLog.document_url).filter(
+                    HeadOfficeActivityLog.document_url.isnot(None)).all()
+            )
+            if ho_found:
                 if user.role not in ("Chairman", "HO"):
                     raise HTTPException(403, "Only Chairman/HO can view head-office attachments")
             else:
                 raise HTTPException(404, "Attachment not found")
-        if owner_bu_id is not None and user.role == "CEO" and user.business_unit_id:
+        # m-26: fail closed — the old `and user.business_unit_id`
+        # condition skipped the 403 entirely for a NULL-BU CEO. A CEO
+        # whose BU is unset now matches nothing, instead of everything.
+        if owner_bu_id is not None and user.role == "CEO":
             if owner_bu_id != user.business_unit_id:
                 raise HTTPException(403, "Attachment belongs to another business unit")
     # M-04: record who viewed which attachment (key only, never contents).

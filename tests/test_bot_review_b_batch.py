@@ -549,6 +549,66 @@ class TestHoLastSubmitter:
         assert out["last_submitted_by"] is None
 
 
+# ------------------------------------------------------------------ m-26
+
+class TestViewUploadExactMatch:
+    def _seed_attachment(self, db, url, bu_id=1):
+        from src.models import ActivityLog
+        db.add(ActivityLog(business_unit_id=bu_id, report_date=today_local(),
+                           document_url=url, submitted_by=db.test_users["ceo"].id))
+        db.commit()
+
+    def test_partial_key_no_longer_matches(self, db):
+        from src.routers.ops import view_upload
+        self._seed_attachment(
+            db, "https://test-bucket.r2.dev/activity-attachments/abc123.png?X-Amz-Expires=900")
+        ceo = db.test_users["ceo"]
+        # A prefix / substring of the stored key used to match via LIKE.
+        for bad_key in ("activity-attachments/abc12.png",
+                        "activity-attachments/abc1234.png",
+                        "activity-attachments/bc123.png"):
+            with pytest.raises(HTTPException) as exc:
+                view_upload(key=bad_key, user=ceo, db=db)
+            assert exc.value.status_code == 404
+
+    def test_exact_key_still_matches_all_stored_shapes(self, db):
+        from src.routers.ops import view_upload
+        ceo = db.test_users["ceo"]
+        self._seed_attachment(
+            db, "https://test-bucket.r2.dev/activity-attachments/abc123.png?X-Amz-Expires=900")
+        assert view_upload(key="activity-attachments/abc123.png", user=ceo, db=db).status_code == 302
+
+    def test_null_bu_ceo_is_denied_not_fail_open(self, db):
+        from src.routers.ops import view_upload
+        self._seed_attachment(
+            db, "https://test-bucket.r2.dev/activity-attachments/abc123.png")
+        null_bu_ceo = User(id=807, username="ceo_nobu", hashed_password="x",
+                           role="CEO", full_name="No BU", business_unit_id=None,
+                           is_active=True)
+        db.add(null_bu_ceo)
+        db.commit()
+        # The old `and user.business_unit_id` condition skipped the 403
+        # entirely for this caller; now a CEO with no BU matches nothing.
+        with pytest.raises(HTTPException) as exc:
+            view_upload(key="activity-attachments/abc123.png", user=null_bu_ceo, db=db)
+        assert exc.value.status_code == 403
+
+    def test_profile_photo_partial_key_no_longer_matches(self, db):
+        from datetime import date as _date
+        from src.models import CeoProfile
+        from src.routers.ops import view_upload
+        db.add(CeoProfile(user_id=db.test_users["ceo"].id, executive_title="CEO",
+                          date_of_birth=_date(2001, 11, 23), phone_number="091234567",
+                          address="Yangon",
+                          profile_pic_url="https://bucket.r2.dev/profile-photos/me.png"))
+        db.commit()
+        with pytest.raises(HTTPException) as exc:
+            view_upload(key="profile-photos/me.pn", user=db.test_users["ceo"], db=db)
+        assert exc.value.status_code == 404
+        assert view_upload(key="profile-photos/me.png",
+                           user=db.test_users["ceo"], db=db).status_code == 302
+
+
 # ------------------------------------------------------------------ m-34 / M-13
 
 class TestActionItemAssigneeValidation:
