@@ -257,7 +257,10 @@ class TestExportBudget:
         for _ in range(6):
             status, _, _ = asgi_request(app, "GET", "/api/ops/notifications", headers=headers)
             assert status == 200
-            status, _, _ = asgi_request(app, "GET", "/api/ceo/dashboard", headers=headers)
+            # NB: /api/ceo/dashboard is NOT normal traffic — it is a
+            # heavy-GET path since m-33, so it is covered by
+            # TestHeavyGetBudget instead of here.
+            status, _, _ = asgi_request(app, "GET", "/api/auth/me", headers=headers)
             assert status == 200
 
     def test_export_path_matching(self):
@@ -433,3 +436,71 @@ class TestSeedPasswordGuard:
             with pytest.raises(RuntimeError):
                 seed_users(db)
         assert db.query(User).count() == 0
+
+
+# --------------------------------------------------------------------- m-33
+
+class TestHeavyGetBudget:
+    """m-33: the CEO/HO dashboards run ~15 queries per call with no
+    per-caller GET budget — the heavy-GET set covered only the admin
+    dashboards. Both dashboards now share the same 60/min budget."""
+
+    def _middleware(self, limit=3):
+        from unittest import mock
+
+        import src.edge as edge_mod
+        from src.edge import EdgeMiddleware
+
+        patcher = mock.patch.object(edge_mod, "_HEAVY_GET_LIMIT", limit)
+        patcher.start()
+        try:
+            return EdgeMiddleware(_dummy_app), patcher
+        except Exception:
+            patcher.stop()
+            raise
+
+    def _cookie(self, username):
+        from src.auth import create_access_token
+        from src.config import settings
+
+        return {"cookie": f"{settings.COOKIE_NAME}={create_access_token(username, token_version=0)}"}
+
+    def test_ceo_dashboard_budgeted_after_limit(self):
+        app, patcher = self._middleware()
+        try:
+            headers = self._cookie("ceo_bu1")
+            for _ in range(3):
+                status, _, _ = asgi_request(app, "GET", "/api/ceo/dashboard", headers=headers)
+                assert status == 200
+            status, out_headers, _ = asgi_request(app, "GET", "/api/ceo/dashboard", headers=headers)
+            assert status == 429
+            assert int(out_headers["retry-after"]) >= 1
+        finally:
+            patcher.stop()
+
+    def test_ho_dashboard_budgeted_after_limit(self):
+        app, patcher = self._middleware()
+        try:
+            headers = self._cookie("ho")
+            for _ in range(3):
+                status, _, _ = asgi_request(app, "GET", "/api/ho/dashboard", headers=headers)
+                assert status == 200
+            status, _, _ = asgi_request(app, "GET", "/api/ho/dashboard", headers=headers)
+            assert status == 429
+        finally:
+            patcher.stop()
+
+    def test_heavy_get_path_matching(self):
+        from src.edge import is_heavy_get_path
+
+        for path in (
+            "/api/admin/comparison",
+            "/api/admin/overview",
+            "/api/admin/health-dashboard",
+            "/api/admin/operations",
+            "/api/ceo/dashboard",
+            "/api/ho/dashboard",
+        ):
+            assert is_heavy_get_path(path), path
+        for path in ("/api/auth/me", "/api/ops/notifications", "/api/ceo/submit-report"):
+            assert not is_heavy_get_path(path), path

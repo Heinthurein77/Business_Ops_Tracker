@@ -73,15 +73,19 @@ def is_export_path(path: str) -> bool:
 
 def is_heavy_get_path(path: str) -> bool:
     """The heaviest read endpoints (SM-4): full-group comparison, the admin
-    overview, the health dashboard and the admin operations page. Normal API
-    and dashboard traffic is deliberately NOT matched — only these get the
-    modest per-caller GET budget in _heavy_get_budget_retry. Report/export
-    paths are already covered by is_export_path above."""
+    overview, the health dashboard and the admin operations page, plus the
+    CEO and HO dashboards (m-33: ~15 queries per call each, previously
+    unbudgeted). Other normal API traffic is deliberately NOT matched —
+    only these get the modest per-caller GET budget in
+    _heavy_get_budget_retry. Report/export paths are already covered by
+    is_export_path above."""
     return path in {
         "/api/admin/comparison",
         "/api/admin/overview",
         "/api/admin/health-dashboard",
         "/api/admin/operations",
+        "/api/ceo/dashboard",
+        "/api/ho/dashboard",
     }
 
 
