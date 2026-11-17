@@ -5,6 +5,7 @@ import { api } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
 import LastUpdated from '../components/LastUpdated';
+import useRefreshOnFocus from '../hooks/useRefreshOnFocus';
 import { useTheme } from '../context/ThemeContext';
 import { DAILY_STEP_GOAL } from '../constants';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
@@ -43,6 +44,9 @@ export default function HealthDashboardPage() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // m-09: re-run the load when the tab regains focus (no polling).
+  useRefreshOnFocus(load);
 
   const filteredDirectory = useMemo(() => {
     if (!data) return [];

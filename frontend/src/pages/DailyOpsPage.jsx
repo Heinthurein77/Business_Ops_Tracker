@@ -3,6 +3,7 @@ import { api } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
 import LastUpdated from '../components/LastUpdated';
+import useRefreshOnFocus from '../hooks/useRefreshOnFocus';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
 
 // Tracker-only daily-ops inputs (ex-Operations Center, ERP tabs removed
@@ -73,6 +74,9 @@ export default function DailyOpsPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  // m-09: re-run the load when the tab regains focus (no polling).
+  useRefreshOnFocus(load);
+
   async function addAction(e) {
     e.preventDefault();
     if (!newTitle.trim()) return;
@@ -93,6 +97,15 @@ export default function DailyOpsPage() {
     const d = await api.remindMissingReports();
     setNotice(`Reminder sent to ${d.notified} CEO(s) who have not reported today.`);
     setTimeout(() => setNotice(''), 5000);
+  }
+
+  // M-15: the remind-actions trigger had no frontend caller (curl-only).
+  async function remindActions() {
+    try {
+      const d = await api.remindActionItems();
+      setNotice(`Action-item reminders sent to ${d.notified} assignee(s) (${d.checked} due/overdue checked).`);
+      setTimeout(() => setNotice(''), 5000);
+    } catch (err) { setError(err.message); }
   }
 
   async function addDocument(e) {
@@ -140,6 +153,9 @@ export default function DailyOpsPage() {
             </select>
             <button onClick={remind} className="whitespace-nowrap text-xs font-semibold bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 px-3.5 py-2 rounded-lg hover:bg-amber-500/20 transition-colors">
               Remind missing reports
+            </button>
+            <button onClick={remindActions} className="whitespace-nowrap text-xs font-semibold bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 px-3.5 py-2 rounded-lg hover:bg-amber-500/20 transition-colors">
+              Remind due action items
             </button>
             {/* SM-5: visible freshness + manual refresh for these lists. */}
             <LastUpdated updatedAt={updatedAt} onRefresh={load} refreshing={refreshing} />
