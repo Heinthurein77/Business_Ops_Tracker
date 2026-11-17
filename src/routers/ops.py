@@ -6,7 +6,9 @@ Access model mirrors the rest of the app:
 - Chairman / HO ("admin"): all business units
 """
 import logging
-from datetime import date, datetime, timedelta
+import threading
+from contextlib import contextmanager
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -18,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from src.auth import get_current_user, require_roles
 from src.database import get_db
-from src.utils import _sanitize_excel_cell, log_audit, today_local, utcnow, validate_period
+from src.utils import APP_TZ, _sanitize_excel_cell, log_audit, today_local, utcnow, validate_period
 from src.models import (
     ActionItem,
     ActivityLog,
@@ -37,6 +39,24 @@ router = APIRouter(prefix="/api/ops", tags=["ops"])
 require_admin = require_roles("Chairman", "HO")
 
 logger = logging.getLogger(__name__)
+
+# m-08: one in-process lock for the manual reminder endpoints. The cron
+# lines already have flock, but a manual trigger (or two admins clicking)
+# runs in-process with no lock — overlapping runs could both pass a
+# throttle/dedupe check before either commits. Non-blocking: if held,
+# the caller gets a clear 409 instead of a duplicate run.
+_REMINDER_LOCK = threading.Lock()
+
+
+@contextmanager
+def _reminder_lock_or_409():
+    if not _REMINDER_LOCK.acquire(blocking=False):
+        raise HTTPException(
+            409, "A reminder run is already in progress — please try again shortly.")
+    try:
+        yield
+    finally:
+        _REMINDER_LOCK.release()
 
 def _log_audit(db, user, action, details=""):
     """Local wrapper around src.utils.log_audit (R-3 audit trail).
@@ -193,11 +213,42 @@ def list_action_items(
     return {"items": [serialize_action_item(db, i) for i in items]}
 
 
+def _validate_assignee(db: Session, user: User, assigned_to_id: Optional[int]) -> Optional[User]:
+    """m-34: an assignee must exist, be active, and — for a CEO creator —
+    belong to the caller's own business unit (a Chairman/HO creator
+    manages all BUs, so any active user is assignable by them). Returns
+    the assignee (None when unassigned) so callers can reuse it for the
+    notification link. Raises 400 BEFORE anything is created — the old
+    code only failed on the second commit (FK violation → 500) after the
+    item itself was already committed."""
+    if assigned_to_id is None:
+        return None
+    assignee = db.query(User).filter(User.id == assigned_to_id).first()
+    if assignee is None:
+        raise HTTPException(400, "Assigned user does not exist")
+    if not assignee.is_active:
+        raise HTTPException(400, "Assigned user is not active")
+    if user.role == "CEO" and assignee.business_unit_id != user.business_unit_id:
+        raise HTTPException(400, "Assignee must be in your business unit")
+    return assignee
+
+
+def _action_item_link(assignee: Optional[User]) -> str:
+    """M-13: an action-item link must be reachable by the assignee. A CEO
+    sees their items on /ceo (CeoOpsSection on the CEO dashboard);
+    Chairman/HO use /admin/daily-ops. The old '/admin' link bounced a
+    CEO to their home page — /admin is Chairman/HO-only."""
+    if assignee is not None and assignee.role == "CEO":
+        return "/ceo"
+    return "/admin/daily-ops"
+
+
 @router.post("/action-items")
 def create_action_item(payload: ActionItemIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     bu_id = bu_scope(user, payload.business_unit_id)
     if bu_id is None:
         raise HTTPException(400, "business_unit_id is required")
+    assignee = _validate_assignee(db, user, payload.assigned_to_id)
     item = ActionItem(
         business_unit_id=bu_id,
         title=payload.title.strip(),
@@ -214,7 +265,7 @@ def create_action_item(payload: ActionItemIn, user: User = Depends(get_current_u
         db.add(Notification(
             user_id=item.assigned_to_id, type="action_assigned",
             title="New action item assigned",
-            message=item.title, link="/admin",
+            message=item.title, link=_action_item_link(assignee),
         ))
         db.commit()
     _log_audit(db, user, "CREATE_ACTION_ITEM", f"id={item.id}")
@@ -245,6 +296,7 @@ def update_action_item(item_id: int, payload: ActionItemUpdate, user: User = Dep
     if payload.description is not None:
         item.description = payload.description
     if payload.assigned_to_id is not None:
+        _validate_assignee(db, user, payload.assigned_to_id)
         item.assigned_to_id = payload.assigned_to_id
     if payload.due_date is not None:
         item.due_date = payload.due_date
@@ -308,13 +360,22 @@ def mark_all_read(user: User = Depends(get_current_user), db: Session = Depends(
 @router.post("/notifications/remind-missing")
 def remind_missing(user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Notify CEOs whose BU has not submitted today's DailyFinancial."""
-    _log_audit(db, user, "REMIND_MISSING", "")
-    return {"notified": run_remind_missing_reports(db)}
+    with _reminder_lock_or_409():
+        _log_audit(db, user, "REMIND_MISSING", "")
+        return {"notified": run_remind_missing_reports(db)}
 
 
 def run_remind_missing_reports(db: Session) -> int:
-    """Job-callable: notify CEOs whose BU hasn't submitted today."""
+    """Job-callable: notify CEOs whose BU hasn't submitted today.
+
+    m-08: deduped per CEO per day — unlike the 7-day throttles on
+    document-expiry and action-item reminders, this used to send one
+    notification per run, so a manual re-run (or a cron + manual overlap)
+    duplicated reminders. "Today" is the Yangon business day, so the
+    cutoff is Yangon midnight expressed in UTC (created_at is naive UTC).
+    """
     today = today_local()
+    day_start_utc = datetime.combine(today, time.min).replace(tzinfo=APP_TZ).astimezone(timezone.utc).replace(tzinfo=None)
     submitted_bu_ids = {
         row[0] for row in db.query(DailyFinancial.business_unit_id).filter(DailyFinancial.report_date == today).all()
     }
@@ -322,6 +383,13 @@ def run_remind_missing_reports(db: Session) -> int:
     sent = 0
     for ceo in ceos:
         if ceo.business_unit_id and ceo.business_unit_id not in submitted_bu_ids:
+            already = db.query(Notification).filter(
+                Notification.user_id == ceo.id,
+                Notification.type == "missing_report",
+                Notification.created_at >= day_start_utc,
+            ).first()
+            if already is not None:
+                continue
             db.add(Notification(
                 user_id=ceo.id, type="missing_report",
                 title="Report not submitted today",
@@ -336,8 +404,9 @@ def run_remind_missing_reports(db: Session) -> int:
 @router.post("/notifications/remind-actions")
 def remind_actions(user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Notify assignees of action items due today or overdue."""
-    _log_audit(db, user, "REMIND_ACTIONS", "")
-    return run_remind_action_items(db)
+    with _reminder_lock_or_409():
+        _log_audit(db, user, "REMIND_ACTIONS", "")
+        return run_remind_action_items(db)
 
 
 def run_remind_action_items(db: Session) -> dict:
@@ -371,7 +440,8 @@ def run_remind_action_items(db: Session) -> dict:
             title = f"Action item due today: {item.title}"
             message = f"'{item.title}' ({bu_name}) is due today ({item.due_date.isoformat()})."
         db.add(Notification(user_id=assignee.id, type="action_due",
-                            title=title, message=message, link="/admin/daily-ops"))
+                            title=title, message=message,
+                            link=_action_item_link(assignee)))
         item.reminder_sent_at = utcnow()
         sent += 1
     db.commit()
@@ -398,33 +468,58 @@ def view_upload(key: str = Query(...), user: User = Depends(get_current_user),
         raise HTTPException(400, "Invalid attachment key")
     owner_bu_id = None
     is_profile_photo = key.startswith("profile-photos/")
-    # Sm-1: the key is matched with LIKE, so `_`/`%` in it must be
-    # escaped or a crafted key could match a different record's URL
+    # m-26: ownership is matched on EXACT key equality, not LIKE. Stored
+    # values are full URLs (presigned R2, public-base, or the
+    # /uploads/<key> local fallback) — extract_r2_key recovers the key
+    # from any of those shapes, and only an exact match counts, so a
+    # short/partial key can no longer match an arbitrary row's URL
     # substring (and .first() with no order_by made the pick arbitrary).
-    like_key = _escape_like(key)
+    # Only the key columns are fetched, not full rows.
+    from src.r2_storage import extract_r2_key
+
+    def _key_matches(stored_url):
+        if not stored_url:
+            return False
+        return stored_url == key or extract_r2_key(stored_url) == key
+
     if is_profile_photo:
-        profile = db.query(CeoProfile).filter(
-            CeoProfile.profile_pic_url.like(f"%{like_key}%", escape="\\")).first()
-        if profile is None:
+        profile_owner_id = None
+        for user_id, stored_url in db.query(
+                CeoProfile.user_id, CeoProfile.profile_pic_url).filter(
+                CeoProfile.profile_pic_url.isnot(None)).all():
+            if _key_matches(stored_url):
+                profile_owner_id = user_id
+                break
+        if profile_owner_id is None:
             raise HTTPException(404, "Attachment not found")
-        if user.role not in ("Chairman", "HO") and profile.user_id != user.id:
+        if user.role not in ("Chairman", "HO") and profile_owner_id != user.id:
             raise HTTPException(403, "Not your profile photo")
     else:
-        activity = db.query(ActivityLog).filter(
-            ActivityLog.document_url.like(f"%{like_key}%", escape="\\")).first()
-        if activity is not None:
-            owner_bu_id = activity.business_unit_id
-        else:
-            ho_activity = db.query(HeadOfficeActivityLog).filter(
-                HeadOfficeActivityLog.document_url.like(f"%{like_key}%", escape="\\")).first()
-            if ho_activity is not None:
+        for bu_id, stored_url in db.query(
+                ActivityLog.business_unit_id, ActivityLog.document_url).filter(
+                ActivityLog.document_url.isnot(None)).all():
+            if _key_matches(stored_url):
+                owner_bu_id = bu_id
+                break
+        if owner_bu_id is None:
+            ho_found = any(
+                _key_matches(stored_url)
+                for (stored_url,) in db.query(HeadOfficeActivityLog.document_url).filter(
+                    HeadOfficeActivityLog.document_url.isnot(None)).all()
+            )
+            if ho_found:
                 if user.role not in ("Chairman", "HO"):
                     raise HTTPException(403, "Only Chairman/HO can view head-office attachments")
             else:
                 raise HTTPException(404, "Attachment not found")
-        if owner_bu_id is not None and user.role == "CEO" and user.business_unit_id:
+        # m-26: fail closed — the old `and user.business_unit_id`
+        # condition skipped the 403 entirely for a NULL-BU CEO. A CEO
+        # whose BU is unset now matches nothing, instead of everything.
+        if owner_bu_id is not None and user.role == "CEO":
             if owner_bu_id != user.business_unit_id:
                 raise HTTPException(403, "Attachment belongs to another business unit")
+    # M-04: record who viewed which attachment (key only, never contents).
+    _log_audit(db, user, "VIEW_UPLOAD", f"key={key}")
     # Sm-9: the 302 target is a 15-minute bearer URL — Cache-Control:
     # no-store so browsers never cache the resolved presigned URL (a
     # cached copy would keep working as a bearer link past its purpose,
@@ -612,11 +707,20 @@ def list_documents(business_unit_id: Optional[int] = None, expiring_soon: bool =
     q = db.query(LicenseDocument)
     if bu_id is not None:
         q = q.filter(LicenseDocument.business_unit_id == bu_id)
+    if expiring_soon:
+        # m-11: filter in SQL before pagination. The old code fetched the
+        # page and filtered in Python, so `count` was the post-filter page
+        # length and a page could come back short while matching rows sat
+        # on later pages. Same threshold as before (expiry within 30 days,
+        # including already-expired rows), now enforced by the query — and
+        # `count` is the total matching count, not the page length.
+        horizon = today_local() + timedelta(days=30)
+        q = q.filter(LicenseDocument.expiry_date.isnot(None),
+                     LicenseDocument.expiry_date <= horizon)
+    total = q.count()
     rows = q.order_by(LicenseDocument.expiry_date.asc()).offset(offset).limit(limit).all()
     items = [serialize_document(db, d) for d in rows]
-    if expiring_soon:
-        items = [i for i in items if i["days_left"] is not None and i["days_left"] <= 30]
-    return {"items": items, "count": len(items)}
+    return {"items": items, "count": total}
 
 
 @router.post("/documents")
@@ -653,8 +757,9 @@ def delete_document(document_id: int, user: User = Depends(get_current_user), db
 def check_document_expiry(days: int = 30, user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Notify each BU's CEO + all Chairman/HO about documents expiring within
     `days`. Throttled per document to one alert per 7 days."""
-    _log_audit(db, user, "CHECK_DOCUMENT_EXPIRY", f"days={days}")
-    return run_check_document_expiry(db, days)
+    with _reminder_lock_or_409():
+        _log_audit(db, user, "CHECK_DOCUMENT_EXPIRY", f"days={days}")
+        return run_check_document_expiry(db, days)
 
 
 def run_check_document_expiry(db: Session, days: int = 30) -> dict:
@@ -710,6 +815,9 @@ def monthly_report(month: Optional[str] = None, user: User = Depends(require_adm
     import calendar as _cal
     month_end = date(month_start.year, month_start.month, _cal.monthrange(month_start.year, month_start.month)[1])
     days_in_month = (month_end - month_start).days + 1
+
+    # M-04: the Chairman PDF export — audit who pulled it, for which month.
+    _log_audit(db, user, "MONTHLY_REPORT_EXPORT", f"month={month_start.isoformat()}")
 
     from src.models import MonthlyTarget
 
@@ -846,6 +954,9 @@ def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
     from openpyxl.styles import Font, PatternFill
 
     bu_id = bu_scope(user, business_unit_id)
+    # M-04: exports carry PII/health/financial data — audit who pulled
+    # which tab (never the rows themselves).
+    _log_audit(db, user, "OPS_EXCEL_EXPORT", f"tab={tab} bu_id={bu_id}")
     bu_names = {bu.id: bu.name for bu in db.query(BusinessUnit).all()}
     header_fill = PatternFill(start_color="1F2937", end_color="1F2937", fill_type="solid")
     header_font = Font(bold=True, color="FFFFFF")

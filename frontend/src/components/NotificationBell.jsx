@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api, ApiError } from '../api/client';
 
 // SM-6: after this many consecutive auth failures the 60 s interval stops
@@ -7,6 +8,7 @@ import { api, ApiError } from '../api/client';
 const MAX_AUTH_FAILURES = 3;
 
 export default function NotificationBell() {
+  const navigate = useNavigate();
   const [unread, setUnread] = useState(0);
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState([]);
@@ -65,10 +67,25 @@ export default function NotificationBell() {
     try {
       await api.markNotificationRead(n.id);
       await refresh();
+      return true;
     } catch (err) {
       // SM-6: a failed mark-read used to look identical to a successful
       // one (error swallowed, then a refresh that also swallowed). Surface it.
       setActionError(err instanceof ApiError ? err.message : 'Could not mark as read — please try again');
+      return false;
+    }
+  }
+
+  // M-13: the bell used to only mark a notification read — its `link`
+  // was write-only. Tapping an item now navigates to the link (after a
+  // successful mark-read) and is a no-op when there is no link. Only
+  // in-app paths are followed, never an external URL.
+  async function openNotification(n) {
+    const ok = await markRead(n);
+    if (!ok) return;
+    setOpen(false);
+    if (typeof n.link === 'string' && n.link.startsWith('/')) {
+      navigate(n.link);
     }
   }
 
@@ -125,7 +142,7 @@ export default function NotificationBell() {
             {actionError && <p className="px-3 py-2 text-xs font-medium text-red-600 dark:text-red-400">{actionError}</p>}
             {status === null && items.length === 0 && <p className="px-3 py-6 text-center text-xs text-slate-400">No notifications</p>}
             {status === null && items.map((n) => (
-              <button key={n.id} onClick={() => markRead(n)} className={`w-full text-left px-3 py-2.5 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors ${n.is_read ? 'opacity-60' : ''}`}>
+              <button key={n.id} onClick={() => openNotification(n)} className={`w-full text-left px-3 py-2.5 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors ${n.is_read ? 'opacity-60' : ''}`}>
                 <p className="text-[13px] font-semibold text-slate-800 dark:text-slate-200">{n.title}</p>
                 {n.message && <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{n.message}</p>}
                 <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-1">{n.created_at ? new Date(n.created_at).toLocaleString() : ''}</p>

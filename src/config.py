@@ -298,6 +298,17 @@ class Settings:
 
         # --- Business Rules ---
         self.TOTAL_BUSINESS_UNITS: int = int(os.getenv("TOTAL_BUSINESS_UNITS", "23"))
+        # M-03: how far back a CEO/HO daily report (or a monthly target for
+        # a past month) may be filed or edited, in days. Default 7: today
+        # plus the previous 7 days are editable; anything older (or any
+        # future date) is rejected and needs an admin-approved correction.
+        # The exact value is a product decision — see the review report.
+        self.REPORT_EDIT_WINDOW_DAYS: int = int(os.getenv("REPORT_EDIT_WINDOW_DAYS", "7"))
+        if self.REPORT_EDIT_WINDOW_DAYS < 0:
+            raise RuntimeError(
+                "REPORT_EDIT_WINDOW_DAYS must be 0 or greater — refusing to start "
+                f"with {self.REPORT_EDIT_WINDOW_DAYS}."
+            )
 
 
 settings = Settings()

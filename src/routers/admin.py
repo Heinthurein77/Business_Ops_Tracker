@@ -1101,19 +1101,23 @@ def _describe_security_event(action: str, details: str, username: Optional[str] 
 
 
 @router.get("/security-log")
-def security_log(user: User = Depends(require_chairman), db: Session = Depends(get_db)):
+def security_log(limit: int = 200, offset: int = 0,
+                 user: User = Depends(require_chairman), db: Session = Depends(get_db)):
     """Chairman-only view over the identity/access slice of AuditLog —
     every action below was already being recorded, just never surfaced
-    anywhere in the UI. Capped to the most recent 500 (unlike report_logs,
-    which is naturally bounded to ~1 submission/BU/day, sign-in/out volume
-    has no such ceiling)."""
+    anywhere in the UI. m-18: paged like report_logs (default 200, max
+    500) instead of a hard 500-row cap with no offset — older security
+    events were unreachable through the API during an investigation."""
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    total = db.query(AuditLog).filter(AuditLog.action.in_(SECURITY_LOG_ACTIONS)).count()
     entries = (
         db.query(AuditLog)
         .filter(AuditLog.action.in_(SECURITY_LOG_ACTIONS))
         # SM-14: (timestamp DESC, id DESC) — see report_logs above; the id
         # tiebreak is the canonical order under concurrent writes.
         .order_by(AuditLog.timestamp.desc(), AuditLog.id.desc())
-        .limit(500)
+        .limit(limit).offset(offset)
         .all()
     )
     logs = [
@@ -1127,7 +1131,7 @@ def security_log(user: User = Depends(require_chairman), db: Session = Depends(g
         }
         for e in entries
     ]
-    return {"logs": logs}
+    return {"logs": logs, "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/ceo-profiles")
@@ -1481,6 +1485,10 @@ def ceo_monthly_summary(
     days_in_month = _cal.monthrange(year, month_num)[1]
     month_end = date(year, month_num, days_in_month)
     month_label = month_start.strftime("%B %Y")
+
+    # M-04: a PDF carrying a health snapshot + PII — audit the export.
+    log_audit(db, user, "CEO_MONTHLY_SUMMARY_EXPORT",
+              f"bu_id={business_unit_id} month={month_start.isoformat()}")
 
     ceo_user = (
         db.query(User)
@@ -2023,6 +2031,8 @@ def create_business_unit(payload: BUCreateIn, user: User = Depends(require_admin
     db.add(bu)
     db.commit()
     db.refresh(bu)
+    # M-04: BU creation is a structural change — audit it.
+    log_audit(db, user, "BUSINESS_UNIT_CREATED", f"bu_id={bu.id} name={bu.name}")
     return _serialize_bu_admin(db, bu)
 
 
@@ -2045,6 +2055,8 @@ def update_business_unit(bu_id: int, payload: BUUpdateIn, user: User = Depends(r
         bu.name = name
     db.commit()
     db.refresh(bu)
+    # M-04: BU rename is a structural change — audit it.
+    log_audit(db, user, "BUSINESS_UNIT_UPDATED", f"bu_id={bu_id} name={bu.name}")
     out = _serialize_bu_admin(db, bu)
     out["note"] = note
     return out

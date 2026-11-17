@@ -8,7 +8,7 @@ needs_help escalation flag — true only for non-blank help text).
 Run with: ENVIRONMENT=test DATABASE_URL=sqlite:// \
     .venv/bin/python -m pytest tests/test_activity_help_fields.py
 """
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -94,11 +94,14 @@ def _activity(db, bu_id, on):
 
 def test_submit_stores_problems_and_help(db):
     ceo = db.test_users["ceo"]
-    result = _submit(db, ceo, report_date="2026-10-06",
+    # M-03: submit dates must sit inside the edit window (default 7 days),
+    # so the frozen October dates this file used are now relative to today.
+    day = today_local() - timedelta(days=3)
+    result = _submit(db, ceo, report_date=day.isoformat(),
                      meetings_attended="Route planning",
                      problems_today=PROBLEMS, help_needed=HELP)
     assert result == {"ok": True}
-    row = _activity(db, 1, date(2026, 10, 6))
+    row = _activity(db, 1, day)
     assert row is not None
     assert row.problems_today == PROBLEMS
     assert row.help_needed == HELP
@@ -106,19 +109,21 @@ def test_submit_stores_problems_and_help(db):
 
 def test_submit_resubmit_edits_and_clears_fields(db):
     ceo = db.test_users["ceo"]
-    _submit(db, ceo, report_date="2026-10-07",
+    day = today_local() - timedelta(days=2)
+    _submit(db, ceo, report_date=day.isoformat(),
             problems_today="Old problem", help_needed="Old ask")
-    _submit(db, ceo, report_date="2026-10-07",
+    _submit(db, ceo, report_date=day.isoformat(),
             problems_today="Updated problem", help_needed="")
-    row = _activity(db, 1, date(2026, 10, 7))
+    row = _activity(db, 1, day)
     assert row.problems_today == "Updated problem"
     assert row.help_needed is None  # blank clears back to NULL, not ""
 
 
 def test_submit_blank_help_stays_null(db):
     ceo = db.test_users["ceo"]
-    _submit(db, ceo, report_date="2026-10-08", problems_today="Minor delay")
-    row = _activity(db, 1, date(2026, 10, 8))
+    day = today_local() - timedelta(days=1)
+    _submit(db, ceo, report_date=day.isoformat(), problems_today="Minor delay")
+    row = _activity(db, 1, day)
     assert row.problems_today == "Minor delay"
     assert row.help_needed is None
 
@@ -138,10 +143,11 @@ def test_ceo_dashboard_payload_includes_fields(db):
 
 def test_ceo_dashboard_date_prefill_includes_fields(db):
     ceo = db.test_users["ceo"]
-    _submit(db, ceo, report_date="2026-10-06",
+    day = today_local() - timedelta(days=3)
+    _submit(db, ceo, report_date=day.isoformat(),
             problems_today=PROBLEMS, help_needed=HELP)
-    out = ceo_dashboard(month="", for_date="2026-10-06", user=ceo, db=db)
-    assert out["form_date"] == "2026-10-06"
+    out = ceo_dashboard(month="", for_date=day.isoformat(), user=ceo, db=db)
+    assert out["form_date"] == day.isoformat()
     assert out["form_activity"]["problems_today"] == PROBLEMS
     assert out["form_activity"]["help_needed"] == HELP
 

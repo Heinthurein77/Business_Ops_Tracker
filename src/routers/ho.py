@@ -11,7 +11,8 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from src.auth import require_roles
+from src.auth import assert_token_current, require_roles
+from src.config import settings
 from src.database import get_db
 from src.models import (
     HeadOfficeActivityLog,
@@ -47,6 +48,7 @@ from src.utils import (
     form_text,
     format_local_datetime,
     log_audit,
+    monthly_target_window_error,
     parse_bounded_decimal,
     parse_monthly_target_amounts,
     today_local,
@@ -103,6 +105,24 @@ def ho_dashboard(user: User = Depends(require_roles("HO")), db: Session = Depend
     health = db.query(HeadOfficeHealthStatus).filter(HeadOfficeHealthStatus.report_date == report_date).first()
     social = db.query(HeadOfficeSocialLog).filter(HeadOfficeSocialLog.report_date == report_date).first()
 
+    # m-31: HO rows are shared by report_date — any HO user can overwrite
+    # another's submission. The models already carry submitted_by (set on
+    # every submit), so no migration is needed; the dashboard records and
+    # displays the last submitter instead of fragmenting the single HO
+    # report per user. The most recently updated of today's rows wins.
+    last_submitted_by = None
+    today_rows = [r for r in (financial, activity, health, social)
+                  if r is not None and getattr(r, "submitted_by", None) is not None]
+    if today_rows:
+        latest_row = max(today_rows, key=lambda r: r.updated_at or r.created_at)
+        submitter = db.query(User).filter(User.id == latest_row.submitted_by).first()
+        if submitter is not None:
+            last_submitted_by = {
+                "user_id": submitter.id,
+                "username": submitter.username,
+                "full_name": submitter.full_name,
+            }
+
     latest_financial = db.query(HeadOfficeDailyFinancial).order_by(HeadOfficeDailyFinancial.report_date.desc()).first()
     latest_activity = db.query(HeadOfficeActivityLog).order_by(HeadOfficeActivityLog.report_date.desc()).first()
     latest_health = db.query(HeadOfficeHealthStatus).order_by(HeadOfficeHealthStatus.report_date.desc()).first()
@@ -138,6 +158,7 @@ def ho_dashboard(user: User = Depends(require_roles("HO")), db: Session = Depend
     return {
         "report_date": report_date.isoformat(),
         "report_date_display": report_date.strftime("%A, %d %B %Y"),
+        "last_submitted_by": last_submitted_by,
         "submission_events_today": todays_submission_events(db, user.id, "HO_DAILY_REPORT_SUBMITTED", report_date),
         "financial": {
             "revenue": float(financial.revenue) if financial else None,
@@ -265,6 +286,12 @@ def set_monthly_target(
             target_month = target_month.replace(day=1)
     except ValueError:
         raise HTTPException(status_code=400, detail="target_month must be a valid ISO date")
+
+    # M-03: same edit window as the CEO targets — a past month is only
+    # settable within the window after that month ends.
+    window_error = monthly_target_window_error(target_month, today_local(), settings.REPORT_EDIT_WINDOW_DAYS)
+    if window_error:
+        raise HTTPException(status_code=400, detail=window_error)
 
     # Rejects NaN / Infinity / abs >= 1e13 / negative revenue-receivable-payable
     # targets with a 400 (pydantic's float lets Infinity and huge values through).
@@ -538,6 +565,10 @@ def submit_report(
     social.golf_flag = _parse_bool(golf_flag)
     social.other_notes = social_other_notes or None
     social.submitted_by = user.id
+
+    # m-05 (SM-1): same mid-request revocation re-check as the CEO
+    # submit path — immediately before the commit.
+    assert_token_current(db, user)
 
     try:
         db.commit()

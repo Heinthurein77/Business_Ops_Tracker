@@ -58,7 +58,9 @@ def test_due_today_notifies_assignee(db):
     assert notes[0].type == "action_due"
     assert "due today" in notes[0].title
     assert "Submit audit pack" in notes[0].title
-    assert notes[0].link == "/admin/daily-ops"
+    assert notes[0].link == "/ceo"  # M-13: the assignee is a CEO, so the
+    # link must be CEO-reachable — the old /admin/daily-ops bounced them
+    # to their home page (/admin is Chairman/HO-only).
     assert notes[0].is_read is False
 
 

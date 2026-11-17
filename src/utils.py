@@ -10,7 +10,7 @@ import json
 import logging
 import re
 import secrets
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -64,6 +64,42 @@ def server_error(detail: str, exc: BaseException, logger: logging.Logger,
 
 def today_local() -> date:
     return datetime.now(APP_TZ).date()
+
+
+def report_date_window_error(report_date: date, today: date, window_days: int) -> Optional[str]:
+    """M-03: error detail when a daily-report date is outside the editable
+    window, else None. The window is [today - window_days, today]: future
+    dates are rejected (no planning entries) and anything older needs an
+    admin-approved correction instead of a silent CEO rewrite of history."""
+    if report_date > today:
+        return "report_date cannot be in the future"
+    if (today - report_date).days > window_days:
+        return (
+            f"report_date is more than {window_days} days old — reports older than "
+            f"{window_days} days can only be corrected by Head Office"
+        )
+    return None
+
+
+def monthly_target_window_error(target_month: date, today: date, window_days: int) -> Optional[str]:
+    """M-03: same cutoff for monthly targets, measured from the end of the
+    target month (a target for last month stays settable for `window_days`
+    after that month ends). The current month — and any future month — is
+    always allowed; only past months are bounded."""
+    current_month_start = date(today.year, today.month, 1)
+    if target_month >= current_month_start:
+        return None
+    if target_month.month == 12:
+        next_month_start = date(target_month.year + 1, 1, 1)
+    else:
+        next_month_start = date(target_month.year, target_month.month + 1, 1)
+    month_end = next_month_start - timedelta(days=1)
+    if (today - month_end).days > window_days:
+        return (
+            f"target_month ended more than {window_days} days ago — targets for past "
+            f"months can only be set by Head Office"
+        )
+    return None
 
 
 _FORMULA_TRIGGER_CHARS = ("=", "+", "-", "@", "\t", "\r")
@@ -448,7 +484,11 @@ def log_audit(
     from src.client_ip import get_client_ip
     from src.throttle import MAX_USERNAME_LEN, strip_control_chars
 
-    recorded_username = user.username if user else username
+    # M-04 follow-up: duck-typed callers (tests, and any future caller
+    # passing a minimal user object) may carry no .username — read it
+    # defensively so an audit write can never raise out of log_audit and
+    # fail the request it was recording (the D-8 guarantee above).
+    recorded_username = getattr(user, "username", None) if user is not None else username
     if recorded_username is not None:
         recorded_username = strip_control_chars(recorded_username)[:MAX_USERNAME_LEN]
 
@@ -460,7 +500,7 @@ def log_audit(
     details_limit = 4000 if "resubmit_changes_json=" in text else 1000
 
     entry = AuditLog(
-        user_id=user.id if user else None,
+        user_id=getattr(user, "id", None) if user is not None else None,
         username=recorded_username,
         action=action,
         details=text[:details_limit],

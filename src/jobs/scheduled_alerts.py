@@ -10,14 +10,21 @@ All three checks are idempotent/throttled in src/routers/ops.py:
 - Missing reports: one notification per CEO per run for today's missing report.
 - Document expiry: one alert per document per 7 days.
 - Action items: one reminder per item per 7 days when due today or overdue.
+
+M-05: a failed run also notifies Chairman/HO in-app (and logs at ERROR
+level) — a failure that only lands in ~/bot-alerts.log is invisible to
+everyone, since nothing monitors that file.
 """
+import logging
 import sys
 from datetime import datetime
 
 from src.database import SessionLocal
-from src.models import JobHeartbeat
+from src.models import JobHeartbeat, Notification, User
 from src.utils import utcnow
 from src.routers.ops import run_check_document_expiry, run_remind_action_items, run_remind_missing_reports
+
+logger = logging.getLogger(__name__)
 
 
 def _record_heartbeat(db, job_name: str, status: str) -> None:
@@ -32,6 +39,26 @@ def _record_heartbeat(db, job_name: str, status: str) -> None:
         print(f"heartbeat update failed for {job_name}: {exc}", file=sys.stderr)
 
 
+def _notify_failure(db, exc: Exception) -> None:
+    """M-05: tell Chairman/HO in-app that the run failed. Best effort by
+    design — when the database itself is the failure this will fail too,
+    and the ERROR log line + non-zero exit are the alert path then."""
+    try:
+        recipients = db.query(User).filter(
+            User.role.in_(["Chairman", "HO"]), User.is_active == True).all()  # noqa: E712
+        for recipient in recipients:
+            db.add(Notification(
+                user_id=recipient.id, type="alert",
+                title="Scheduled alerts failed",
+                message=f"scheduled_alerts failed: {exc}",
+                link="/admin/daily-ops"))
+        if recipients:
+            db.commit()
+    except Exception as notify_exc:  # noqa: BLE001 - never mask the job result
+        db.rollback()
+        print(f"scheduled_alerts failure notification failed: {notify_exc}", file=sys.stderr)
+
+
 def main() -> int:
     db = SessionLocal()
     try:
@@ -44,7 +71,9 @@ def main() -> int:
         _record_heartbeat(db, "scheduled_alerts", "ok")
         return 0
     except Exception as exc:
+        logger.error("scheduled_alerts failed: %s", exc, exc_info=True)
         print(f"scheduled_alerts failed: {exc}", file=sys.stderr)
+        _notify_failure(db, exc)
         _record_heartbeat(db, "scheduled_alerts", "failed")
         return 1
     finally:
