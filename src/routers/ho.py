@@ -105,6 +105,24 @@ def ho_dashboard(user: User = Depends(require_roles("HO")), db: Session = Depend
     health = db.query(HeadOfficeHealthStatus).filter(HeadOfficeHealthStatus.report_date == report_date).first()
     social = db.query(HeadOfficeSocialLog).filter(HeadOfficeSocialLog.report_date == report_date).first()
 
+    # m-31: HO rows are shared by report_date — any HO user can overwrite
+    # another's submission. The models already carry submitted_by (set on
+    # every submit), so no migration is needed; the dashboard records and
+    # displays the last submitter instead of fragmenting the single HO
+    # report per user. The most recently updated of today's rows wins.
+    last_submitted_by = None
+    today_rows = [r for r in (financial, activity, health, social)
+                  if r is not None and getattr(r, "submitted_by", None) is not None]
+    if today_rows:
+        latest_row = max(today_rows, key=lambda r: r.updated_at or r.created_at)
+        submitter = db.query(User).filter(User.id == latest_row.submitted_by).first()
+        if submitter is not None:
+            last_submitted_by = {
+                "user_id": submitter.id,
+                "username": submitter.username,
+                "full_name": submitter.full_name,
+            }
+
     latest_financial = db.query(HeadOfficeDailyFinancial).order_by(HeadOfficeDailyFinancial.report_date.desc()).first()
     latest_activity = db.query(HeadOfficeActivityLog).order_by(HeadOfficeActivityLog.report_date.desc()).first()
     latest_health = db.query(HeadOfficeHealthStatus).order_by(HeadOfficeHealthStatus.report_date.desc()).first()
@@ -140,6 +158,7 @@ def ho_dashboard(user: User = Depends(require_roles("HO")), db: Session = Depend
     return {
         "report_date": report_date.isoformat(),
         "report_date_display": report_date.strftime("%A, %d %B %Y"),
+        "last_submitted_by": last_submitted_by,
         "submission_events_today": todays_submission_events(db, user.id, "HO_DAILY_REPORT_SUBMITTED", report_date),
         "financial": {
             "revenue": float(financial.revenue) if financial else None,

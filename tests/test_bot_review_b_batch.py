@@ -523,3 +523,27 @@ class TestExpiringSoonSqlFilter:
         out = list_documents(expiring_soon=False, limit=100, offset=0, user=ceo, db=db)
         assert out["count"] == 5
         assert len(out["items"]) == 5
+
+
+# ------------------------------------------------------------------ m-31
+
+class TestHoLastSubmitter:
+    def test_dashboard_shows_last_submitter(self, db):
+        from src.routers.ho import ho_dashboard
+        ho, ho2 = db.test_users["ho"], db.test_users["ho2"]
+        _ho_submit(db, ho)
+        out = ho_dashboard(user=ho, db=db)
+        assert out["last_submitted_by"]["username"] == "ho_b"
+        assert out["last_submitted_by"]["user_id"] == ho.id
+        # A second HO user overwriting the shared day is visible as the
+        # new last submitter (the overwrite itself stays possible — the
+        # single HO report is shared — but it is no longer silent).
+        _ho_submit(db, ho2)
+        out = ho_dashboard(user=ho2, db=db)
+        assert out["last_submitted_by"]["username"] == "ho2_b"
+        assert out["last_submitted_by"]["user_id"] == ho2.id
+
+    def test_dashboard_without_submission_has_no_submitter(self, db):
+        from src.routers.ho import ho_dashboard
+        out = ho_dashboard(user=db.test_users["ho"], db=db)
+        assert out["last_submitted_by"] is None
