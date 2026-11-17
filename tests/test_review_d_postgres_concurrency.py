@@ -35,7 +35,7 @@ from src.models import (
     SocialLog,
     User,
 )
-from src.routers.ceo import _report_submit_timestamps
+from src.routers.ceo import _rate_limiter
 from src.utils import today_local
 
 import httpx
@@ -151,7 +151,7 @@ def test_double_submit_race_returns_409_loser_pg(pg_engine):
     cookie = _login_cookie()
     outcomes = []
     for attempt in range(8):
-        _report_submit_timestamps.clear()
+        _rate_limiter.reset()
         raced_date = today_local() - timedelta(days=attempt)
         statuses = _race_once(cookie, raced_date)
         outcomes.append((str(raced_date), statuses))

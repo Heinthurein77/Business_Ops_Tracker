@@ -1300,7 +1300,11 @@ def submit_report(
     # still current — a logout/password change landing mid-request must
     # not still commit afterwards. No-op for callers with no token
     # stashed on the user (direct/test callers).
-    assert_token_current(db, user)
+    # The check itself queries, so it runs under no_autoflush: outside
+    # it, the query would autoflush the loser's pending INSERTs from the
+    # blocks above and 500 instead of 409ing (M-14).
+    with db.no_autoflush:
+        assert_token_current(db, user)
 
     try:
         db.commit()

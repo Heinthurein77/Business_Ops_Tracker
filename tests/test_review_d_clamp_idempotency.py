@@ -59,6 +59,11 @@ def http_db(tmp_path):
         User(username="ceo_one", hashed_password=_PW_HASH,
              role="CEO", business_unit_id=1, is_active=True,
              require_password_change=False, is_profile_completed=True),
+        # HO is the admin login for the tests below: the chairman needs
+        # TOTP enrollment since M-01, while HO does not.
+        User(username="ho", hashed_password=_PW_HASH,
+             role="HO", is_active=True, require_password_change=False,
+             is_profile_completed=True),
     ])
     session.commit()
     yield session
@@ -119,7 +124,7 @@ def ceo(http_db):
 @pytest.fixture()
 def admin(http_db):
     c = ApiClient(http_db)
-    c.login("chairman")
+    c.login("ho")
     return c
 
 
@@ -186,13 +191,15 @@ class TestClampHttp:
 # ---------------------------------------------------------------- m-10: idempotency
 
 class TestIdempotencyActionItems:
-    def test_same_key_twice_creates_one_row_and_replays(self, ceo, http_db):
+    def test_same_key_twice_creates_one_row_and_replays(self, admin, http_db):
+        # Created as the admin (HO) user: a CEO creator may only assign
+        # within their own BU (m-34), and assignee id 1 is the chairman.
         headers = {"Idempotency-Key": "key-aaa-1"}
         payload = {"business_unit_id": 1, "title": "Chase supplier",
                    "assigned_to_id": 1, "due_date": today_local().isoformat()}
-        r1 = ceo.post("/api/ops/action-items", json=payload, headers=headers)
+        r1 = admin.post("/api/ops/action-items", json=payload, headers=headers)
         assert r1.status_code == 200, r1.text
-        r2 = ceo.post("/api/ops/action-items", json=payload, headers=headers)
+        r2 = admin.post("/api/ops/action-items", json=payload, headers=headers)
         assert r2.status_code == 200, r2.text
         assert r2.json() == r1.json()
         assert r2.json()["id"] == r1.json()["id"]
@@ -220,7 +227,7 @@ class TestIdempotencyActionItems:
         assert http_db.query(IdempotencyKey).count() == 0
 
     def test_same_key_is_scoped_per_user(self, ceo, admin, http_db):
-        # Chairman and CEO reusing the same key string get separate rows:
+        # HO (admin) and CEO reusing the same key string get separate rows:
         # the dedupe scope is (user, endpoint, key).
         payload = {"business_unit_id": 1, "title": "Scoped item"}
         headers = {"Idempotency-Key": "shared-key"}

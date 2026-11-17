@@ -239,7 +239,7 @@ def _validate_assignee(db: Session, user: User, assigned_to_id: Optional[int]) -
 
 
 @router.post("/action-items")
-def create_action_item(payload: ActionItemIn, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_action_item(payload: ActionItemIn, request: Request = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     # m-10: a retried request with the same Idempotency-Key replays the
     # first response instead of creating a second action item.
     endpoint = "POST /api/ops/action-items"
@@ -654,7 +654,7 @@ def list_documents(business_unit_id: Optional[int] = None, expiring_soon: bool =
 
 
 @router.post("/documents")
-def create_document(payload: DocumentIn, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_document(payload: DocumentIn, request: Request = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     # m-10: same Idempotency-Key replay as create_action_item.
     endpoint = "POST /api/ops/documents"
     key = _idempotency_key(request)

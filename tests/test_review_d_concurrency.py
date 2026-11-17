@@ -125,7 +125,7 @@ def test_double_submit_race_returns_409_loser(race_db):
     cookie = _login_cookie(race_db)
     outcomes = []
     for attempt in range(8):
-        _report_submit_timestamps.clear()  # 5 submits / 60 s rate limit
+        _rate_limiter.reset()  # 5 submits / 60 s rate limit
         raced_date = today_local() - timedelta(days=attempt)
         statuses = _race_once(race_db, cookie, raced_date)
         outcomes.append((str(raced_date), statuses))

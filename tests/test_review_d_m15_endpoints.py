@@ -140,7 +140,7 @@ def client(http_db):
 @pytest.fixture()
 def admin(http_db):
     c = ApiClient(http_db)
-    c.login("chairman")
+    c.login("ho")
     return c
 
 
