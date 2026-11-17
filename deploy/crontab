@@ -67,4 +67,3 @@
 # failure persists, plus a job_heartbeats row for the dead-man check.
 # Daily 07:30. Follows the same flock pattern as the lines above.
 # Log: ~/bot-reconcile.log
-30 7 * * * flock -E 99 -n ~/bot-reconcile.lock -c 'cd ~/business-ops-tracker && docker compose -f docker-compose.prod.yml exec -T app python -m src.jobs.reconcile_journals' >> ~/bot-reconcile.log 2>&1; rc=$?; if [ $rc -eq 99 ]; then echo "$(date) reconcile_journals skipped: already running" >> ~/bot-reconcile.log; exit 0; else exit $rc; fi
