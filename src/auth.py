@@ -63,8 +63,6 @@ _PROFILE_SETUP_EXEMPT_PATHS = {
 def role_home_path(role: str) -> str:
     if role == "CEO":
         return "/ceo"
-    if role == "Accountant":
-        return "/accounting"
     if role in ("Chairman", "HO"):
         return "/admin"
     return "/login"
@@ -162,10 +160,8 @@ def decode_access_token(token: str) -> Optional[dict]:
 def warn_null_bu_ceo(user: User) -> None:
     """Sm-7: a CEO row must always carry a business_unit_id (creation
     requires one). A NULL BU here is a data inconsistency — and it would
-    silently skip the cross-BU owner check in /api/ops/uploads/view, the
-    same way legacy NULL-BU accountants skip it by design. Accountants
-    with a NULL BU are the settled legacy case and are not warned about;
-    CEOs are. Warning only — the request still proceeds so a data glitch
+    silently skip the cross-BU owner check in /api/ops/uploads/view.
+    Warning only — the request still proceeds so a data glitch
     can never lock a CEO out of the whole system."""
     if user.role == "CEO" and user.business_unit_id is None:
         logger.warning(

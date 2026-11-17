@@ -69,7 +69,7 @@ def _no_store(response: Response) -> None:
 
 @router.get("/users")
 def list_users(user: User = Depends(require_chairman), db: Session = Depends(get_db)):
-    users = db.query(User).filter(User.role.in_(["CEO", "HO", "Accountant"])).order_by(User.role.desc(), User.business_unit_id).all()
+    users = db.query(User).filter(User.role.in_(["CEO", "HO"])).order_by(User.role.desc(), User.business_unit_id).all()
     business_units = {bu.id: bu for bu in db.query(BusinessUnit).all()}
 
     entries = []
@@ -108,10 +108,8 @@ def create_user(
         raise HTTPException(status_code=400, detail=f'Username "{payload.username}" is already taken')
 
     business_unit_id = None
-    if payload.role in ("CEO", "Accountant"):
-        # CEOs and accountants both belong to exactly one business unit:
-        # the CEO runs it, the accountant keeps its books — and the
-        # accounting API pins a BU-assigned accountant to that BU.
+    if payload.role == "CEO":
+        # A CEO belongs to exactly one business unit: the CEO runs it.
         if payload.business_unit_id is None:
             raise HTTPException(status_code=400, detail=f"A business unit is required for a {payload.role} account")
         bu = db.query(BusinessUnit).filter(BusinessUnit.id == payload.business_unit_id).first()
@@ -292,17 +290,16 @@ def update_user(
     """Change an account's business-unit assignment.
 
     The assignment is access control, not bookkeeping: a CEO runs the BU,
-    an accountant is pinned to it by the accounting API, and Chairman/HO
-    are group-level (never assigned). Moving an account therefore bumps
-    its token_version — every live session dies and the holder signs back
-    in under the new scope, instead of an open tab silently keeping access
-    to the wrong BU's books."""
+    and Chairman/HO are group-level (never assigned). Moving an account
+    therefore bumps its token_version — every live session dies and the
+    holder signs back in under the new scope, instead of an open tab
+    silently keeping access to the wrong BU."""
     target = db.query(User).filter(User.id == user_id).with_for_update().first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
 
     new_bu_id = payload.business_unit_id
-    if target.role in ("CEO", "Accountant") and new_bu_id is None:
+    if target.role == "CEO" and new_bu_id is None:
         raise HTTPException(
             status_code=400,
             detail=f"A {target.role} account must be assigned to a business unit",
