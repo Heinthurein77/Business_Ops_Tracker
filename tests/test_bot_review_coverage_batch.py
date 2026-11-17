@@ -17,7 +17,6 @@ import pytest
 from botocore.exceptions import ClientError
 from cryptography.fernet import Fernet, MultiFernet
 from fastapi import HTTPException, Response
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from starlette.requests import Request
 
@@ -29,7 +28,7 @@ from src import r2_storage as r2_mod
 from src.auth import hash_password, verify_password
 from src.config import settings
 from src.models import (
-    AuditLog, Base, BusinessUnit, DailyFinancial,
+    AuditLog, BusinessUnit, DailyFinancial,
     HeadOfficeActivityLog, HeadOfficeDailyFinancial, HeadOfficeHealthStatus,
     HeadOfficeSocialLog, LicenseDocument,
     Notification, PasswordResetRequest, User,
@@ -54,15 +53,6 @@ def make_request(peer="8.8.8.8", headers=None):
     return Request({"type": "http", "headers": raw, "client": (peer, 5555) if peer else None})
 
 
-@pytest.fixture()
-def db():
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
-    session.test_engine = engine
-    yield session
-    session.close()
-    engine.dispose()
 
 
 def _add_user(db, username, role, password=PASSWORD, business_unit_id=None,

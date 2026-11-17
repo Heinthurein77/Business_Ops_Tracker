@@ -21,34 +21,13 @@ from pathlib import Path
 
 import httpx
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
-from src.auth import hash_password
 from src.database import get_db
 from src.main import app
-from src.models import Base, User
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-@pytest.fixture()
-def http_db(tmp_path):
-    """File-backed SQLite DB: FastAPI runs sync endpoints in a worker
-    thread, so the in-memory engine (one DB per connection/thread) cannot
-    be shared between the fixture thread and the endpoint thread."""
-    db_path = tmp_path / "http.db"
-    engine = create_engine(
-        f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
-    session.add(User(username="chairman", hashed_password=hash_password("Chairman123!"),
-                     role="Chairman", is_active=True, require_password_change=False,
-                     is_profile_completed=True))
-    session.commit()
-    yield session
-    session.close()
-    engine.dispose()
 
 
 @pytest.fixture()
