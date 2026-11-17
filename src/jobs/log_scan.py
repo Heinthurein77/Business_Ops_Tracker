@@ -32,8 +32,8 @@ from datetime import datetime, timedelta
 from typing import Iterable
 
 from src.database import SessionLocal
-from src.models import JobHeartbeat, Notification, User
-from src.utils import utcnow
+from src.models import JobHeartbeat, User
+from src.utils import notify, record_job_heartbeat as _record_heartbeat, utcnow
 
 # A job whose heartbeat is older than this is presumed dead.
 STALE_AFTER_HOURS = 36
@@ -176,22 +176,12 @@ def check_heartbeats(db, now=None) -> list[str]:
             + stale_jobs(pairs, now=now, expected=WEEKLY_JOBS, never_ran_is_stale=False))
 
 
-def _record_heartbeat(db, job_name: str, status: str) -> None:
-    """Best effort: a heartbeat write must not fail the scan itself."""
-    try:
-        db.merge(JobHeartbeat(job_name=job_name, last_run_at=utcnow(), last_status=status))
-        db.commit()
-    except Exception as exc:  # noqa: BLE001 - heartbeat must not fail the job
-        db.rollback()
-        print(f"heartbeat update failed for {job_name}: {exc}", file=sys.stderr)
-
-
 def _notify_chairman(db, title: str, message: str) -> bool:
     """One in-app Notification per active Chairman. Returns True when at
     least one Chairman exists to notify."""
     chairmen = db.query(User).filter(User.role == "Chairman", User.is_active == True).all()  # noqa: E712
     for chairman in chairmen:
-        db.add(Notification(user_id=chairman.id, type="alert", title=title, message=message, link="/admin"))
+        notify(db, chairman.id, "alert", title, message, link="/admin")
     if chairmen:
         db.commit()
     return bool(chairmen)

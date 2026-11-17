@@ -1,7 +1,4 @@
 import logging
-import threading
-import time
-from collections import defaultdict, deque
 from datetime import date
 from decimal import Decimal
 from typing import Optional
@@ -46,8 +43,10 @@ from src.utils import (
     form_text,
     format_local_datetime,
     log_audit,
-    parse_bounded_decimal,
+    parse_bool,
+    parse_month_or_default,
     parse_monthly_target_amounts,
+    SubmitRateLimiter,
     today_local,
     todays_submission_events,
     validate_blood_pressure,
@@ -59,39 +58,15 @@ router = APIRouter(prefix="/api/ho", tags=["ho"])
 # submitted at most a couple of times a day.
 REPORT_SUBMIT_RATE_LIMIT = 5
 REPORT_SUBMIT_RATE_WINDOW_SECONDS = 60
-_report_submit_timestamps: dict[int, deque] = defaultdict(deque)
-# submit_report runs in FastAPI's threadpool (it's a plain `def`), so the
-# shared deque bookkeeping below must be serialized.
-_report_submit_lock = threading.Lock()
+# M-12: the guard itself lives in src/utils.py (SubmitRateLimiter); this
+# router owns one instance so CEO and HO keep separate budgets.
+_rate_limiter = SubmitRateLimiter(REPORT_SUBMIT_RATE_LIMIT, REPORT_SUBMIT_RATE_WINDOW_SECONDS)
+_is_rate_limited = _rate_limiter.is_limited
 
 MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 ALLOWED_ATTACHMENT_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "gif", "webp", "doc", "docx", "xls", "xlsx", "csv", "txt"}
 
 logger = logging.getLogger(__name__)
-
-def _is_rate_limited(user_id: int) -> bool:
-    now = time.monotonic()
-    with _report_submit_lock:
-        timestamps = _report_submit_timestamps[user_id]
-        while timestamps and now - timestamps[0] > REPORT_SUBMIT_RATE_WINDOW_SECONDS:
-            timestamps.popleft()
-        if len(timestamps) >= REPORT_SUBMIT_RATE_LIMIT:
-            return True
-        timestamps.append(now)
-        return False
-
-
-def _parse_decimal(raw: Optional[str]) -> Optional[Decimal]:
-    """Blank -> None. NaN / Infinity / abs(value) >= 1e13 (the money columns
-    are Numeric(16, 2)) / unparsable input -> None too, never a Decimal that
-    Postgres would store as NaN (poisoning every SUM) or overflow on. Rounded
-    to 2 decimals, the column's precision. See utils.parse_bounded_decimal."""
-    return parse_bounded_decimal(raw)
-
-
-def _parse_bool(raw: Optional[str]) -> bool:
-    return (raw or "").strip().lower() in ("true", "1", "yes", "on")
-
 
 @router.get("/dashboard")
 def ho_dashboard(user: User = Depends(require_roles("HO")), db: Session = Depends(get_db)):
@@ -227,11 +202,8 @@ def get_monthly_target(month: str = "", user: User = Depends(require_roles("HO")
     month) — mirrors /api/ceo/monthly-target so the "Set Monthly Target" form
     can pre-fill the same way."""
     today = today_local()
-    try:
-        year, month_num = (int(part) for part in month.split("-", 1))
-        target_month = date(year, month_num, 1)
-    except (ValueError, TypeError):
-        target_month = date(today.year, today.month, 1)
+    year, month_num = parse_month_or_default(month, today)
+    target_month = date(year, month_num, 1)
 
     target = db.query(HeadOfficeMonthlyTarget).filter(HeadOfficeMonthlyTarget.target_month == target_month).first()
     if target is None:
@@ -532,9 +504,9 @@ def submit_report(
     if social is None:
         social = HeadOfficeSocialLog(report_date=report_date)
         db.add(social)
-    social.event_flag = _parse_bool(event_flag)
-    social.meeting_flag = _parse_bool(meeting_flag)
-    social.golf_flag = _parse_bool(golf_flag)
+    social.event_flag = parse_bool(event_flag)
+    social.meeting_flag = parse_bool(meeting_flag)
+    social.golf_flag = parse_bool(golf_flag)
     social.other_notes = social_other_notes or None
     social.submitted_by = user.id
 

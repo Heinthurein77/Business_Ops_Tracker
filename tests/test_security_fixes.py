@@ -9,7 +9,7 @@ no httpx/TestClient).
 """
 import asyncio
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 os.environ.setdefault("ENVIRONMENT", "test")
@@ -22,7 +22,7 @@ from sqlalchemy.orm import sessionmaker
 
 from src import throttle
 from src.auth import InsufficientRoleException
-from src.models import AuditLog, Base, Notification, User
+from src.models import AuditLog, Base, User
 
 PUBLIC_IP = "8.8.8.8"
 

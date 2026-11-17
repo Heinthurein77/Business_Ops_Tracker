@@ -10,7 +10,6 @@
 
 Run with: ENVIRONMENT=test DATABASE_URL=sqlite:// .venv/bin/python -m pytest tests/test_r2_reliability.py -q
 """
-import asyncio
 import io
 import logging
 from datetime import date
@@ -27,7 +26,7 @@ from src import r2_storage as r2_mod
 from src.auth import hash_password
 from src.config import settings
 from src.models import (
-    ActivityLog, AuditLog, Base, BusinessUnit, CeoProfile, DailyFinancial,
+    ActivityLog, Base, BusinessUnit, CeoProfile, DailyFinancial,
     HeadOfficeActivityLog, User,
 )
 from src.r2_storage import (
@@ -104,7 +103,7 @@ def _failing_r2(monkeypatch):
 
 def _ceo_submit(db, user, **overrides):
     import src.routers.ceo as ceo_router
-    ceo_router._report_submit_timestamps.clear()
+    ceo_router._rate_limiter.reset()
     payload = dict(
         report_date="", revenue="100000", cash_flow="0", receivable="0", payable="0",
         other_amount="", financial_other_notes="", meetings_attended="Standup",
@@ -124,7 +123,7 @@ def _ceo_submit(db, user, **overrides):
 
 def _ho_submit(db, user, **overrides):
     import src.routers.ho as ho_router
-    ho_router._report_submit_timestamps.clear()
+    ho_router._rate_limiter.reset()
     payload = dict(
         revenue="100000", cash_flow="20000", receivable="5000", payable="3000",
         other_amount="1000", financial_other_notes="", meetings_attended="Standup",

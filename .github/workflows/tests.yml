@@ -65,5 +65,15 @@ jobs:
         working-directory: frontend
         run: npm ci --ignore-scripts && npm run build
 
+      # m-04: lint gate — pyflakes catches undefined names (the C-2
+      # Decimal crash shipped with a green suite because no linter ran)
+      # and unused imports. Runs before the suite so a lint failure is
+      # reported as its own step, not buried in test output.
+      - name: Install lint dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Pyflakes lint (src + tests)
+        run: python -m pyflakes src/ tests/
+
       - name: Pytest suite
         run: python -m pytest tests/ -q

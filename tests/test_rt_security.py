@@ -24,7 +24,7 @@ os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 
 import pytest
-from fastapi import HTTPException, Request
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 

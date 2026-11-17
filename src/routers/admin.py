@@ -28,7 +28,6 @@ from src.models import (
     HeadOfficeMonthlyTarget,
     HeadOfficeSocialLog,
     MonthlyTarget,
-    Notification,
     SocialLog,
     User,
 )
@@ -54,7 +53,10 @@ from src.utils import (
     _sanitize_excel_cell,
     format_local_time,
     health_risk_notes,
+    bu_lookup_maps,
     log_audit,
+    notify,
+    parse_month_or_default,
     utcnow,
     parse_monthly_target_amounts,
     parse_resubmit_changes,
@@ -120,14 +122,7 @@ def gather_admin_overview(db: Session) -> dict:
     today = today_local()
     yesterday = today - timedelta(days=1)
 
-    business_units = db.query(BusinessUnit).order_by(BusinessUnit.id).all()
-    # Active CEOs only, oldest first: a deactivated predecessor must never
-    # shadow the current CEO of a unit, and if two active accounts ever share
-    # a unit the newest one (last write wins) is the one shown.
-    ceo_by_bu = {
-        u.business_unit_id: u
-        for u in db.query(User).filter(User.role == "CEO", User.is_active == True).order_by(User.id).all()  # noqa: E712
-    }
+    business_units, _, ceo_by_bu = bu_lookup_maps(db)
     ceo_profiles_by_user = {p.user_id: p for p in db.query(CeoProfile).all()}
 
     totals_row = db.query(
@@ -1146,7 +1141,7 @@ def ceo_profiles(user: User = Depends(require_admin), db: Session = Depends(get_
         .all()
     )
     profiles_by_user = {p.user_id: p for p in db.query(CeoProfile).all()}
-    business_units = {bu.id: bu for bu in db.query(BusinessUnit).all()}
+    _, business_units, _ = bu_lookup_maps(db)
     today = today_local()
 
     entries = []
@@ -1184,13 +1179,7 @@ def ceo_activity_calendar(
         raise HTTPException(status_code=404, detail="Business unit not found")
 
     today = today_local()
-    try:
-        calendar_year, calendar_month = (int(part) for part in month.split("-", 1))
-        date(calendar_year, calendar_month, 1)  # validates the month is real
-        if not (2000 <= calendar_year <= 2100):
-            raise ValueError("month out of supported range")
-    except (ValueError, TypeError):
-        calendar_year, calendar_month = today.year, today.month
+    calendar_year, calendar_month = parse_month_or_default(month, today)
 
     calendar_weeks = build_ceo_activity_calendar(db, business_unit.id, calendar_year, calendar_month, today, None)
     prev_year, prev_month = shift_month(calendar_year, calendar_month, -1)
@@ -1277,12 +1266,8 @@ def _activity_entry(log: ActivityLog, bu: Optional[BusinessUnit], ceo_username: 
 @router.get("/activity-dashboard")
 def activity_dashboard(user: User = Depends(require_admin), db: Session = Depends(get_db)):
     today = today_local()
-    business_units = db.query(BusinessUnit).order_by(BusinessUnit.id).all()
-    ceo_by_bu = {
-        u.business_unit_id: u.username
-        for u in db.query(User).filter(User.role == "CEO", User.is_active == True).order_by(User.id).all()  # noqa: E712
-    }
-    bu_by_id = {bu.id: bu for bu in business_units}
+    business_units, bu_by_id, _ceo_users_by_bu = bu_lookup_maps(db)
+    ceo_by_bu = {bu_id: u.username for bu_id, u in _ceo_users_by_bu.items()}
 
     today_rows = (
         db.query(ActivityLog).filter(ActivityLog.report_date == today)
@@ -1426,13 +1411,10 @@ def resolve_help_request(
             f"Help request answered — {business_unit.name if business_unit else 'your unit'} "
             f"({log.report_date.strftime('%d %b %Y')})"
         )[:200]
-        db.add(Notification(
-            user_id=log.submitted_by,
-            type="help_resolved",
-            title=title,
-            message=response_text,
+        notify(
+            db, log.submitted_by, "help_resolved", title, response_text,
             link=f"/ceo?date={log.report_date.isoformat()}",
-        ))
+        )
     db.commit()
     log_audit(
         db, user, "HELP_REQUEST_RESOLVED",
@@ -1469,13 +1451,7 @@ def ceo_monthly_summary(
         raise HTTPException(status_code=404, detail="Business unit not found")
 
     today = today_local()
-    try:
-        year, month_num = (int(part) for part in month.split("-", 1))
-        date(year, month_num, 1)  # validates the month is real
-        if not (2000 <= year <= 2100):
-            raise ValueError("month out of supported range")
-    except (ValueError, TypeError):
-        year, month_num = today.year, today.month
+    year, month_num = parse_month_or_default(month, today)
     month_start = date(year, month_num, 1)
     days_in_month = _cal.monthrange(year, month_num)[1]
     month_end = date(year, month_num, days_in_month)
@@ -1711,12 +1687,8 @@ def _health_entry(h: HealthStatus, bu: Optional[BusinessUnit], ceo_username: str
 @router.get("/health-dashboard")
 def health_dashboard(user: User = Depends(require_admin), db: Session = Depends(get_db)):
     today = today_local()
-    business_units = db.query(BusinessUnit).order_by(BusinessUnit.id).all()
-    bu_by_id = {bu.id: bu for bu in business_units}
-    ceo_by_bu = {
-        u.business_unit_id: u.username
-        for u in db.query(User).filter(User.role == "CEO", User.is_active == True).order_by(User.id).all()  # noqa: E712
-    }
+    business_units, bu_by_id, _ceo_users_by_bu = bu_lookup_maps(db)
+    ceo_by_bu = {bu_id: u.username for bu_id, u in _ceo_users_by_bu.items()}
 
     today_rows = (
         db.query(HealthStatus).filter(HealthStatus.report_date == today)
@@ -1813,7 +1785,7 @@ def export_excel(
         range_end = today_local()
         range_start = range_end - timedelta(days=89)
 
-    business_units = {bu.id: bu for bu in db.query(BusinessUnit).all()}
+    _, business_units, _ = bu_lookup_maps(db)
 
     financial_query = db.query(DailyFinancial)
     activity_query = db.query(ActivityLog)

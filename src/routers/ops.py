@@ -15,8 +15,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from src.auth import get_current_user, require_roles
+from src.services.ops_alerts import (  # noqa: F401 - re-exported for callers/tests
+    run_check_document_expiry,
+    run_remind_action_items,
+    run_remind_missing_reports,
+)
 from src.database import get_db
-from src.utils import _sanitize_excel_cell, log_audit, today_local, utcnow, validate_period
+from src.utils import _sanitize_excel_cell, log_audit, notify, today_local, utcnow, validate_period
 from src.models import (
     ActionItem,
     ActivityLog,
@@ -26,6 +31,7 @@ from src.models import (
     DailyFinancial,
     HeadOfficeActivityLog,
     LicenseDocument,
+    MonthlyTarget,
     Notification,
     StaffRecord,
     User,
@@ -149,11 +155,8 @@ def create_action_item(payload: ActionItemIn, user: User = Depends(get_current_u
     db.commit()
     db.refresh(item)
     if item.assigned_to_id and item.assigned_to_id != user.id:
-        db.add(Notification(
-            user_id=item.assigned_to_id, type="action_assigned",
-            title="New action item assigned",
-            message=item.title, link="/admin",
-        ))
+        notify(db, item.assigned_to_id, "action_assigned",
+               "New action item assigned", item.title, link="/admin")
         db.commit()
     _log_audit(db, user, "CREATE_ACTION_ITEM", f"id={item.id}")
     return serialize_action_item(db, item)
@@ -250,70 +253,11 @@ def remind_missing(user: User = Depends(require_admin), db: Session = Depends(ge
     return {"notified": run_remind_missing_reports(db)}
 
 
-def run_remind_missing_reports(db: Session) -> int:
-    """Job-callable: notify CEOs whose BU hasn't submitted today."""
-    today = today_local()
-    submitted_bu_ids = {
-        row[0] for row in db.query(DailyFinancial.business_unit_id).filter(DailyFinancial.report_date == today).all()
-    }
-    ceos = db.query(User).filter(User.role == "CEO", User.is_active == True).all()  # noqa: E712
-    sent = 0
-    for ceo in ceos:
-        if ceo.business_unit_id and ceo.business_unit_id not in submitted_bu_ids:
-            db.add(Notification(
-                user_id=ceo.id, type="missing_report",
-                title="Report not submitted today",
-                message="Please submit today's business performance report.",
-                link="/ceo",
-            ))
-            sent += 1
-    db.commit()
-    return sent
-
-
 @router.post("/notifications/remind-actions")
 def remind_actions(user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Notify assignees of action items due today or overdue."""
     _log_audit(db, user, "REMIND_ACTIONS", "")
     return run_remind_action_items(db)
-
-
-def run_remind_action_items(db: Session) -> dict:
-    """Job-callable: notify assignees of open action items due today or
-    overdue. Throttled per item to one reminder per 7 days (same pattern
-    as run_check_document_expiry's expiry_notified_at). Unassigned items
-    and items assigned to inactive users are skipped — there is nobody
-    to notify."""
-    today = today_local()
-    items = db.query(ActionItem).filter(
-        ActionItem.status.in_(["pending", "in_progress"]),
-        ActionItem.due_date.is_not(None),
-        ActionItem.due_date <= today,
-        ActionItem.assigned_to_id.is_not(None),
-    ).all()
-    sent = 0
-    for item in items:
-        if item.reminder_sent_at and item.reminder_sent_at > utcnow() - timedelta(days=7):
-            continue
-        assignee = db.query(User).filter(User.id == item.assigned_to_id, User.is_active == True).first()  # noqa: E712
-        if assignee is None:
-            continue
-        bu = db.query(BusinessUnit).filter(BusinessUnit.id == item.business_unit_id).first()
-        bu_name = bu.name if bu else f"BU {item.business_unit_id}"
-        overdue_days = (today - item.due_date).days
-        if overdue_days > 0:
-            title = f"Action item overdue: {item.title}"
-            message = (f"'{item.title}' ({bu_name}) was due {item.due_date.isoformat()} "
-                       f"({overdue_days} day{'s' if overdue_days != 1 else ''} overdue).")
-        else:
-            title = f"Action item due today: {item.title}"
-            message = f"'{item.title}' ({bu_name}) is due today ({item.due_date.isoformat()})."
-        db.add(Notification(user_id=assignee.id, type="action_due",
-                            title=title, message=message, link="/admin/daily-ops"))
-        item.reminder_sent_at = utcnow()
-        sent += 1
-    db.commit()
-    return {"checked": len(items), "notified": sent}
 
 
 @router.get("/uploads/view")
@@ -595,36 +539,6 @@ def check_document_expiry(days: int = 30, user: User = Depends(require_admin), d
     return run_check_document_expiry(db, days)
 
 
-def run_check_document_expiry(db: Session, days: int = 30) -> dict:
-    """Job-callable: notify CEOs + Chairman/HO about documents expiring soon."""
-    today = today_local()
-    horizon = today + timedelta(days=days)
-    docs = db.query(LicenseDocument).filter(
-        LicenseDocument.expiry_date >= today, LicenseDocument.expiry_date <= horizon).all()
-    admins = db.query(User).filter(User.role.in_(["Chairman", "HO"]), User.is_active == True).all()  # noqa: E712
-    sent = 0
-    for d in docs:
-        if d.expiry_notified_at and d.expiry_notified_at > utcnow() - timedelta(days=7):
-            continue
-        bu = db.query(BusinessUnit).filter(BusinessUnit.id == d.business_unit_id).first()
-        bu_name = bu.name if bu else f"BU {d.business_unit_id}"
-        days_left = (d.expiry_date - today).days
-        title = f"Document expiring: {d.title} ({bu_name})"
-        message = f"{d.document_type} expires in {days_left} days ({d.expiry_date.isoformat()})."
-        ceos = db.query(User).filter(User.role == "CEO", User.business_unit_id == d.business_unit_id, User.is_active == True).all()  # noqa: E712
-        seen = set()
-        for u in admins + ceos:
-            if u.id in seen:
-                continue
-            seen.add(u.id)
-            db.add(Notification(user_id=u.id, type="document_expiry",
-                                title=title, message=message, link="/admin/daily-ops"))
-            sent += 1
-        d.expiry_notified_at = utcnow()
-    db.commit()
-    return {"checked": len(docs), "notified": sent}
-
-
 # ---------------------------------------------------------------- monthly chairman PDF report
 
 @router.get("/monthly-report")
@@ -648,8 +562,6 @@ def monthly_report(month: Optional[str] = None, user: User = Depends(require_adm
     import calendar as _cal
     month_end = date(month_start.year, month_start.month, _cal.monthrange(month_start.year, month_start.month)[1])
     days_in_month = (month_end - month_start).days + 1
-
-    from src.models import MonthlyTarget
 
     fin = (db.query(DailyFinancial.business_unit_id,
                     func.coalesce(func.sum(DailyFinancial.revenue), 0),

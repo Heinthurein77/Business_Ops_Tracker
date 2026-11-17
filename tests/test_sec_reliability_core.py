@@ -14,8 +14,6 @@ import os
 import stat
 import subprocess
 import sys
-from datetime import date
-from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -24,8 +22,8 @@ os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 
 import pytest
-from sqlalchemy import create_engine, event, inspect
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy import create_engine, event
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from src.models import AuditLog, Base, BusinessUnit, User

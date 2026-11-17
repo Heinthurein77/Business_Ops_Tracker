@@ -1,7 +1,4 @@
 import logging
-import threading
-import time
-from collections import defaultdict, deque
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
@@ -14,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from src.auth import require_roles, resolve_redirect_path
 from src.database import get_db
-from src.models import ActivityLog, BusinessUnit, CeoProfile, DailyFinancial, FinancialNote, HealthStatus, MonthlyTarget, Notification, SocialLog, User
+from src.models import ActivityLog, BusinessUnit, CeoProfile, DailyFinancial, FinancialNote, HealthStatus, MonthlyTarget, SocialLog, User
 from src.r2_storage import delete_object, extract_r2_key
 from src.r2_storage import is_configured as r2_is_configured
 from src.r2_storage import upload_attachment_or_503, upload_fileobj
@@ -46,10 +43,14 @@ from src.utils import (
     form_text,
     format_local_datetime,
     log_audit,
+    notify,
+    parse_bool,
     parse_bounded_decimal,
+    parse_month_or_default,
     parse_monthly_target_amounts,
     serialize_ceo_profile,
     shift_month,
+    SubmitRateLimiter,
     today_local,
     todays_submission_events,
     validate_blood_pressure,
@@ -63,10 +64,10 @@ router = APIRouter(prefix="/api/ceo", tags=["ceo"])
 # and the R2 upload from being hammered.
 REPORT_SUBMIT_RATE_LIMIT = 5
 REPORT_SUBMIT_RATE_WINDOW_SECONDS = 60
-_report_submit_timestamps: dict[int, deque] = defaultdict(deque)
-# submit_report runs in FastAPI's threadpool (it's a plain `def`), so the
-# shared deque bookkeeping below must be serialized.
-_report_submit_lock = threading.Lock()
+# M-12: the guard itself lives in src/utils.py (SubmitRateLimiter); this
+# router owns one instance so CEO and HO keep separate budgets.
+_rate_limiter = SubmitRateLimiter(REPORT_SUBMIT_RATE_LIMIT, REPORT_SUBMIT_RATE_WINDOW_SECONDS)
+_is_rate_limited = _rate_limiter.is_limited
 
 MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 ALLOWED_ATTACHMENT_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "gif", "webp", "doc", "docx", "xls", "xlsx", "csv", "txt"}
@@ -75,30 +76,6 @@ logger = logging.getLogger(__name__)
 
 MAX_PROFILE_PHOTO_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
 ALLOWED_PROFILE_PHOTO_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
-
-
-def _is_rate_limited(user_id: int) -> bool:
-    now = time.monotonic()
-    with _report_submit_lock:
-        timestamps = _report_submit_timestamps[user_id]
-        while timestamps and now - timestamps[0] > REPORT_SUBMIT_RATE_WINDOW_SECONDS:
-            timestamps.popleft()
-        if len(timestamps) >= REPORT_SUBMIT_RATE_LIMIT:
-            return True
-        timestamps.append(now)
-        return False
-
-
-def _parse_decimal(raw: Optional[str]) -> Optional[Decimal]:
-    """Blank -> None. NaN / Infinity / abs(value) >= 1e13 (the money columns
-    are Numeric(16, 2)) / unparsable input -> None too, never a Decimal that
-    Postgres would store as NaN (poisoning every SUM) or overflow on. Rounded
-    to 2 decimals, the column's precision. See utils.parse_bounded_decimal."""
-    return parse_bounded_decimal(raw)
-
-
-def _parse_bool(raw: Optional[str]) -> bool:
-    return (raw or "").strip().lower() in ("true", "1", "yes", "on")
 
 
 @router.get("/dashboard")
@@ -110,16 +87,7 @@ def ceo_dashboard(
 ):
     report_date = today_local()
 
-    try:
-        calendar_year, calendar_month = (int(part) for part in month.split("-", 1))
-        date(calendar_year, calendar_month, 1)  # validates the month is real
-        if not (2000 <= calendar_year <= 2100):
-            # The calendar grid pads to whole weeks, so a month at the very
-            # edge of the supported date range (e.g. 9999-12) would overflow
-            # date arithmetic and 500 - clamp to a sane window instead.
-            raise ValueError("month out of supported range")
-    except (ValueError, TypeError):
-        calendar_year, calendar_month = report_date.year, report_date.month
+    calendar_year, calendar_month = parse_month_or_default(month, report_date)
 
     # Activity / health / social rows are the submitting CEO's own personal
     # data: every read of them below is scoped to `submitted_by == user.id`
@@ -586,11 +554,8 @@ def get_monthly_target(
     month) so the "Set Monthly Target" form can pre-fill with existing values
     instead of always starting blank."""
     today = today_local()
-    try:
-        year, month_num = (int(part) for part in month.split("-", 1))
-        target_month = date(year, month_num, 1)
-    except (ValueError, TypeError):
-        target_month = date(today.year, today.month, 1)
+    year, month_num = parse_month_or_default(month, today)
+    target_month = date(year, month_num, 1)
 
     target = (
         db.query(MonthlyTarget)
@@ -1068,7 +1033,7 @@ def submit_report(
     stress_level_val = _form_choice(stress_level, STRESS_LEVELS, "Stress level")
     energy_mood_val = _form_choice(energy_mood, ENERGY_MOODS, "Energy mood")
     weight_kg_val = _form_weight(weight_kg)
-    is_sick_val = _parse_bool(is_sick)
+    is_sick_val = parse_bool(is_sick)
     health_exercise_present = (
         health_gym_percent is not None or health_swimming_percent is not None or health_cycle_percent is not None
     )
@@ -1299,9 +1264,9 @@ def submit_report(
     if social is None:
         social = SocialLog(business_unit_id=user.business_unit_id, report_date=report_date)
         db.add(social)
-    social.event_flag = _parse_bool(event_flag)
-    social.meeting_flag = _parse_bool(meeting_flag)
-    social.golf_flag = _parse_bool(golf_flag)
+    social.event_flag = parse_bool(event_flag)
+    social.meeting_flag = parse_bool(meeting_flag)
+    social.golf_flag = parse_bool(golf_flag)
     social.other_notes = social_other_notes or None
     social.submitted_by = user.id
 
@@ -1418,15 +1383,13 @@ def submit_report(
         bu_label = bu.name if bu else f"BU {user.business_unit_id}"
         deviation = (float(revenue_val or 0) - anomaly_avg) / anomaly_avg * 100
         for ho_user in db.query(User).filter(User.role == "HO", User.is_active == True).all():  # noqa: E712
-            db.add(Notification(
-                user_id=ho_user.id, type="alert",
-                title=f"Revenue anomaly: {bu_label}",
-                message=(
-                    f"Revenue Ks {float(revenue_val or 0):,.0f} on {report_date.isoformat()} "
-                    f"vs 14-day average Ks {anomaly_avg:,.0f} ({deviation:+.0f}%) — please review."
-                ),
+            notify(
+                db, ho_user.id, "alert",
+                f"Revenue anomaly: {bu_label}",
+                f"Revenue Ks {float(revenue_val or 0):,.0f} on {report_date.isoformat()} "
+                f"vs 14-day average Ks {anomaly_avg:,.0f} ({deviation:+.0f}%) — please review.",
                 link=f"/admin/business-unit/{user.business_unit_id}",
-            ))
+            )
 
     audit_detail = build_resubmit_audit_detail(report_date, changes)
     log_audit(db, user, "DAILY_REPORT_SUBMITTED", audit_detail, request)

@@ -35,7 +35,8 @@ from typing import Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Query, Session
 
-from src.models import AuditLog, Notification, User
+from src.models import AuditLog, User
+from src.utils import notify
 
 MAX_USERNAME_LEN = 80
 
@@ -362,19 +363,14 @@ def _trigger_lockout(db: Session, username: str, now: datetime, n_user: int, dur
     )
     minutes = max(1, round(duration / 60))
     for admin in db.query(User).filter(User.role.in_(("Chairman", "HO")), User.is_active == True).all():  # noqa: E712
-        db.add(
-            Notification(
-                user_id=admin.id,
-                type="login_lockout",
-                title=f"Login locked: {username}",
-                message=(
-                    f"{n_user} failed sign-in attempts in {LOGIN_WINDOW_SECONDS // 60} minutes locked "
-                    f"the account '{username}' for about {minutes} minute{'s' if minutes != 1 else ''}. "
-                    "Attempts during the lock cannot extend it. If this was not the account holder, "
-                    "investigate — you can clear the lock early from User Management."
-                ),
-                link="/admin/users",
-            )
+        notify(
+            db, admin.id, "login_lockout",
+            f"Login locked: {username}",
+            f"{n_user} failed sign-in attempts in {LOGIN_WINDOW_SECONDS // 60} minutes locked "
+            f"the account '{username}' for about {minutes} minute{'s' if minutes != 1 else ''}. "
+            "Attempts during the lock cannot extend it. If this was not the account holder, "
+            "investigate — you can clear the lock early from User Management.",
+            link="/admin/users",
         )
     db.commit()
     logger.warning("Login lockout triggered for username=%s failures=%d duration=%ds", username, n_user, duration)

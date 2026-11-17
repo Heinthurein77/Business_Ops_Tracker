@@ -12,7 +12,6 @@ Run with: ENVIRONMENT=test DATABASE_URL=sqlite:// \
 import io
 from datetime import date, timedelta
 from decimal import Decimal
-from types import SimpleNamespace
 
 import pytest
 from botocore.exceptions import ClientError
@@ -424,7 +423,7 @@ def test_logout_bumps_token_version(auth_db):
 @pytest.fixture()
 def ho_db(db):
     db.test_ho = _add_user(db, "ho_user", "HO")
-    ho_router._report_submit_timestamps.clear()
+    ho_router._rate_limiter.reset()
     return db
 
 

@@ -9,6 +9,10 @@ import calendar as calendar_module
 import json
 import logging
 import re
+import sys
+import threading
+import time
+from collections import defaultdict, deque
 from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Optional
@@ -19,7 +23,7 @@ from sqlalchemy import case, func
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.config import settings
-from src.models import ActivityLog, AuditLog, CeoProfile, DailyFinancial, HeadOfficeDailyFinancial, HealthStatus, MonthlyTarget, SocialLog, User
+from src.models import ActivityLog, AuditLog, BusinessUnit, CeoProfile, DailyFinancial, HeadOfficeDailyFinancial, HealthStatus, JobHeartbeat, MonthlyTarget, Notification, SocialLog, User
 
 APP_TZ = ZoneInfo(settings.APP_TIMEZONE)
 
@@ -85,6 +89,115 @@ def validate_period(period: Optional[str]) -> Optional[str]:
     if not _PERIOD_FORMAT.match(period):
         raise HTTPException(status_code=422, detail="period must be in YYYY-MM format")
     return period
+
+
+def parse_bool(raw: Optional[str]) -> bool:
+    """M-12: the one boolean form parser, shared by the CEO and HO
+    submit-report handlers (was `_parse_bool`, verbatim-identical in
+    ceo.py and ho.py)."""
+    return (raw or "").strip().lower() in ("true", "1", "yes", "on")
+
+
+def parse_month_or_default(month: str, today: Optional[date] = None) -> tuple[int, int]:
+    """M-12: the one YYYY-MM month parser for the dashboard-style
+    endpoints (CEO/HO dashboards, monthly-target lookups, the admin
+    activity calendar, the CEO monthly summary) — previously five
+    hand-rolled copies. Garbage, an impossible month, or a year outside
+    2000–2100 falls back to today's year/month (the documented behaviour
+    of all five sites, pinned by test_ceo_pack.py's month="garbage" case)
+    instead of raising — that is why this is not validate_period(), whose
+    422 is for report endpoints that already use it. The 2000–2100 clamp
+    matters because the calendar grid pads to whole weeks and a month at
+    the edge of the date range (e.g. 9999-12) would overflow date
+    arithmetic and 500."""
+    today = today or today_local()
+    try:
+        year, month_num = (int(part) for part in month.split("-", 1))
+        date(year, month_num, 1)  # validates the month is real
+        if not (2000 <= year <= 2100):
+            raise ValueError("month out of supported range")
+    except (ValueError, TypeError, AttributeError):
+        return today.year, today.month
+    return year, month_num
+
+
+def notify(db, user_id: int, type: str, title: str, message: str, link: Optional[str] = None):
+    """M-12: the one in-app Notification constructor — was built inline at
+    8 sites (ops, admin, ceo, log_scan, throttle) with no shared helper,
+    so a shape change (e.g. the `link` field) had to be applied in N
+    places. Adds the row to the caller's session; the caller commits.
+    The `link` value is passed through unchanged — whether it is a valid
+    route for the recipient is the caller's business (see M-13)."""
+    row = Notification(user_id=user_id, type=type, title=title, message=message, link=link)
+    db.add(row)
+    return row
+
+
+def bu_lookup_maps(db):
+    """M-12: the one business-unit lookup builder — was rebuilt per
+    endpoint in admin.py (overview, activity/health dashboards, CEO
+    profiles, Excel export). Returns (business_units, bu_by_id,
+    ceo_by_bu): the ordered BU list, BUs by id, and active CEOs by BU.
+    The CEO rule matches gather_admin_overview's: oldest first, so a
+    deactivated predecessor never shadows the current CEO, and if two
+    active accounts ever share a unit the newest one (last write wins)
+    is the one shown."""
+    business_units = db.query(BusinessUnit).order_by(BusinessUnit.id).all()
+    bu_by_id = {bu.id: bu for bu in business_units}
+    ceo_by_bu = {
+        u.business_unit_id: u
+        for u in db.query(User).filter(User.role == "CEO", User.is_active == True).order_by(User.id).all()  # noqa: E712
+    }
+    return business_units, bu_by_id, ceo_by_bu
+
+
+class SubmitRateLimiter:
+    """M-12: the sliding-window per-user submit guard, shared by the CEO
+    and HO submit-report endpoints (was `_is_rate_limited`, verbatim-
+    identical in ceo.py and ho.py, each with its own deque dict + lock).
+    Each router owns one instance, so the two endpoints keep separate
+    budgets. Submit handlers run in FastAPI's threadpool, so the shared
+    deque bookkeeping is serialized with a lock."""
+
+    def __init__(self, limit: int, window_seconds: int):
+        self.limit = limit
+        self.window_seconds = window_seconds
+        self._timestamps: dict[int, deque] = defaultdict(deque)
+        self._lock = threading.Lock()
+
+    def is_limited(self, user_id: int) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            timestamps = self._timestamps[user_id]
+            while timestamps and now - timestamps[0] > self.window_seconds:
+                timestamps.popleft()
+            if len(timestamps) >= self.limit:
+                return True
+            timestamps.append(now)
+            return False
+
+    def reset(self, user_id: int | None = None) -> None:
+        """Clears recorded submissions (test support: the suite submits
+        repeatedly as the same user and must not trip the guard)."""
+        with self._lock:
+            if user_id is None:
+                self._timestamps.clear()
+            else:
+                self._timestamps.pop(user_id, None)
+
+
+def record_job_heartbeat(db, job_name: str, status: str) -> None:
+    """M-12: the one job-heartbeat upsert (R-6 dead-man check) — was
+    duplicated verbatim in src/jobs/log_scan.py and
+    src/jobs/scheduled_alerts.py. Best effort by design: a heartbeat
+    write must never mask the job's own result, so any failure here is
+    logged and swallowed."""
+    try:
+        db.merge(JobHeartbeat(job_name=job_name, last_run_at=utcnow(), last_status=status))
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 - heartbeat must not fail the job
+        db.rollback()
+        print(f"heartbeat update failed for {job_name}: {exc}", file=sys.stderr)
 
 
 def calculate_age(date_of_birth: date, as_of: Optional[date] = None) -> int:

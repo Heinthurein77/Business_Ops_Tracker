@@ -19,7 +19,7 @@ from starlette.requests import Request
 
 from src.auth import hash_password
 from src.models import (
-    AuditLog, Base, BusinessUnit, DailyFinancial, Notification, User,
+    Base, BusinessUnit, DailyFinancial, Notification, User,
 )
 from src.routers.ceo import submit_report as ceo_submit_report
 from src.utils import today_local
@@ -55,7 +55,7 @@ def db():
 
 def _ceo_submit(db, user, **overrides):
     import src.routers.ceo as ceo_router
-    ceo_router._report_submit_timestamps.clear()
+    ceo_router._rate_limiter.reset()
     payload = dict(
         report_date="", revenue="100000", cash_flow="0", receivable="0", payable="0",
         other_amount="", financial_other_notes="", meetings_attended="Standup",
