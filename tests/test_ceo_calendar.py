@@ -9,7 +9,7 @@ any day of the month from the History calendar).
 Run with: ENVIRONMENT=test DATABASE_URL=sqlite:// \
     .venv/bin/python -m pytest tests/test_ceo_calendar.py
 """
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -199,9 +199,12 @@ def _submit(db, user, **overrides):
 
 def test_ceo_submit_report_for_past_date(db):
     ceo = db.test_users["ceo"]
+    # M-03: a past date is still submittable, but only inside the edit
+    # window (default 7 days) — the frozen October date is now relative.
+    day = today_local() - timedelta(days=3)
     result = _submit(
         db, ceo,
-        report_date="2026-10-05",
+        report_date=day.isoformat(),
         revenue="1000", cash_flow="800", receivable="100", payable="50",
         meetings_attended="Backfilled supplier meeting",
         next_day_schedule="Warehouse visit",
@@ -209,7 +212,7 @@ def test_ceo_submit_report_for_past_date(db):
     assert result == {"ok": True}
     row = (
         db.query(ActivityLog)
-        .filter(ActivityLog.business_unit_id == 1, ActivityLog.report_date == date(2026, 10, 5))
+        .filter(ActivityLog.business_unit_id == 1, ActivityLog.report_date == day)
         .first()
     )
     assert row is not None
@@ -218,7 +221,7 @@ def test_ceo_submit_report_for_past_date(db):
     assert row.submitted_by == ceo.id
     fin = (
         db.query(DailyFinancial)
-        .filter(DailyFinancial.business_unit_id == 1, DailyFinancial.report_date == date(2026, 10, 5))
+        .filter(DailyFinancial.business_unit_id == 1, DailyFinancial.report_date == day)
         .first()
     )
     assert fin is not None and float(fin.revenue) == 1000.0
@@ -226,23 +229,30 @@ def test_ceo_submit_report_for_past_date(db):
 
 def test_ceo_submit_report_cannot_write_another_bu(db):
     ceo = db.test_users["ceo"]
+    day = today_local() - timedelta(days=2)
+    # BU2's own row for the same day, so the write landing on BU1 is
+    # provably not a cross-BU write.
+    db.add(ActivityLog(business_unit_id=2, report_date=day,
+                       meetings_attended="Other unit meeting",
+                       submitted_by=db.test_users["ceo2"].id))
+    db.commit()
     _submit(
         db, ceo,
-        report_date="2026-10-14",
+        report_date=day.isoformat(),
         revenue="1000", cash_flow="800", receivable="100", payable="50",
         meetings_attended="CEO One updated meeting",
     )
     # BU2's own row for the same date is untouched; the write landed on BU1.
     bu2_row = (
         db.query(ActivityLog)
-        .filter(ActivityLog.business_unit_id == 2, ActivityLog.report_date == date(2026, 10, 14))
+        .filter(ActivityLog.business_unit_id == 2, ActivityLog.report_date == day)
         .first()
     )
     assert bu2_row.meetings_attended == "Other unit meeting"
     assert bu2_row.submitted_by == db.test_users["ceo2"].id
     bu1_row = (
         db.query(ActivityLog)
-        .filter(ActivityLog.business_unit_id == 1, ActivityLog.report_date == date(2026, 10, 14))
+        .filter(ActivityLog.business_unit_id == 1, ActivityLog.report_date == day)
         .first()
     )
     assert bu1_row.meetings_attended == "CEO One updated meeting"

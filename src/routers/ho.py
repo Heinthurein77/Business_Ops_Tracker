@@ -11,7 +11,8 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from src.auth import require_roles
+from src.auth import assert_token_current, require_roles
+from src.config import settings
 from src.database import get_db
 from src.models import (
     HeadOfficeActivityLog,
@@ -47,6 +48,7 @@ from src.utils import (
     form_text,
     format_local_datetime,
     log_audit,
+    monthly_target_window_error,
     parse_bounded_decimal,
     parse_monthly_target_amounts,
     today_local,
@@ -265,6 +267,12 @@ def set_monthly_target(
             target_month = target_month.replace(day=1)
     except ValueError:
         raise HTTPException(status_code=400, detail="target_month must be a valid ISO date")
+
+    # M-03: same edit window as the CEO targets — a past month is only
+    # settable within the window after that month ends.
+    window_error = monthly_target_window_error(target_month, today_local(), settings.REPORT_EDIT_WINDOW_DAYS)
+    if window_error:
+        raise HTTPException(status_code=400, detail=window_error)
 
     # Rejects NaN / Infinity / abs >= 1e13 / negative revenue-receivable-payable
     # targets with a 400 (pydantic's float lets Infinity and huge values through).
@@ -538,6 +546,10 @@ def submit_report(
     social.golf_flag = _parse_bool(golf_flag)
     social.other_notes = social_other_notes or None
     social.submitted_by = user.id
+
+    # m-05 (SM-1): same mid-request revocation re-check as the CEO
+    # submit path — immediately before the commit.
+    assert_token_current(db, user)
 
     try:
         db.commit()

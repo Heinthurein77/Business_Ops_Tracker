@@ -17,7 +17,7 @@ Run with: ENVIRONMENT=test DATABASE_URL=sqlite:// \
     .venv/bin/python -m pytest tests/test_ceo_pack.py
 """
 import asyncio
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -31,10 +31,17 @@ from src.models import ActivityLog, Base, BusinessUnit, DailyFinancial, HealthSt
 from src.routers.admin import activity_dashboard, ceo_monthly_summary, require_admin, resolve_help_request
 from src.routers.ceo import ceo_dashboard, submit_report
 from src.schemas import ResolveHelpRequest
-from src.utils import build_ceo_activity_calendar
+from src.utils import build_ceo_activity_calendar, today_local
 
 REQUEST = SimpleNamespace(headers={}, client=SimpleNamespace(host="127.0.0.1"))
 HELP = "Need Chairman approval to rent a backup truck this week"
+
+
+def _rel(days_ago: int) -> date:
+    """A day N days before today. M-03: the edit window (default 7 days)
+    only allows (re)submitting recent days, so the frozen October dates
+    this file used are expressed relative to today."""
+    return today_local() - timedelta(days=days_ago)
 RESPONSE = "Approved — rent the truck, invoice to HO by Friday."
 
 
@@ -62,15 +69,15 @@ def db():
     session.commit()
     # An open help request (BU1), a report with no ask, and an already
     # resolved request — the three states the resolution loop switches on.
-    session.add(ActivityLog(business_unit_id=1, report_date=date(2026, 10, 6),
+    session.add(ActivityLog(business_unit_id=1, report_date=_rel(4),
                             meetings_attended="Route planning",
                             problems_today="Truck broke down", help_needed=HELP,
                             submitted_by=ceo.id))
-    session.add(ActivityLog(business_unit_id=1, report_date=date(2026, 10, 7),
+    session.add(ActivityLog(business_unit_id=1, report_date=_rel(3),
                             meetings_attended="Quiet day", submitted_by=ceo.id))
-    session.add(ActivityLog(business_unit_id=1, report_date=date(2026, 10, 8),
+    session.add(ActivityLog(business_unit_id=1, report_date=_rel(2),
                             meetings_attended="Supplier review", help_needed="Old ask",
-                            help_resolved_at=datetime(2026, 10, 9, 10, 30),
+                            help_resolved_at=datetime(_rel(2).year, _rel(2).month, _rel(2).day, 10, 30),
                             help_resolved_by=chairman.id, help_response="Sorted by phone.",
                             submitted_by=ceo.id))
     session.commit()
@@ -137,7 +144,7 @@ def test_resolve_help_role_guard():
 
 def test_resolve_help_happy_path_notifies_ceo(db):
     ho = db.test_users["ho"]
-    log = _activity(db, 1, date(2026, 10, 6))
+    log = _activity(db, 1, _rel(4))
 
     out = resolve_help_request(log_id=log.id, payload=ResolveHelpRequest(response=RESPONSE),
                                request=REQUEST, user=ho, db=db)
@@ -155,7 +162,7 @@ def test_resolve_help_happy_path_notifies_ceo(db):
     note = notes[0]
     assert note.type == "help_resolved"
     assert note.message == RESPONSE
-    assert note.link == "/ceo?date=2026-10-06"
+    assert note.link == f"/ceo?date={_rel(4).isoformat()}"
     assert note.is_read is False
 
 
@@ -164,7 +171,7 @@ def test_resolve_help_flips_needs_help_everywhere(db):
     ceo = db.test_users["ceo"]
     # The directory reflects each unit's LATEST report, so the open
     # request under test must be BU1's latest day.
-    db.add(ActivityLog(business_unit_id=1, report_date=date(2026, 10, 20),
+    db.add(ActivityLog(business_unit_id=1, report_date=_rel(1),
                        meetings_attended="Depot visit", help_needed=HELP,
                        submitted_by=ceo.id))
     db.commit()
@@ -174,7 +181,7 @@ def test_resolve_help_flips_needs_help_everywhere(db):
     assert directory[1]["needs_help"] is True
     assert directory[1]["help_needed"] == HELP
 
-    log = _activity(db, 1, date(2026, 10, 20))
+    log = _activity(db, 1, _rel(1))
     resolve_help_request(log_id=log.id, payload=ResolveHelpRequest(response=RESPONSE),
                          request=REQUEST, user=chairman, db=db)
 
@@ -186,15 +193,15 @@ def test_resolve_help_flips_needs_help_everywhere(db):
     assert directory[1]["help_response"] == RESPONSE
 
     # The CEO sees the answer on their own dashboard payload too.
-    out = ceo_dashboard(month="", for_date="2026-10-20", user=ceo, db=db)
+    out = ceo_dashboard(month="", for_date=_rel(1).isoformat(), user=ceo, db=db)
     assert out["form_activity"]["needs_help"] is False
     assert out["form_activity"]["help_resolved_at"] is not None
     assert out["form_activity"]["help_resolved_by_username"] == "chairman_t"
     assert out["form_activity"]["help_response"] == RESPONSE
 
     # And on the calendar day payload (both scopes).
-    weeks = build_ceo_activity_calendar(db, 1, 2026, 10, date(2026, 10, 22), None)
-    cell = _cell(weeks, "2026-10-20")
+    weeks = build_ceo_activity_calendar(db, 1, _rel(1).year, _rel(1).month, _rel(1), None)
+    cell = _cell(weeks, _rel(1).isoformat())
     assert cell["needs_help"] is False
     assert cell["help_resolved_by_username"] == "chairman_t"
     assert cell["help_response"] == RESPONSE
@@ -202,9 +209,9 @@ def test_resolve_help_flips_needs_help_everywhere(db):
 
 def test_resolve_help_error_paths(db):
     chairman = db.test_users["chairman"]
-    open_log = _activity(db, 1, date(2026, 10, 6))
-    no_help_log = _activity(db, 1, date(2026, 10, 7))
-    resolved_log = _activity(db, 1, date(2026, 10, 8))
+    open_log = _activity(db, 1, _rel(4))
+    no_help_log = _activity(db, 1, _rel(3))
+    resolved_log = _activity(db, 1, _rel(2))
 
     with pytest.raises(HTTPException) as exc:
         resolve_help_request(log_id=99999, payload=ResolveHelpRequest(response="x"),
@@ -232,17 +239,17 @@ def test_resolved_log_payload_shows_resolution(db):
     # escalation) in the admin payload and the calendar.
     out = activity_dashboard(user=db.test_users["chairman"], db=db)
     history = {e["report_date"]: e for e in out["activity_history"]}
-    entry = history["08 Oct 2026"]
+    entry = history[_rel(2).strftime("%d %b %Y")]
     assert entry["needs_help"] is False
     assert entry["help_resolved_by_username"] == "chairman_t"
     assert entry["help_response"] == "Sorted by phone."
 
-    weeks = build_ceo_activity_calendar(db, 1, 2026, 10, date(2026, 10, 22), None)
-    cell = _cell(weeks, "2026-10-08")
+    weeks = build_ceo_activity_calendar(db, 1, _rel(2).year, _rel(2).month, _rel(2), None)
+    cell = _cell(weeks, _rel(2).isoformat())
     assert cell["needs_help"] is False
     assert cell["help_resolved_at"] is not None
 
-    open_cell = _cell(weeks, "2026-10-06")
+    open_cell = _cell(weeks, _rel(4).isoformat())
     assert open_cell["needs_help"] is True
     assert open_cell["help_resolved_at"] is None
 
@@ -250,20 +257,20 @@ def test_resolved_log_payload_shows_resolution(db):
 def test_editing_resolved_help_reopens_only_when_text_changes(db):
     ceo = db.test_users["ceo"]
     chairman = db.test_users["chairman"]
-    log = _activity(db, 1, date(2026, 10, 6))
+    log = _activity(db, 1, _rel(4))
     resolve_help_request(log_id=log.id, payload=ResolveHelpRequest(response=RESPONSE),
                          request=REQUEST, user=chairman, db=db)
 
     # Resubmitting the day with the SAME ask (e.g. fixing other fields)
     # keeps the resolution.
-    _submit(db, ceo, report_date="2026-10-06", help_needed=HELP, meetings_attended="Route planning v2")
+    _submit(db, ceo, report_date=_rel(4).isoformat(), help_needed=HELP, meetings_attended="Route planning v2")
     db.refresh(log)
     assert log.help_resolved_at is not None
     assert log.help_response == RESPONSE
 
     # Changing the ask re-opens the request: the old answer no longer
     # matches what is being asked.
-    _submit(db, ceo, report_date="2026-10-06", help_needed="Actually we need TWO trucks now")
+    _submit(db, ceo, report_date=_rel(4).isoformat(), help_needed="Actually we need TWO trucks now")
     db.refresh(log)
     assert log.help_needed == "Actually we need TWO trucks now"
     assert log.help_resolved_at is None
@@ -275,27 +282,27 @@ def test_editing_resolved_help_reopens_only_when_text_changes(db):
 
 def test_achievement_and_meetings_count_round_trip(db):
     ceo = db.test_users["ceo"]
-    result = _submit(db, ceo, report_date="2026-10-05",
+    result = _submit(db, ceo, report_date=_rel(5).isoformat(),
                      meetings_attended="Supplier marathon", meetings_count="3",
                      key_achievement="Signed the Yangon distribution deal")
     assert result == {"ok": True}
-    row = _activity(db, 1, date(2026, 10, 5))
+    row = _activity(db, 1, _rel(5))
     assert row.key_achievement == "Signed the Yangon distribution deal"
     assert row.meetings_count == 3
 
-    out = ceo_dashboard(month="", for_date="2026-10-05", user=ceo, db=db)
+    out = ceo_dashboard(month="", for_date=_rel(5).isoformat(), user=ceo, db=db)
     assert out["form_activity"]["key_achievement"] == "Signed the Yangon distribution deal"
     assert out["form_activity"]["meetings_count"] == 3
 
-    weeks = build_ceo_activity_calendar(db, 1, 2026, 10, date(2026, 10, 22), ceo.id)
-    cell = _cell(weeks, "2026-10-05")
+    weeks = build_ceo_activity_calendar(db, 1, _rel(5).year, _rel(5).month, _rel(5), ceo.id)
+    cell = _cell(weeks, _rel(5).isoformat())
     assert cell["key_achievement"] == "Signed the Yangon distribution deal"
     assert cell["meetings_count"] == 3
 
     dash = activity_dashboard(user=db.test_users["chairman"], db=db)
     history = {e["report_date"]: e for e in dash["activity_history"]}
-    assert history["05 Oct 2026"]["key_achievement"] == "Signed the Yangon distribution deal"
-    assert history["05 Oct 2026"]["meetings_count"] == 3
+    assert history[_rel(5).strftime("%d %b %Y")]["key_achievement"] == "Signed the Yangon distribution deal"
+    assert history[_rel(5).strftime("%d %b %Y")]["meetings_count"] == 3
 
 
 def test_meetings_count_out_of_range_rejected(db):
@@ -307,7 +314,7 @@ def test_meetings_count_out_of_range_rejected(db):
     db.add(ceo)
     db.commit()
     with pytest.raises(HTTPException) as exc:
-        _submit(db, ceo, report_date="2026-11-02", meetings_count="100")
+        _submit(db, ceo, report_date=_rel(1).isoformat(), meetings_count="100")
     assert exc.value.status_code == 400
 
 
@@ -316,13 +323,13 @@ def test_meetings_count_out_of_range_rejected(db):
 def test_health_completion_stored_on_health_row(db):
     ceo = db.test_users["ceo"]
     result = _submit(
-        db, ceo, report_date="2026-10-12",
+        db, ceo, report_date=_rel(1).isoformat(),
         stress_level="High", energy_mood="Normal", weight_kg="70.5", is_sick="true",
         health_gym_percent="60", health_swimming_percent="", health_cycle_percent="20",
     )
     assert result == {"ok": True}
 
-    health = _health(db, 1, date(2026, 10, 12))
+    health = _health(db, 1, _rel(1))
     assert health.stress_level == "High"
     assert health.energy_mood == "Normal"
     assert health.weight_kg == Decimal("70.5")
@@ -332,10 +339,10 @@ def test_health_completion_stored_on_health_row(db):
     assert health.cycle_percent == 20
 
     # The exercise move leaves the activity row's legacy percents alone.
-    activity = _activity(db, 1, date(2026, 10, 12))
+    activity = _activity(db, 1, _rel(1))
     assert activity.gym_percent is None
 
-    out = ceo_dashboard(month="", for_date="2026-10-12", user=ceo, db=db)
+    out = ceo_dashboard(month="", for_date=_rel(1).isoformat(), user=ceo, db=db)
     form_health = out["form_health"]
     assert form_health["stress_level"] == "High"
     assert form_health["energy_mood"] == "Normal"
@@ -343,8 +350,8 @@ def test_health_completion_stored_on_health_row(db):
     assert form_health["is_sick"] is True
     assert form_health["gym_percent"] == 60
 
-    weeks = build_ceo_activity_calendar(db, 1, 2026, 10, date(2026, 10, 22), ceo.id)
-    cell = _cell(weeks, "2026-10-12")
+    weeks = build_ceo_activity_calendar(db, 1, _rel(1).year, _rel(1).month, _rel(1), ceo.id)
+    cell = _cell(weeks, _rel(1).isoformat())
     assert cell["stress_level"] == "High"
     assert cell["energy_mood"] == "Normal"
     assert cell["weight_kg"] == 70.5
@@ -357,19 +364,19 @@ def test_health_legacy_activity_percents_still_work_and_fall_back(db):
     ceo2 = db.test_users["ceo2"]
     # A pre-move client: no health_*_percent fields at all, exercise %
     # sent as the old activity fields.
-    result = _submit(db, ceo2, report_date="2026-10-12", gym_percent="40", swimming_percent="10")
+    result = _submit(db, ceo2, report_date=_rel(1).isoformat(), gym_percent="40", swimming_percent="10")
     assert result == {"ok": True}
 
-    activity = _activity(db, 2, date(2026, 10, 12))
+    activity = _activity(db, 2, _rel(1))
     assert activity.gym_percent == 40
     assert activity.swimming_percent == 10
-    health = _health(db, 2, date(2026, 10, 12))
+    health = _health(db, 2, _rel(1))
     assert health.gym_percent is None
 
     # The calendar's effective exercise values fall back to the activity
     # row's legacy percents.
-    weeks = build_ceo_activity_calendar(db, 2, 2026, 10, date(2026, 10, 22), ceo2.id)
-    cell = _cell(weeks, "2026-10-12")
+    weeks = build_ceo_activity_calendar(db, 2, _rel(1).year, _rel(1).month, _rel(1), ceo2.id)
+    cell = _cell(weeks, _rel(1).isoformat())
     assert cell["exercise_gym_percent"] == 40
     assert cell["exercise_swimming_percent"] == 10
     assert cell["exercise_cycle_percent"] is None
@@ -392,7 +399,7 @@ def test_health_validation_422s(db):
         db.add(user)
         db.commit()
         with pytest.raises(HTTPException) as exc:
-            _submit(db, user, report_date="2026-11-03", **overrides)
+            _submit(db, user, report_date=_rel(1).isoformat(), **overrides)
         assert exc.value.status_code == 422, f"{overrides} should 422, got {exc.value.status_code}"
 
 

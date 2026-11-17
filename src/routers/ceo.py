@@ -13,7 +13,8 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from src.auth import require_roles, resolve_redirect_path
+from src.auth import assert_token_current, require_roles, resolve_redirect_path
+from src.config import settings
 from src.database import get_db
 from src.models import ActivityLog, BusinessUnit, CeoProfile, DailyFinancial, FinancialNote, HealthStatus, MonthlyTarget, Notification, SocialLog, User
 from src.r2_storage import delete_object, extract_r2_key
@@ -47,8 +48,10 @@ from src.utils import (
     form_text,
     format_local_datetime,
     log_audit,
+    monthly_target_window_error,
     parse_bounded_decimal,
     parse_monthly_target_amounts,
+    report_date_window_error,
     serialize_ceo_profile,
     shift_month,
     today_local,
@@ -631,6 +634,12 @@ def set_monthly_target(
     except ValueError:
         raise HTTPException(status_code=400, detail="target_month must be a valid ISO date")
 
+    # M-03: a target for a past month is only settable within the edit
+    # window after that month ends; older months need the admin override.
+    window_error = monthly_target_window_error(target_month, today_local(), settings.REPORT_EDIT_WINDOW_DAYS)
+    if window_error:
+        raise HTTPException(status_code=400, detail=window_error)
+
     # Rejects NaN / Infinity / abs >= 1e13 / negative revenue-receivable-payable
     # targets with a 400 (pydantic's float lets Infinity and huge values through).
     amounts = parse_monthly_target_amounts(payload)
@@ -1012,8 +1021,9 @@ def submit_report(
     # calendar for a specific day) files that day's report instead. The
     # business unit always comes from the caller's own assignment, never
     # from the request, so a CEO can only ever write to their own unit.
-    # Any valid date is accepted — past days for corrections and
-    # backfill, future days for planning entries.
+    # M-03: only dates inside the edit window are accepted — today plus
+    # the previous REPORT_EDIT_WINDOW_DAYS days. Older dates (and future
+    # dates) are rejected; correcting them is an admin-approved path.
     if report_date and report_date.strip():
         try:
             report_date = date.fromisoformat(report_date.strip())
@@ -1021,6 +1031,9 @@ def submit_report(
             raise HTTPException(status_code=400, detail="report_date must be a valid date (YYYY-MM-DD)")
     else:
         report_date = today_local()
+    window_error = report_date_window_error(report_date, today_local(), settings.REPORT_EDIT_WINDOW_DAYS)
+    if window_error:
+        raise HTTPException(status_code=400, detail=window_error)
 
     # --- Validate every input up front, before any DB work, row lock or
     # upload. Invalid values are a clear HTTP 400 — never a 500, and never
@@ -1306,6 +1319,13 @@ def submit_report(
     social.other_notes = social_other_notes or None
     social.submitted_by = user.id
 
+    # m-05 (SM-1): re-check, immediately before the commit, that the
+    # session that started this (possibly slow, up-to-10 MB) request is
+    # still current — a logout/password change landing mid-request must
+    # not still commit afterwards. No-op for callers with no token
+    # stashed on the user (direct/test callers).
+    assert_token_current(db, user)
+
     try:
         db.commit()
     except IntegrityError:
@@ -1428,6 +1448,34 @@ def submit_report(
                 ),
                 link=f"/admin/business-unit/{user.business_unit_id}",
             ))
+
+    # M-03: an accepted backdated resubmit (a day that already had a
+    # report, re-filed inside the window) notifies Chairman/HO so a
+    # restatement of reviewed history is visible, not silent.
+    if previous_financial is not None and report_date < today_local():
+        bu = db.query(BusinessUnit).filter(BusinessUnit.id == user.business_unit_id).first()
+        bu_label = bu.name if bu else f"BU {user.business_unit_id}"
+        for recipient in db.query(User).filter(
+                User.role.in_(["Chairman", "HO"]), User.is_active == True).all():  # noqa: E712
+            db.add(Notification(
+                user_id=recipient.id, type="alert",
+                title=f"Backdated report edit: {bu_label}",
+                message=(
+                    f"{user.username} resubmitted the {report_date.isoformat()} report for "
+                    f"{bu_label} — please review the change."
+                ),
+                link=f"/admin/business-unit/{user.business_unit_id}",
+            ))
+
+    # The anomaly flag above and the notifications in this section were
+    # added after the main commit, and log_audit below writes on its own
+    # session — so persist them here. A failure here must never undo the
+    # already-committed report itself, so it is logged and swallowed.
+    try:
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 - report already committed
+        db.rollback()
+        logger.warning("post-submit notification commit failed: %s", exc)
 
     audit_detail = build_resubmit_audit_detail(report_date, changes)
     log_audit(db, user, "DAILY_REPORT_SUBMITTED", audit_detail, request)
