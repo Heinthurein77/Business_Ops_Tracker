@@ -53,6 +53,13 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
+      # CI-1 (2026-11-17 review): see tests.yml — requirements.txt
+      # carries no pytest, so install it explicitly (9.1.1, the version
+      # the local suite passes against) or the proof-test step below
+      # fails with "No module named pytest".
+      - name: Install pytest
+        run: pip install pytest==9.1.1
+
       - name: Run migration chain on Postgres
         run: python -m alembic upgrade head
 

@@ -29,6 +29,14 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
+      # CI-1 (2026-11-17 review): requirements.txt carries no pytest
+      # (dev-only dependency), so install it explicitly — without this
+      # step `python -m pytest` fails with "No module named pytest" and
+      # the gate has never executed a single test. Pinned to 9.1.1, the
+      # version the local suite passes against.
+      - name: Install pytest
+        run: pip install pytest==9.1.1
+
       # The SPA smoke test (test_spa_route_returns_index_html) serves
       # frontend/dist/index.html, so the production build must run BEFORE
       # pytest — on a fresh checkout dist/ does not exist yet, and pytest
