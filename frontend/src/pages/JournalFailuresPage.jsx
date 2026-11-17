@@ -18,6 +18,7 @@ import { GLASS, PAGE_BG } from '../utils/glassTheme';
 export default function JournalFailuresPage() {
   const [failures, setFailures] = useState([]);
   const [total, setTotal] = useState(0);
+  const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [updatedAt, setUpdatedAt] = useState(null);
@@ -30,6 +31,7 @@ export default function JournalFailuresPage() {
       const d = await api.journalFailures();
       setFailures(d.failures || []);
       setTotal(d.total || 0);
+      setTruncated(d.truncated || false);
       setError('');
       setUpdatedAt(new Date());
     } catch (err) {
@@ -89,7 +91,9 @@ export default function JournalFailuresPage() {
           {failures.length > 0 && (
             <>
               <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">
-                {total} operation{total === 1 ? '' : 's'} with no posted journal.
+                {truncated
+                  ? `Showing ${failures.length} of ${total} operations with no posted journal.`
+                  : `${total} operation${total === 1 ? '' : 's'} with no posted journal.`}
               </p>
               <ul className="divide-y divide-slate-100 dark:divide-slate-800">
                 {failures.map((f) => (

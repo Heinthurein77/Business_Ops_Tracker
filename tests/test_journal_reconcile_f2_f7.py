@@ -129,7 +129,7 @@ class TestQuickTransferDetection:
         _quick_move(db, item, qty=3, to_bu=2)
         db.commit()
 
-        failures = find_journal_failures(db)
+        failures = find_journal_failures(db)["failures"]
         quick = _by_kind(failures, "quick_stock_transfer")
         assert len(quick) == 1
         f = quick[0]
@@ -153,14 +153,14 @@ class TestQuickTransferDetection:
         _posted(db, 2, "quick_stock_transfer", item.id, "JV-2026-11-002")
         db.commit()
 
-        assert find_journal_failures(db) == []
+        assert find_journal_failures(db)["failures"] == []
 
     def test_zero_cost_quick_transfer_is_not_flagged(self, db):
         item = _item(db, cost=0)
         _quick_move(db, item, qty=3, to_bu=2)
         db.commit()
 
-        assert find_journal_failures(db) == []
+        assert find_journal_failures(db)["failures"] == []
 
     def test_formal_transfer_movements_are_not_quick_transfers(self, db):
         # Formal send/receive write "Stock transfer <no> to/from BU …"
@@ -173,7 +173,7 @@ class TestQuickTransferDetection:
                              created_at=datetime(2026, 11, 16, 9, 0, 0)))
         db.commit()
 
-        failures = find_journal_failures(db)
+        failures = find_journal_failures(db)["failures"]
         assert _by_kind(failures, "quick_stock_transfer") == []
         # The formal transfer itself IS flagged (no journal at all).
         assert [(f["source"], f["source_id"]) for f in failures] == [("stock_transfer", t.id)]
@@ -185,7 +185,7 @@ class TestFormalTransferPerLeg:
         _posted(db, 1, "stock_transfer", t.id, "JV-2026-11-001")  # send leg only
         db.commit()
 
-        failures = find_journal_failures(db)
+        failures = find_journal_failures(db)["failures"]
         assert len(failures) == 1
         f = failures[0]
         assert (f["source"], f["source_id"]) == ("stock_transfer", t.id)
@@ -197,7 +197,7 @@ class TestFormalTransferPerLeg:
         _posted(db, 2, "stock_transfer", t.id, "JV-2026-11-002")  # receive leg only
         db.commit()
 
-        failures = find_journal_failures(db)
+        failures = find_journal_failures(db)["failures"]
         assert len(failures) == 1
         assert failures[0]["missing_legs"] == ["send"]
 
@@ -207,7 +207,7 @@ class TestFormalTransferPerLeg:
         _posted(db, 2, "stock_transfer", t.id, "JV-2026-11-002")
         db.commit()
 
-        assert find_journal_failures(db) == []
+        assert find_journal_failures(db)["failures"] == []
 
     def test_in_transit_transfer_with_send_posted_is_not_flagged(self, db):
         # The receive leg is not due until the transfer is received.
@@ -215,13 +215,13 @@ class TestFormalTransferPerLeg:
         _posted(db, 1, "stock_transfer", t.id, "JV-2026-11-001")
         db.commit()
 
-        assert find_journal_failures(db) == []
+        assert find_journal_failures(db)["failures"] == []
 
     def test_in_transit_transfer_with_no_journal_is_flagged(self, db):
         t = _formal_transfer(db, status="in_transit")
         db.commit()
 
-        failures = find_journal_failures(db)
+        failures = find_journal_failures(db)["failures"]
         assert len(failures) == 1
         assert failures[0]["missing_legs"] == ["send"]
 
@@ -244,7 +244,7 @@ class TestQuickFormalNamespaceCollision:
         _posted(db, 1, "stock_transfer", t.id, "JV-2026-11-001")  # send leg
         db.commit()
 
-        failures = find_journal_failures(db)
+        failures = find_journal_failures(db)["failures"]
         quick = _by_kind(failures, "quick_stock_transfer")
         assert len(quick) == 1
         assert (quick[0]["source"], quick[0]["source_id"]) == ("quick_stock_transfer", item.id)
@@ -268,7 +268,7 @@ class TestQuickFormalNamespaceCollision:
         _posted(db, 2, "stock_transfer", t2.id, "JV-2026-11-004")  # receive leg only
         db.commit()
 
-        failures = find_journal_failures(db)
+        failures = find_journal_failures(db)["failures"]
         formal = _by_kind(failures, "stock_transfer")
         assert len(formal) == 1
         assert formal[0]["source_id"] == t2.id
@@ -292,7 +292,47 @@ class TestQuickFormalNamespaceCollision:
         assert {e.source for e in entries} == {"quick_stock_transfer"}
         assert {e.business_unit_id for e in entries} == {1, 2}
         assert all(e.status == "posted" for e in entries)
-        assert find_journal_failures(db) == []
+        assert find_journal_failures(db)["failures"] == []
+
+
+class TestTruncationSurfaced:
+    """G-5: the returned result carries the true total and a
+    truncated flag — the page is capped at `limit` but the count
+    must never silently understate how many failures exist."""
+
+    def test_total_and_truncated_when_over_limit(self, db):
+        for name in ("Alpha", "Beta", "Gamma"):
+            _quick_move(db, _item(db, name=name), qty=1, to_bu=2)
+        db.commit()
+
+        result = find_journal_failures(db, limit=2)
+        assert result["total"] == 3
+        assert result["truncated"] is True
+        assert len(result["failures"]) == 2
+        assert all(f["kind"] == "quick_stock_transfer" for f in result["failures"])
+
+    def test_no_truncation_when_within_limit(self, db):
+        _quick_move(db, _item(db), qty=1, to_bu=2)
+        db.commit()
+
+        result = find_journal_failures(db)
+        assert result["total"] == 1
+        assert result["truncated"] is False
+        assert len(result["failures"]) == 1
+
+    def test_no_truncation_when_exactly_at_limit(self, db):
+        for name in ("Alpha", "Beta"):
+            _quick_move(db, _item(db, name=name), qty=1, to_bu=2)
+        db.commit()
+
+        result = find_journal_failures(db, limit=2)
+        assert result["total"] == 2
+        assert result["truncated"] is False
+        assert len(result["failures"]) == 2
+
+    def test_empty_result_is_not_truncated(self, db):
+        result = find_journal_failures(db)
+        assert result == {"failures": [], "total": 0, "truncated": False}
 
 
 class TestJournalRetryRoleGate:

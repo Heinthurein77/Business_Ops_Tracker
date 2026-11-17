@@ -226,7 +226,7 @@ def _seed_pos_sale(db, total_price=1000, status="completed"):
 class TestJournalFailuresView:
     def test_completed_sale_without_journal_is_listed(self, db):
         sale = _seed_pos_sale(db)
-        failures = find_journal_failures(db)
+        failures = find_journal_failures(db)["failures"]
         assert [(f["source"], f["source_id"]) for f in failures] == [("pos_sale", sale.id)]
         out = journal_failures(limit=200, user=db.test_users["chairman"], db=db)
         assert out["total"] == 1
@@ -240,15 +240,32 @@ class TestJournalFailuresView:
                             entry_date=date.today(), source="pos_sale",
                             source_id=sale.id, status="posted"))
         db.commit()
-        assert find_journal_failures(db) == []
+        assert find_journal_failures(db)["failures"] == []
 
     def test_zero_amount_sale_is_excluded(self, db):
         _seed_pos_sale(db, total_price=0)
-        assert find_journal_failures(db) == []
+        assert find_journal_failures(db)["failures"] == []
 
     def test_void_sale_is_excluded(self, db):
         _seed_pos_sale(db, status="void")
-        assert find_journal_failures(db) == []
+        assert find_journal_failures(db)["failures"] == []
+
+    def test_truncation_is_surfaced_by_the_admin_endpoint(self, db):
+        # G-5: three failures with limit=2 — the endpoint reports the
+        # true total and truncated=true, not a capped count.
+        for _ in range(3):
+            _seed_pos_sale(db)
+        out = journal_failures(limit=2, user=db.test_users["chairman"], db=db)
+        assert out["total"] == 3
+        assert out["truncated"] is True
+        assert len(out["failures"]) == 2
+
+    def test_no_truncation_flag_when_within_limit(self, db):
+        _seed_pos_sale(db)
+        out = journal_failures(limit=200, user=db.test_users["chairman"], db=db)
+        assert out["total"] == 1
+        assert out["truncated"] is False
+        assert len(out["failures"]) == 1
 
 
 # -------------------------------------------------------------------- Sm-9

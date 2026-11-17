@@ -106,9 +106,15 @@ def _money(value) -> float:
     return float(value or 0)
 
 
-def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
+def find_journal_failures(db: Session, limit: int = 200) -> dict:
     """Operations in a posted-adjacent state with no matching posted
-    journal. Most recent first, capped at `limit`."""
+    journal. Most recent first.
+
+    Returns {"failures": [...], "total": int, "truncated": bool} —
+    the per-kind scans are NOT capped (G-5: capping the candidate
+    queries hid the oldest failures and understated the count), so
+    `total` is the true number of failures; only the returned page
+    is capped at `limit`, and `truncated` says so."""
     bus = _bu_names(db)
     failures: list[dict] = []
 
@@ -118,7 +124,7 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
 
     # POS sales: completed, lines total > 0, no pos_sale journal.
     for sale in (
-        db.query(PosSale).filter(PosSale.status == "completed").order_by(PosSale.id.desc()).limit(limit).all()
+        db.query(PosSale).filter(PosSale.status == "completed").order_by(PosSale.id.desc()).all()
     ):
         total = sum(
             (Decimal(str(line.quantity or 0)) * Decimal(str(line.unit_price or 0)) for line in sale.lines),
@@ -141,7 +147,7 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
 
     # Sales returns: posted credit note, total > 0, no sales_return journal.
     for r in (
-        db.query(SalesReturn).filter(SalesReturn.status == "posted").order_by(SalesReturn.id.desc()).limit(limit).all()
+        db.query(SalesReturn).filter(SalesReturn.status == "posted").order_by(SalesReturn.id.desc()).all()
     ):
         total = sum(
             (Decimal(str(line.quantity or 0)) * Decimal(str(line.unit_price or 0)) for line in r.lines),
@@ -164,7 +170,7 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
 
     # Purchase returns: posted debit note, total > 0, no purchase_return journal.
     for r in (
-        db.query(PurchaseReturn).filter(PurchaseReturn.status == "posted").order_by(PurchaseReturn.id.desc()).limit(limit).all()
+        db.query(PurchaseReturn).filter(PurchaseReturn.status == "posted").order_by(PurchaseReturn.id.desc()).all()
     ):
         total = sum(
             (Decimal(str(line.quantity or 0)) * Decimal(str(line.unit_cost or 0)) for line in r.lines),
@@ -200,7 +206,6 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
         db.query(StockTransfer)
         .filter(StockTransfer.status.in_(("in_transit", "received")))
         .order_by(StockTransfer.id.desc())
-        .limit(limit)
         .all()
     ):
         cost = sum(
@@ -271,7 +276,6 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
             StockMovement.reason.like("Transfer to BU %"),
         )
         .order_by(StockMovement.id.desc())
-        .limit(limit)
         .all()
     )
     quick_by_item: dict[int, dict] = {}
@@ -321,7 +325,7 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
     # books did not move either way, which is exactly what this list is
     # for.)
     for e in (
-        db.query(ExpenseRequest).filter(ExpenseRequest.status == "approved").order_by(ExpenseRequest.id.desc()).limit(limit).all()
+        db.query(ExpenseRequest).filter(ExpenseRequest.status == "approved").order_by(ExpenseRequest.id.desc()).all()
     ):
         if (e.amount or 0) <= 0:
             continue
@@ -341,7 +345,7 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
     # CEO daily reports: revenue > 0, no daily_financial journal. Catches
     # both a failed auto-post and the silent no-op when the BU has no CoA.
     for df in (
-        db.query(DailyFinancial).filter(DailyFinancial.revenue > 0).order_by(DailyFinancial.id.desc()).limit(limit).all()
+        db.query(DailyFinancial).filter(DailyFinancial.revenue > 0).order_by(DailyFinancial.id.desc()).all()
     ):
         if _has_posted(db, "daily_financial", df.id):
             continue
@@ -362,7 +366,6 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
         db.query(HeadOfficeDailyFinancial)
         .filter(HeadOfficeDailyFinancial.revenue > 0)
         .order_by(HeadOfficeDailyFinancial.id.desc())
-        .limit(limit)
         .all()
     ):
         if _has_posted(db, "ho_daily_financial", df.id):
@@ -382,9 +385,11 @@ def find_journal_failures(db: Session, limit: int = 200) -> list[dict]:
 
     # Most recent first (by date, then by id order within a kind — the
     # per-kind queries above are already id-desc, so a stable sort by date
-    # keeps that order inside each day).
+    # keeps that order inside each day). Only the returned page is
+    # capped at `limit`; `total` counts every failure found (G-5).
     failures.sort(key=lambda f: (f["date"] or "", f["source_id"]), reverse=True)
-    return failures[:limit]
+    total = len(failures)
+    return {"failures": failures[:limit], "total": total, "truncated": total > limit}
 
 
 def _record_heartbeat(db, status: str) -> None:
@@ -402,22 +407,32 @@ def _record_heartbeat(db, status: str) -> None:
 def main() -> int:
     db = SessionLocal()
     try:
-        failures = find_journal_failures(db)
-        print(f"operations with no posted journal: {len(failures)}")
+        result = find_journal_failures(db)
+        failures = result["failures"]
+        total = result["total"]
+        print(f"operations with no posted journal: {total}"
+              + (f" (showing first {len(failures)})" if result["truncated"] else ""))
         for f in failures:
             print(f"  - [{f['kind']}] {f['label']} ({f['bu_code']}) {f['detail']}")
-        if failures:
+        if total:
             # One summary notification per Chairman/HO user per run while
-            # failures persist — not one per failure.
+            # failures persist — not one per failure. The count is the
+            # true total (G-5): when the list is truncated, say how
+            # many are shown so "12 operations" never means "12 of 300".
+            truncated_note = (
+                f" Showing the {len(failures)} most recent here; "
+                f"{total - len(failures)} more are not listed."
+                if result["truncated"] else ""
+            )
             for admin in db.query(User).filter(User.role.in_(("Chairman", "HO")), User.is_active == True).all():  # noqa: E712
                 db.add(Notification(
                     user_id=admin.id,
                     type="journal_reconciliation",
-                    title=f"{len(failures)} operation(s) with no journal posted",
+                    title=f"{total} operation(s) with no journal posted",
                     message=(
-                        f"{len(failures)} operation(s) were completed but their journal never posted "
+                        f"{total} operation(s) were completed but their journal never posted "
                         "(POS sales, returns, transfers, expenses or daily reports). Open Journal "
-                        "Failures in the admin area to re-post them."
+                        "Failures in the admin area to re-post them." + truncated_note
                     ),
                     link="/admin/journal-failures",
                 ))

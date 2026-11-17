@@ -1142,10 +1142,14 @@ def journal_failures(limit: int = 200, user: User = Depends(require_admin), db: 
     (returns already_posted:true if a journal has since appeared, 404 if
     the source is unknown, 409 if it still cannot post)."""
     limit = max(1, min(limit, 500))
-    failures = find_journal_failures(db, limit=limit)
+    result = find_journal_failures(db, limit=limit)
     return {
-        "failures": failures,
-        "total": len(failures),
+        "failures": result["failures"],
+        # G-5: `total` is the true count, not the page size — the
+        # scans are uncapped and `truncated` says whether the page
+        # shows only the first `limit` failures.
+        "total": result["total"],
+        "truncated": result["truncated"],
         "retry": {
             "method": "POST",
             "path": "/api/accounting/journal/retry",
