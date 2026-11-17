@@ -609,6 +609,47 @@ class TestViewUploadExactMatch:
                            user=db.test_users["ceo"], db=db).status_code == 302
 
 
+# ------------------------------------------------------------------ m-18
+
+class TestSecurityLogPagination:
+    def _seed(self, db, count=5):
+        base = datetime(2026, 11, 10, 10, 0, 0)
+        for i in range(count):
+            db.add(AuditLog(user_id=db.test_users["chairman"].id,
+                            username="chairman_b", action="LOGIN_SUCCESS",
+                            details="", ip_address="127.0.0.1",
+                            timestamp=base + timedelta(minutes=i)))
+        db.commit()
+
+    def test_first_page_and_total(self, db):
+        from src.routers.admin import security_log
+        self._seed(db)
+        out = security_log(limit=2, offset=0, user=db.test_users["chairman"], db=db)
+        assert len(out["logs"]) == 2
+        assert out["total"] == 5
+        assert out["limit"] == 2
+        assert out["offset"] == 0
+
+    def test_second_and_last_pages_reach_older_entries(self, db):
+        from src.routers.admin import security_log
+        self._seed(db)
+        chairman = db.test_users["chairman"]
+        page2 = security_log(limit=2, offset=2, user=chairman, db=db)
+        assert len(page2["logs"]) == 2
+        page3 = security_log(limit=2, offset=4, user=chairman, db=db)
+        assert len(page3["logs"]) == 1
+        # Newest first: the last page holds the oldest entry
+        # (10:00 UTC = 04:30 PM Yangon).
+        assert "04:30 PM" in page3["logs"][0]["timestamp_display"]
+
+    def test_limit_is_clamped_like_report_logs(self, db):
+        from src.routers.admin import security_log
+        self._seed(db, count=1)
+        out = security_log(limit=1000, offset=0, user=db.test_users["chairman"], db=db)
+        assert out["limit"] == 500
+        assert out["total"] == 1
+
+
 # ------------------------------------------------------------------ m-34 / M-13
 
 class TestActionItemAssigneeValidation:

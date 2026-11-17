@@ -1101,19 +1101,23 @@ def _describe_security_event(action: str, details: str, username: Optional[str] 
 
 
 @router.get("/security-log")
-def security_log(user: User = Depends(require_chairman), db: Session = Depends(get_db)):
+def security_log(limit: int = 200, offset: int = 0,
+                 user: User = Depends(require_chairman), db: Session = Depends(get_db)):
     """Chairman-only view over the identity/access slice of AuditLog —
     every action below was already being recorded, just never surfaced
-    anywhere in the UI. Capped to the most recent 500 (unlike report_logs,
-    which is naturally bounded to ~1 submission/BU/day, sign-in/out volume
-    has no such ceiling)."""
+    anywhere in the UI. m-18: paged like report_logs (default 200, max
+    500) instead of a hard 500-row cap with no offset — older security
+    events were unreachable through the API during an investigation."""
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    total = db.query(AuditLog).filter(AuditLog.action.in_(SECURITY_LOG_ACTIONS)).count()
     entries = (
         db.query(AuditLog)
         .filter(AuditLog.action.in_(SECURITY_LOG_ACTIONS))
         # SM-14: (timestamp DESC, id DESC) — see report_logs above; the id
         # tiebreak is the canonical order under concurrent writes.
         .order_by(AuditLog.timestamp.desc(), AuditLog.id.desc())
-        .limit(500)
+        .limit(limit).offset(offset)
         .all()
     )
     logs = [
@@ -1127,7 +1131,7 @@ def security_log(user: User = Depends(require_chairman), db: Session = Depends(g
         }
         for e in entries
     ]
-    return {"logs": logs}
+    return {"logs": logs, "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/ceo-profiles")
