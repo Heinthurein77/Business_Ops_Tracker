@@ -650,6 +650,26 @@ class TestSecurityLogPagination:
         assert out["total"] == 1
 
 
+# ------------------------------------------------------------------ m-19
+
+class TestScheduledAlertsCronRetry:
+    def test_0830_line_retries_once_after_a_short_sleep(self):
+        from pathlib import Path
+        repo = Path(__file__).resolve().parents[1]
+        lines = [l for l in (repo / "deploy" / "crontab").read_text().splitlines()
+                 if l.strip() and not l.strip().startswith("#")]
+        alerts = [l for l in lines if "scheduled_alerts" in l and "bot-alerts.lock" in l]
+        assert len(alerts) == 1
+        line = alerts[0]
+        assert line.startswith("30 8 * * * ")
+        # One retry: the job is invoked twice, the second after a sleep.
+        assert line.count("python -m src.jobs.scheduled_alerts") == 2
+        assert "sleep 60" in line
+        # Still overlap-guarded, and a lock skip is still not a failure.
+        assert "flock -E 99 -n" in line
+        assert "already running" in line
+
+
 # ------------------------------------------------------------------ m-34 / M-13
 
 class TestActionItemAssigneeValidation:
