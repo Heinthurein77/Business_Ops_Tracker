@@ -7,8 +7,9 @@ run migrations, and the bug only surfaced as a 500 against a real database.
 
 This test runs the REAL migration chain on an empty scratch DB (subprocess
 ``alembic upgrade head`` — no ``create_all`` anywhere) and asserts:
-1. exactly one migration head (b7c2e9a4d1f5, the action-item reminder
-   column, 2026-11-17, on top of the ERP-removal drop a720b6b7c616);
+1. exactly one migration head (6d20531e9b89, the hot-query composite
+   indexes, 2026-11-17, on top of the action-item reminder column
+   b7c2e9a4d1f5);
 2. every model table and every model column exists in the migrated schema;
 3. a tracker row can be inserted and read back through the models
    against the migrated schema.
@@ -58,8 +59,8 @@ def test_single_migration_head():
 
     cfg = Config(str(ROOT / "alembic.ini"))
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == ["b7c2e9a4d1f5"], (
-        f"expected single head b7c2e9a4d1f5 (action-item reminder column), got {heads}")
+    assert heads == ["6d20531e9b89"], (
+        f"expected single head 6d20531e9b89 (hot-query composite indexes), got {heads}")
 
 
 def test_migrated_schema_matches_models(migrated_engine):

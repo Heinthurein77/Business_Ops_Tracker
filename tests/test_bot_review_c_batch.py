@@ -341,3 +341,40 @@ class TestDeployConfigReviewC:
                  '        max-size: "10m"\n        max-file: "3"')
         assert compose.count(block) == 3, (
             "expected the 10 MB x 3 logging block on app, caddy and migrate")
+
+
+# ---------------------------------------------------------------- m-12 (minor)
+# The four hot-query indexes must exist in the MIGRATED schema, not just
+# in the models (create_all would hide a models/migration drift).
+
+class TestHotQueryIndexes:
+    def test_migrated_schema_has_all_four_indexes(self, tmp_path):
+        import sqlite3
+        import subprocess
+        import sys
+
+        db_path = tmp_path / "idx.db"
+        url = f"sqlite:///{db_path}"
+        env = {**os.environ, "ENVIRONMENT": "test",
+               "DATABASE_URL": url, "MIGRATION_DATABASE_URL": url}
+        result = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=600)
+        assert result.returncode == 0, result.stderr
+        conn = sqlite3.connect(db_path)
+        try:
+            have = {}
+            for table in ("notifications", "action_items", "audit_logs", "users"):
+                have[table] = {
+                    row[1] for row in
+                    conn.execute(f"PRAGMA index_list({table})")}
+            assert "ix_notifications_user_read_created" in have["notifications"]
+            assert "ix_action_items_status_due" in have["action_items"]
+            assert "ix_audit_action_ts" in have["audit_logs"]
+            assert "ix_users_business_unit_id" in have["users"]
+            # And the composite really covers the queried columns, in order.
+            cols = [row[2] for row in conn.execute(
+                "PRAGMA index_info(ix_notifications_user_read_created)")]
+            assert cols == ["user_id", "is_read", "created_at"]
+        finally:
+            conn.close()

@@ -118,7 +118,7 @@ class User(Base):
     hashed_password = Column(String(255), nullable=False)
     full_name = Column(String(150), nullable=True)
     role = Column(String(20), nullable=False)  # Chairman | HO | CEO
-    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=True, index=True)  # m-12: per-BU lookups
     require_password_change = Column(Boolean, default=False, nullable=False)
     # Only meaningful for role == "CEO" — Chairman/HO have no profile to
     # complete, so this stays True (irrelevant) for them. Checked on every
@@ -519,6 +519,8 @@ class AuditLog(Base):
         Index("ix_audit_action_username_ts", "action", "username", "timestamp"),
         Index("ix_audit_action_ip_ts", "action", "ip_address", "timestamp"),
         Index("ix_audit_user_action_ts", "user_id", "action", "timestamp"),
+        # m-12: report_logs filters action IN (...) ordered by timestamp DESC.
+        Index("ix_audit_action_ts", "action", "timestamp"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -533,6 +535,10 @@ class AuditLog(Base):
 class ActionItem(Base):
     """Follow-up tasks from meetings/decisions. Assigned to a user, tracked to completion."""
     __tablename__ = "action_items"
+    __table_args__ = (
+        # m-12: the reminder job filters status IN (...) AND due_date <= today.
+        Index("ix_action_items_status_due", "status", "due_date"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
@@ -552,6 +558,10 @@ class ActionItem(Base):
 class Notification(Base):
     """In-app notifications: missing-report reminders, approvals, alerts."""
     __tablename__ = "notifications"
+    __table_args__ = (
+        # m-12: the bell query filters user_id + is_read ordered by created_at DESC.
+        Index("ix_notifications_user_read_created", "user_id", "is_read", "created_at"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)

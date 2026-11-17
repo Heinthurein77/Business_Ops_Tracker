@@ -35,9 +35,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSIONS = ROOT / "alembic" / "versions"
-# Current head after the action-item reminder column (2026-11-17):
-# b7c2e9a4d1f5, on top of the ERP-removal drop a720b6b7c616.
-CURRENT_HEAD = "b7c2e9a4d1f5"
+# Current head after the hot-query composite indexes (2026-11-17):
+# 6d20531e9b89, on top of the action-item reminder column b7c2e9a4d1f5.
+CURRENT_HEAD = "6d20531e9b89"
+CURRENT_HEAD_PARENT = "b7c2e9a4d1f5"
+# The downgrade-base test's stop point: the one-way ERP-removal drop
+# (a720b6b7c616) refuses, so after `downgrade base` the DB sits there.
 CURRENT_HEAD_DOWN = "a720b6b7c616"
 
 
@@ -118,7 +121,7 @@ def test_new_migration_is_the_single_head():
     assert script.get_heads() == [CURRENT_HEAD], (
         f"expected single head {CURRENT_HEAD}, got {script.get_heads()}")
     rev = script.get_revision(CURRENT_HEAD)
-    assert rev.down_revision == CURRENT_HEAD_DOWN
+    assert rev.down_revision == CURRENT_HEAD_PARENT
 
 
 def test_upgrade_head_then_downgrade_base_is_clean(tmp_path):
