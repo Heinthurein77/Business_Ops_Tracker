@@ -27,7 +27,7 @@ import pytest
 from src.auth import get_current_user, get_optional_user
 from src.main import app
 
-ALL_ROLES = {"Chairman", "HO", "CEO", "Accountant"}
+ALL_ROLES = {"Chairman", "HO", "CEO"}
 
 # The only routes that may be reached with no session at all.
 PUBLIC_ROUTES = {
@@ -65,22 +65,9 @@ MATRIX = {
     ("GET", "/api/admin/overview"): {"Chairman", "HO"},
     ("GET", "/api/admin/business-units"): {"Chairman", "HO"},
     ("GET", "/api/admin/report-logs"): {"Chairman", "HO"},
-    ("POST", "/api/ops/purchase-orders/{po_id}/approve"): {"Chairman", "HO"},
-    ("POST", "/api/ops/payroll-runs/{run_id}/pay"): {"Chairman", "HO"},
-    ("POST", "/api/accounting/periods/close"): {"Chairman", "HO"},
-    ("POST", "/api/accounting/journal/{entry_id}/approve"): {"Chairman", "HO"},
     # Unlock-login is the one users route HO may use (it lives on the
     # /api/admin router, prefix /api/admin).
     ("POST", "/api/admin/users/{user_id}/unlock-login"): {"Chairman", "HO"},
-    # Leave review is the one approval a CEO may perform (own BU only).
-    ("POST", "/api/ops/leave-requests/{leave_id}/review"): {"Chairman", "HO", "CEO"},
-    # Accounting group (Chairman, HO, Accountant) — per-BU pinning and
-    # group-level 403s live in the handlers, see docs/auth-model.md.
-    ("GET", "/api/accounting/business-units"): {"Chairman", "HO", "Accountant"},
-    ("GET", "/api/accounting/journal"): {"Chairman", "HO", "Accountant"},
-    ("POST", "/api/accounting/journal"): {"Chairman", "HO", "Accountant"},
-    ("POST", "/api/accounting/journal/{entry_id}/post"): {"Chairman", "HO", "Accountant"},
-    ("GET", "/api/accounting/reports/consolidated-pl"): {"Chairman", "HO", "Accountant"},
 }
 
 
@@ -150,8 +137,9 @@ def gates():
 
 def test_every_api_route_is_enumerated(gates):
     # Guard against the enumeration itself silently breaking (e.g. a
-    # FastAPI upgrade changing _IncludedRouter): the app has 200+ routes.
-    assert len(gates) > 200, f"only {len(gates)} routes enumerated — is the unwrap broken?"
+    # FastAPI upgrade changing _IncludedRouter): the tracker-only app has
+    # 65 API routes (ERP removal 2026-11-17 cut it from 200+).
+    assert len(gates) > 60, f"only {len(gates)} routes enumerated — is the unwrap broken?"
 
 
 def test_matrix_spot_checks(gates):
@@ -209,11 +197,3 @@ def test_ho_never_on_chairman_only_routes(gates):
     }
     assert chairman_only, "expected at least one Chairman-only admin route"
     assert all("HO" not in v for v in chairman_only.values())
-
-
-def test_accounting_routes_never_admit_ceo(gates):
-    offenders = {
-        k: sorted(v) for k, v in gates.items()
-        if k[1].startswith("/api/accounting/") and "CEO" in v
-    }
-    assert not offenders, f"CEO admitted to accounting routes: {offenders}"

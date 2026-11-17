@@ -2,10 +2,9 @@
 
 Smoke coverage for areas the review found untested: src/crypto.py,
 src/r2_storage.py, src/upload_validation.py, src/routers/auth.py,
-src/routers/ho.py (including the HO daily-financial auto-post),
-src/jobs/scheduled_alerts.py. Tests are fast and SQLite-safe; nothing
-here needs a live service (R2 is faked, the alert job runs against a
-test database).
+src/routers/ho.py, src/jobs/scheduled_alerts.py. Tests are fast and
+SQLite-safe; nothing here needs a live service (R2 is faked, the alert
+job runs against a test database).
 
 Run with: ENVIRONMENT=test DATABASE_URL=sqlite:// \
     .venv/bin/python -m pytest tests/test_bot_review_coverage_batch.py
@@ -28,14 +27,13 @@ import src.jobs.scheduled_alerts as scheduled_alerts
 import src.r2_storage as r2_storage
 import src.routers.ho as ho_router
 from src import r2_storage as r2_mod
-from src.accounting_templates import template_accounts
 from src.auth import hash_password, verify_password
 from src.config import settings
 from src.models import (
-    Account, AuditLog, Base, BusinessUnit, DailyFinancial,
+    AuditLog, Base, BusinessUnit, DailyFinancial,
     HeadOfficeActivityLog, HeadOfficeDailyFinancial, HeadOfficeHealthStatus,
-    HeadOfficeSocialLog, InventoryItem, JournalEntry, LicenseDocument,
-    Notification, PasswordResetRequest, StockBatch, User,
+    HeadOfficeSocialLog, LicenseDocument,
+    Notification, PasswordResetRequest, User,
 )
 from src.routers.auth import (
     forgot_password, force_password_change, login, logout,
@@ -76,22 +74,6 @@ def _add_user(db, username, role, password=PASSWORD, business_unit_id=None,
     db.commit()
     db.refresh(user)
     return user
-
-
-def _provision_ho_bu(db):
-    bu = BusinessUnit(name="Head Office", code="HO")
-    db.add(bu)
-    db.commit()
-    id_by_code = {}
-    for code, name, acc_type, parent_code, is_header in template_accounts("retail"):
-        acc = Account(business_unit_id=bu.id, code=code, name=name,
-                      account_type=acc_type, is_header=is_header, is_system=True,
-                      parent_id=id_by_code.get(parent_code) if parent_code else None)
-        db.add(acc)
-        db.flush()
-        id_by_code[code] = acc.id
-    db.commit()
-    return bu
 
 
 # ------------------------------------------------------------------ crypto
@@ -532,25 +514,6 @@ def test_ho_submit_report_rejects_bad_attachment(ho_db):
     assert "Unsupported attachment type" in exc.value.detail
 
 
-def test_ho_submit_report_auto_posts_to_ho_bu(ho_db):
-    db, ho_user = ho_db, ho_db.test_ho
-    _provision_ho_bu(db)
-    assert _submit(db, ho_user) == {"ok": True}
-    entries = db.query(JournalEntry).filter(
-        JournalEntry.source == "ho_daily_financial").all()
-    assert len(entries) == 1
-    assert entries[0].status == "posted"
-    assert float(sum(l.debit for l in entries[0].lines)) == 100000
-    # Resubmission reverses the first posting and posts the corrected one.
-    assert _submit(db, ho_user, revenue="200000") == {"ok": True}
-    entries = db.query(JournalEntry).filter(
-        JournalEntry.source == "ho_daily_financial").order_by(JournalEntry.id).all()
-    assert entries[0].reversed_by_id is not None
-    live = [e for e in entries if e.status == "posted" and e.reversed_by_id is None]
-    assert len(live) == 1
-    assert float(sum(l.debit for l in live[0].lines)) == 200000
-
-
 def test_ho_dashboard_after_submit(ho_db):
     db, ho_user = ho_db, ho_db.test_ho
     _submit(db, ho_user)
@@ -609,20 +572,14 @@ def test_scheduled_alerts_missing_report_reminder(monkeypatch, alerts_db):
     assert db.query(Notification).filter(Notification.type == "missing_report").count() == 1
 
 
-def test_scheduled_alerts_document_and_batch_expiry(monkeypatch, alerts_db):
+def test_scheduled_alerts_document_expiry(monkeypatch, alerts_db):
     db, session2 = alerts_db
     db.add(LicenseDocument(business_unit_id=db.test_bu.id, title="Trade licence",
                            document_type="license",
                            expiry_date=date.today() + timedelta(days=10)))
-    item = InventoryItem(business_unit_id=db.test_bu.id, name="Cream", current_stock=5)
-    db.add(item)
-    db.flush()
-    db.add(StockBatch(item_id=item.id, batch_no="B-1",
-                      expiry_date=date.today() + timedelta(days=5), quantity=5))
     db.commit()
     assert _run_job(monkeypatch, session2) == 0
     assert db.query(Notification).filter(Notification.type == "document_expiry").count() == 2
-    assert db.query(Notification).filter(Notification.type == "batch_expiry").count() == 2
     # Second run the same day notifies nobody (7-day throttle).
     session3 = sessionmaker(bind=db.test_engine)()
     try:
@@ -630,7 +587,6 @@ def test_scheduled_alerts_document_and_batch_expiry(monkeypatch, alerts_db):
     finally:
         session3.close()
     assert db.query(Notification).filter(Notification.type == "document_expiry").count() == 2
-    assert db.query(Notification).filter(Notification.type == "batch_expiry").count() == 2
 
 
 def test_scheduled_alerts_failure_returns_one(monkeypatch, alerts_db):

@@ -9,7 +9,10 @@ IP addresses (personal data) being kept forever.
     throttle windows, which look back hours or days, not months).
   * The IP address on every remaining row older than --ip-days is cleared.
   * Report-submission, target, account-management and password rows are KEPT:
-    they are the tamper-evidence trail for financial edits and account changes.
+    they are the tamper-evidence trail for report submissions, target
+    changes and account changes. (There are no financial/account rows any
+    more: the ERP books were removed 2026-11-17, so nothing here refers
+    to journals, accounts or money movements.)
 
 Run it on a schedule (weekly is plenty), as the schema-owner role: the runtime
 role deliberately cannot UPDATE or DELETE audit_logs (see deploy/db_roles.sql),

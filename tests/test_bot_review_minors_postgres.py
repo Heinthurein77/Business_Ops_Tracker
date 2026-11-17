@@ -128,24 +128,6 @@ def test_pg_partial_index_blocks_second_active_ceo(engine):
 
 # ------------------------------------------------------- stock CHECK (ee078d0716ad)
 
-def test_pg_check_rejects_negative_stock(engine):
-    _exec(engine, "INSERT INTO business_units (id, code, name, created_at) "
-                  "VALUES (90003, 'PG3', 'PG BU 3', CURRENT_TIMESTAMP)")
-    try:
-        assert _attempt(engine,
-            "INSERT INTO inventory_items (business_unit_id, name, unit, current_stock, "
-            "reorder_level, requires_expiry, is_active, created_at) "
-            "VALUES (90003, 'PG widget', 'pcs', -5, 0, false, true, CURRENT_TIMESTAMP)"), \
-            "ck_inventory_items_stock_non_negative did not reject current_stock = -5"
-        assert not _attempt(engine,
-            "INSERT INTO inventory_items (business_unit_id, name, unit, current_stock, "
-            "reorder_level, requires_expiry, is_active, created_at) "
-            "VALUES (90003, 'PG widget', 'pcs', 0, 0, false, true, CURRENT_TIMESTAMP)"), \
-            "current_stock = 0 unexpectedly rejected"
-    finally:
-        _exec(engine, "DELETE FROM inventory_items WHERE business_unit_id = 90003")
-        _exec(engine, "DELETE FROM business_units WHERE id = 90003")
-
 
 # ------------------------------------------------------- targets CHECKs (b1c5)
 

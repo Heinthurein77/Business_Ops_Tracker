@@ -452,50 +452,6 @@ def test_audit_retention_real_run_deletes_and_clears(tmp_path, monkeypatch):
 
 # ------------------------------------------------------- T-m5: ee078d0716ad abort
 
-def _seed_duplicate_numbers(db_path):
-    _raw(db_path, "INSERT INTO business_units (id, code, name, created_at) "
-                  "VALUES (1, 'B1', 'BU 1', '2026-01-01 00:00:00')")
-    _raw(db_path, "INSERT INTO suppliers (id, business_unit_id, name, is_active, created_at) "
-                  "VALUES (1, 1, 'Supplier One', 1, '2026-01-01 00:00:00')")
-    _raw(db_path, "INSERT INTO customers (id, business_unit_id, name, is_active, created_at) "
-                  "VALUES (1, 1, 'Customer One', 1, '2026-01-01 00:00:00')")
-    for i in (1, 2):
-        _raw(db_path,
-             "INSERT INTO purchase_orders (id, business_unit_id, supplier_id, po_no, "
-             "status, order_date, created_at) "
-             "VALUES (?, 1, 1, 'PO-B1-0001', 'draft', '2026-09-01', '2026-01-01 00:00:00')", (i,))
-        _raw(db_path,
-             "INSERT INTO sales_invoices (id, business_unit_id, customer_id, invoice_no, "
-             "status, invoice_date, tax_rate, created_at) "
-             "VALUES (?, 1, 1, 'INV-B1-0001', 'draft', '2026-09-01', 5, '2026-01-01 00:00:00')", (i,))
-
-
-def test_ee078d0716ad_duplicate_numbers_aborts_upgrade(tmp_path):
-    db_path, url = _stage_db(tmp_path, "c9ec96d6b1e5")
-    _seed_duplicate_numbers(db_path)
-    result = _run_alembic(url, "upgrade", "head")
-    assert result.returncode != 0
-    combined = result.stdout + result.stderr
-    assert "purchase_orders has duplicate po_no values" in combined
-    assert "PO-B1-0001" in combined
-    assert "Renumber the duplicates, then re-run the upgrade." in combined
-    # The upgrade stopped at the pre-flight: the version is still the
-    # parent revision and none of the migration's unique constraints was
-    # left behind (the whole revision rolled back, not just the failing table).
-    assert _query(db_path, "SELECT version_num FROM alembic_version") == [("c9ec96d6b1e5",)]
-    leftovers = []
-    for table, name in (
-            ("journal_entries", "uq_journal_entries_bu_entry_no"),
-            ("purchase_orders", "uq_purchase_orders_bu_po_no"),
-            ("sales_invoices", "uq_sales_invoices_bu_invoice_no")):
-        ddl = _query(db_path, "SELECT sql FROM sqlite_master WHERE type='table' "
-                              "AND name=?", (table,))[0][0]
-        if name in (ddl or ""):
-            leftovers.append(name)
-    assert leftovers == [], f"partial unique constraints left behind: {leftovers}"
-    # The duplicate rows themselves are untouched (no renumbering, no loss).
-    assert _query(db_path, "SELECT count(*) FROM purchase_orders")[0][0] == 2
-
 
 def test_ee078d0716ad_unique_numbers_upgrade_cleanly(tmp_path):
     db_path, url = _stage_db(tmp_path, "c9ec96d6b1e5")

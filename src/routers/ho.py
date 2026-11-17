@@ -70,17 +70,6 @@ ALLOWED_ATTACHMENT_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "gif", "webp", "do
 
 logger = logging.getLogger(__name__)
 
-_ERROR_ID_RE = re.compile(r"\(error_id: ([0-9a-f]+)\)")
-
-
-def _error_id_of(detail: str) -> str:
-    """Pull the short error_id out of a server_error() detail string
-    ("<fixed message> (error_id: ab12cd34)") so the audit row can store the
-    id, not exception text (SM-13)."""
-    match = _ERROR_ID_RE.search(detail or "")
-    return match.group(1) if match else "unknown"
-
-
 def _is_rate_limited(user_id: int) -> bool:
     now = time.monotonic()
     with _report_submit_lock:

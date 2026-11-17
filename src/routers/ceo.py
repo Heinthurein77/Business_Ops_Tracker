@@ -938,17 +938,6 @@ def _form_weight(raw: Optional[str]) -> Optional[Decimal]:
     return value
 
 
-_ERROR_ID_RE = re.compile(r"\(error_id: ([0-9a-f]+)\)")
-
-
-def _error_id_of(detail: str) -> str:
-    """Pull the short error_id out of a server_error() detail string
-    ("<fixed message> (error_id: ab12cd34)") so the audit row can store the
-    id, not exception text (SM-13)."""
-    match = _ERROR_ID_RE.search(detail or "")
-    return match.group(1) if match else "unknown"
-
-
 @router.post("/submit-report")
 def submit_report(
     request: Request,

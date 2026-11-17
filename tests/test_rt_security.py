@@ -12,17 +12,13 @@ Covers, at API level:
         and the trip is logged at ERROR.
   Sm-4  upload paths without Content-Length are rejected 411.
   SM-7  an upload the app rejects with 4xx does not burn a daily-budget slot.
-  SC-1  GET /api/admin/journal-failures lists operations with no posted
-        journal and points at the re-post endpoint.
-  SM-13 CEO submit whose auto-post fails: the response carries
-        auto_post_failed + a fixed message with an error_id, never the raw
-        exception text — and the audit row stores the error_id, not the
-        exception text.
+  (SC-1 journal-failures view and SM-13 auto-post surfacing were deleted
+  with the ERP removal, 2026-11-17: no journals, no auto-post.)
 """
 import asyncio
 import os
 import re
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
 os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("DATABASE_URL", "sqlite://")
@@ -35,19 +31,7 @@ from sqlalchemy.orm import sessionmaker
 from src import throttle
 from src.auth import assert_token_current, bump_token_version
 from src.edge import EdgeMiddleware
-from src.jobs.reconcile_journals import find_journal_failures
-from src.models import (
-    AuditLog,
-    Base,
-    BusinessUnit,
-    InventoryItem,
-    JournalEntry,
-    PosSale,
-    PosSaleLine,
-    User,
-)
-from src.routers.admin import journal_failures
-from src.routers.ceo import submit_report as ceo_submit_report
+from src.models import AuditLog, Base, BusinessUnit, User
 
 PUBLIC_IP = "8.8.8.8"
 
@@ -208,66 +192,6 @@ class TestUploadBudget:
         assert edge._upload_hits  # one hit recorded, not refunded
 
 
-# --------------------------------------------------------------------- SC-1
-
-def _seed_pos_sale(db, total_price=1000, status="completed"):
-    item = InventoryItem(business_unit_id=1, name="Widget", current_stock=10)
-    db.add(item)
-    db.flush()
-    sale = PosSale(business_unit_id=1, status=status, sale_date=date.today())
-    db.add(sale)
-    db.flush()
-    db.add(PosSaleLine(sale_id=sale.id, inventory_item_id=item.id,
-                       description="Widget", quantity=2, unit_price=total_price // 2))
-    db.commit()
-    return sale
-
-
-class TestJournalFailuresView:
-    def test_completed_sale_without_journal_is_listed(self, db):
-        sale = _seed_pos_sale(db)
-        failures = find_journal_failures(db)["failures"]
-        assert [(f["source"], f["source_id"]) for f in failures] == [("pos_sale", sale.id)]
-        out = journal_failures(limit=200, user=db.test_users["chairman"], db=db)
-        assert out["total"] == 1
-        assert out["failures"][0]["source"] == "pos_sale"
-        assert out["retry"]["path"] == "/api/accounting/journal/retry"
-        assert out["retry"]["body"] == {"source": "<source>", "source_id": "<source_id>"}
-
-    def test_posted_journal_excludes_the_sale(self, db):
-        sale = _seed_pos_sale(db)
-        db.add(JournalEntry(business_unit_id=1, entry_no="JV-2026-11-001",
-                            entry_date=date.today(), source="pos_sale",
-                            source_id=sale.id, status="posted"))
-        db.commit()
-        assert find_journal_failures(db)["failures"] == []
-
-    def test_zero_amount_sale_is_excluded(self, db):
-        _seed_pos_sale(db, total_price=0)
-        assert find_journal_failures(db)["failures"] == []
-
-    def test_void_sale_is_excluded(self, db):
-        _seed_pos_sale(db, status="void")
-        assert find_journal_failures(db)["failures"] == []
-
-    def test_truncation_is_surfaced_by_the_admin_endpoint(self, db):
-        # G-5: three failures with limit=2 — the endpoint reports the
-        # true total and truncated=true, not a capped count.
-        for _ in range(3):
-            _seed_pos_sale(db)
-        out = journal_failures(limit=2, user=db.test_users["chairman"], db=db)
-        assert out["total"] == 3
-        assert out["truncated"] is True
-        assert len(out["failures"]) == 2
-
-    def test_no_truncation_flag_when_within_limit(self, db):
-        _seed_pos_sale(db)
-        out = journal_failures(limit=200, user=db.test_users["chairman"], db=db)
-        assert out["total"] == 1
-        assert out["truncated"] is False
-        assert len(out["failures"]) == 1
-
-
 # -------------------------------------------------------------------- Sm-9
 
 # Stored-URL fields rendered anywhere in the frontend. Old R2 URLs are
@@ -307,55 +231,3 @@ class TestStoredUrlsGoThroughViewUploadUrl:
         assert not violations, (
             "stored URLs rendered without viewUploadUrl() (Sm-9):\n" + "\n".join(violations)
         )
-
-def _ceo_submit(db, user, **overrides):
-    import src.routers.ceo as ceo_router
-
-    ceo_router._report_submit_timestamps.clear()
-    payload = dict(
-        report_date="", revenue="100000", cash_flow="0", receivable="0", payable="0",
-        other_amount="", financial_other_notes="", meetings_attended="Standup",
-        meetings_count="", site_visits="", key_decisions="", key_achievement="",
-        next_day_schedule="", problems_today="", help_needed="", gym_percent="",
-        swimming_percent="", cycle_percent="", activity_other_notes="",
-        daily_steps="", heart_rate="", sleep_hours="", bp_systolic="", bp_diastolic="",
-        stress_level="", energy_mood="", weight_kg="", is_sick="false",
-        health_gym_percent=None, health_swimming_percent=None, health_cycle_percent=None,
-        health_other_notes="", event_flag="false", meeting_flag="false",
-        golf_flag="false", social_other_notes="", attachment=None,
-    )
-    payload.update(overrides)
-    request = Request({"type": "http", "headers": [], "client": ("8.8.8.8", 5555)})
-    return ceo_submit_report(request=request, user=user, db=db, **payload)
-
-
-class TestAutoPostFailedSurfacing:
-    def test_failed_auto_post_returns_flag_and_error_id_not_exception_text(self, db, monkeypatch):
-        import src.routers.accounting as accounting
-
-        secret = "boom-secret-sql-fragment SELECT * FROM users"
-
-        def _boom(*args, **kwargs):
-            raise RuntimeError(secret)
-
-        monkeypatch.setattr(accounting, "auto_post_daily_financial", _boom)
-        res = _ceo_submit(db, db.test_users["ceo"])
-        assert res["ok"] is True
-        assert res["auto_post_failed"] is True
-        assert "error_id:" in res["auto_post_error"]
-        assert secret not in res["auto_post_error"]
-        assert "Daily report journal could not be posted" in res["auto_post_error"]
-
-        # The report itself was saved — only the journal failed.
-        from src.models import DailyFinancial
-
-        saved = db.query(DailyFinancial).filter(
-            DailyFinancial.business_unit_id == 1).all()
-        assert saved and float(saved[0].revenue) == 100000
-
-        # The audit row stores the error_id, never the exception text.
-        rows = db.query(AuditLog).filter(
-            AuditLog.action == "DAILY_REPORT_AUTO_POST_FAILED").all()
-        assert len(rows) == 1
-        assert "error_id=" in rows[0].details
-        assert secret not in rows[0].details

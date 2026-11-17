@@ -28,7 +28,7 @@ from src.auth import hash_password
 from src.config import settings
 from src.models import (
     ActivityLog, AuditLog, Base, BusinessUnit, CeoProfile, DailyFinancial,
-    ExpenseRequest, HeadOfficeActivityLog, User,
+    HeadOfficeActivityLog, User,
 )
 from src.r2_storage import (
     PRESIGNED_URL_EXPIRY_SECONDS, extract_r2_key, presigned_url_for_key,
@@ -36,8 +36,7 @@ from src.r2_storage import (
 )
 from src.routers.ceo import get_profile, set_profile, submit_report as ceo_submit_report
 from src.routers.ho import submit_report as ho_submit_report
-from src.routers.ops import submit_expense, upload_expense_receipt, view_upload
-from src.routers.ops import ExpenseIn
+from src.routers.ops import view_upload
 from src.utils import today_local
 
 PASSWORD = "TestPass123!"
@@ -88,7 +87,6 @@ def db():
     yield session
     session.close()
     engine.dispose()
-
 
 
 def _configured_r2(monkeypatch):
@@ -180,25 +178,6 @@ def test_r2_failure_is_logged_with_bucket_and_key(monkeypatch, caplog):
     assert "test-bucket" in caplog.text
 
 
-def _make_expense(db):
-    ceo = db.test_users["ceo"]
-    return submit_expense(
-        ExpenseIn(business_unit_id=1, title="Fuel", amount=50000, category="transport"),
-        user=ceo, db=db)
-
-
-def test_receipt_upload_failing_r2_returns_503(db, monkeypatch):
-    _failing_r2(monkeypatch)
-    exp = _make_expense(db)
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(upload_expense_receipt(
-            exp["id"], file=UploadFile(filename="receipt.png", file=io.BytesIO(PNG_BYTES)),
-            user=db.test_users["ceo"], db=db))
-    assert exc.value.status_code == 503
-    db.expire_all()
-    assert db.query(ExpenseRequest).one().receipt_url is None
-
-
 def test_ceo_submit_with_attachment_failing_r2_returns_503(db, monkeypatch):
     _failing_r2(monkeypatch)
     with pytest.raises(HTTPException) as exc:
@@ -244,21 +223,23 @@ def test_profile_photo_failing_r2_warns_but_saves_profile(db, monkeypatch):
 
 # ------------------------------------------------------------------ D-5 view endpoint
 
-def _seed_receipt(db, url, bu_id=1):
-    exp = ExpenseRequest(business_unit_id=bu_id, submitted_by_id=801, title="Fuel",
-                         amount=50000, category="transport", status="pending",
-                         approval_stage="final", receipt_url=url)
-    db.add(exp)
+def _seed_activity_attachment(db, url, bu_id=1):
+    # Was _seed_receipt (ExpenseRequest): the expense receipt branch of
+    # view_upload died with the ERP removal (2026-11-17). Tracker
+    # attachments live on ActivityLog.document_url instead.
+    row = ActivityLog(business_unit_id=bu_id, report_date=today_local(),
+                      document_url=url)
+    db.add(row)
     db.commit()
-    return exp
+    return row
 
 
 def test_view_upload_own_bu_redirects_to_fresh_presigned(db, monkeypatch):
     fake = _FakeS3()
     monkeypatch.setattr(r2_mod, "_get_client", lambda: fake)
     _configured_r2(monkeypatch)
-    _seed_receipt(db, "https://bucket.r2.dev/expense-receipts/abc123.png")
-    resp = view_upload(key="expense-receipts/abc123.png", user=db.test_users["ceo"], db=db)
+    _seed_activity_attachment(db, "https://bucket.r2.dev/activity-attachments/abc123.png")
+    resp = view_upload(key="activity-attachments/abc123.png", user=db.test_users["ceo"], db=db)
     assert resp.status_code == 302
     assert resp.headers["location"] == fake.presigned
     assert fake.last_expires_in == 900
@@ -266,15 +247,15 @@ def test_view_upload_own_bu_redirects_to_fresh_presigned(db, monkeypatch):
 
 def test_view_upload_other_bu_forbidden(db, monkeypatch):
     monkeypatch.setattr(r2_mod, "_get_client", lambda: _FakeS3())
-    _seed_receipt(db, "https://bucket.r2.dev/expense-receipts/abc123.png", bu_id=1)
+    _seed_activity_attachment(db, "https://bucket.r2.dev/activity-attachments/abc123.png", bu_id=1)
     with pytest.raises(HTTPException) as exc:
-        view_upload(key="expense-receipts/abc123.png", user=db.test_users["ceo2"], db=db)
+        view_upload(key="activity-attachments/abc123.png", user=db.test_users["ceo2"], db=db)
     assert exc.value.status_code == 403
 
 
 def test_view_upload_unknown_key_404_and_bad_key_400(db):
     with pytest.raises(HTTPException) as exc:
-        view_upload(key="expense-receipts/nope.png", user=db.test_users["ceo"], db=db)
+        view_upload(key="activity-attachments/nope.png", user=db.test_users["ceo"], db=db)
     assert exc.value.status_code == 404
     with pytest.raises(HTTPException) as exc:
         view_upload(key="../etc/passwd", user=db.test_users["ceo"], db=db)
@@ -317,10 +298,10 @@ def test_view_upload_ho_attachment_admin_only(db, monkeypatch):
 
 def test_view_upload_local_fallback_redirects_to_uploads_route(db, monkeypatch):
     monkeypatch.setattr(r2_mod, "is_configured", lambda: False)
-    _seed_receipt(db, "/uploads/expense-receipts/abc123.png")
-    resp = view_upload(key="expense-receipts/abc123.png", user=db.test_users["ceo"], db=db)
+    _seed_activity_attachment(db, "/uploads/activity-attachments/abc123.png")
+    resp = view_upload(key="activity-attachments/abc123.png", user=db.test_users["ceo"], db=db)
     assert resp.status_code == 302
-    assert resp.headers["location"] == "/uploads/expense-receipts/abc123.png"
+    assert resp.headers["location"] == "/uploads/activity-attachments/abc123.png"
 
 
 # ------------------------------------------------------------------ D-6 decrypt grace

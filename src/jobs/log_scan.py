@@ -2,7 +2,7 @@
 watch the scheduled jobs' dead-man heartbeats.
 
 Reads a log file (``APP_LOG_FILE`` env, ``--log-file``, or stdin with
-``-``), counts ``ERROR`` / ``journal failed`` / lockout lines over a
+``-``), counts ``ERROR`` / lockout lines over a
 window (default: the last 24 h), and checks ``job_heartbeats`` for stale
 rows (> 36 h = dead man, or a job that never wrote a row).
 
@@ -32,11 +32,7 @@ from datetime import datetime, timedelta
 from typing import Iterable
 
 from src.database import SessionLocal
-from src.models import (
-    AuditLog, IntercompanyTransaction, InvoicePayment, JobHeartbeat,
-    JournalEntry, Notification, PayrollRun, PosSale, PurchaseOrder,
-    SalesInvoice, StaffAdvance, StockMovement, User,
-)
+from src.models import JobHeartbeat, Notification, User
 from src.utils import utcnow
 
 # A job whose heartbeat is older than this is presumed dead.
@@ -44,15 +40,13 @@ STALE_AFTER_HOURS = 36
 # Jobs expected to write a heartbeat every run. audit_retention and
 # backup are weekly jobs, so they are watched separately (WEEKLY_JOBS)
 # with a weekly grace instead of the 36 h daily budget — see
-# JOB_MAX_AGE_HOURS. G-3: reconcile_journals (daily 07:30) writes a
-# heartbeat on every run, so it belongs here — without it a dead
-# reconcile cron never alerts.
-EXPECTED_JOBS = ("scheduled_alerts", "log_scan", "reconcile_journals")
+# JOB_MAX_AGE_HOURS. (reconcile_journals was removed with the ERP
+# removal, 2026-11-17; it no longer runs, so it is no longer watched.)
+EXPECTED_JOBS = ("scheduled_alerts", "log_scan")
 # Weekly jobs and their dead-man grace: audit_retention runs Sundays,
 # so it gets 8 days (weekly + 1 day) instead of the 36 h daily budget.
 # G-4: backup (Sundays 03:30) gets the same 8-day grace.
 JOB_MAX_AGE_HOURS = {"scheduled_alerts": STALE_AFTER_HOURS, "log_scan": STALE_AFTER_HOURS,
-                     "reconcile_journals": STALE_AFTER_HOURS,
                      "audit_retention": 8 * 24, "backup": 8 * 24}
 WEEKLY_JOBS = ("audit_retention", "backup")
 
@@ -65,22 +59,20 @@ _TIMESTAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})")
 def count_signals(lines: Iterable[str]) -> dict:
     """Count failure signals in log lines. Pure: no I/O, no clock, no DB.
 
-    Returns {"total", "errors", "journal_failed", "lockouts"}. A line can
-    count in more than one bucket (an ERROR line about a journal failure
-    is both). Matching is deliberately textual: the app's failure sites
-    log ``logger.warning("PO journal failed ...")`` /
-    ``logger.error(...)`` and the throttle writes ``LOGIN_LOCKOUT`` audit
-    rows, so "journal failed" and "lockout" (case-insensitive) are the
-    signals the review (A-1) names.
+    Returns {"total", "errors", "lockouts"}. A line can
+    count in more than one bucket. Matching is deliberately textual:
+    the throttle writes ``LOGIN_LOCKOUT`` audit
+    rows, so "lockout" (case-insensitive) is the
+    signal the review (A-1) names. (The ``journal_failed`` bucket was
+    removed with the ERP removal, 2026-11-17 — there are no journals
+    left to fail.)
     """
-    counts = {"total": 0, "errors": 0, "journal_failed": 0, "lockouts": 0}
+    counts = {"total": 0, "errors": 0, "lockouts": 0}
     for line in lines:
         counts["total"] += 1
         lowered = line.lower()
         if _ERROR_RE.search(line):
             counts["errors"] += 1
-        if "journal failed" in lowered:
-            counts["journal_failed"] += 1
         if "lockout" in lowered:
             counts["lockouts"] += 1
     return counts
@@ -162,75 +154,10 @@ def stale_jobs(heartbeats, now=None, max_age_hours: int = STALE_AFTER_HOURS,
     return stale
 
 
-# SM-14: money operations that must each leave one audit row, with the
-# business-side timestamp that proves the operation happened. The
-# optional 4th element is a status the business row must be in to count
-# (approved_at is also stamped by reject_advance — it means "decided
-# at" — so only approved rows count as expected APPROVE_ADVANCE rows).
-# The optional 5th element is an extra SQLAlchemy filter on the
-# business rows. It is needed where the timestamp alone does not
-# identify the operation:
-# - REVERSE_JOURNAL: a reversal is a new JournalEntry with
-#   reversal_of_id set (no reversal timestamp exists on the original),
-#   so only reversal entries count.
-# - TRANSFER_STOCK: StockMovement rows are written by many operations
-#   (receive, sell, adjust, production); only the quick transfer's
-#   "Transfer to BU …" out-leg is a TRANSFER_STOCK — the same reason
-#   marker reconcile_journals uses to identify quick transfers.
-# - COMPLETE_PRODUCTION: ProductionOrder has no completion timestamp
-#   (production_date is set at creation), so the finished-goods
-#   "Production order #N completed" in-movement — exactly one per
-#   completion — is the business-side proof.
-# SELL_UNIT is deliberately NOT covered: PropertyUnit has no sold_at /
-# updated_at and the sell only flips status to "reserved" and links a
-# draft invoice, so there is no business-side timestamp to compare
-# against the window — wiring it would need a schema change.
-AUDIT_GAP_CHECKS = (
-    ("RECEIVE_PO", PurchaseOrder, PurchaseOrder.received_at, None, None),
-    ("PAY_PO", PurchaseOrder, PurchaseOrder.paid_at, None, None),
-    ("SEND_INVOICE", SalesInvoice, SalesInvoice.sent_at, None, None),
-    ("RECORD_PAYMENT", InvoicePayment, InvoicePayment.created_at, None, None),
-    ("PAY_PAYROLL", PayrollRun, PayrollRun.paid_at, None, None),
-    ("APPROVE_ADVANCE", StaffAdvance, StaffAdvance.approved_at, "approved", None),
-    ("SETTLE_INTERCOMPANY", IntercompanyTransaction, IntercompanyTransaction.settled_at,
-     "settled", None),
-    ("REVERSE_JOURNAL", JournalEntry, JournalEntry.created_at, None,
-     JournalEntry.reversal_of_id.isnot(None)),
-    ("TRANSFER_STOCK", StockMovement, StockMovement.created_at, None,
-     StockMovement.reason.like("Transfer to BU %")),
-    ("COMPLETE_PRODUCTION", StockMovement, StockMovement.created_at, None,
-     StockMovement.reason.like("Production order #% completed")),
-    ("CREATE_POS_SALE", PosSale, PosSale.created_at, "completed", None),
-)
-
-
-def check_audit_gaps(db, since: datetime) -> list[str]:
-    """SM-14: expected vs written audit rows for money operations.
-
-    For each money action, the business rows timestamped in the window
-    are the expected audit rows; the AuditLog rows with that action in
-    the same window are what was actually written. A deficit means an
-    audit write was dropped (e.g. pool exhaustion swallowing log_audit
-    — SM-11/SM-14) and the trail no longer covers the money that moved.
-    Returns human-readable gap lines (empty when everything matches).
-    Boundary note: the business timestamp and the audit timestamp are
-    written milliseconds apart, so an operation landing exactly on the
-    window edge can count on one side only — a gap of 1 is noise, a
-    larger deficit is a real signal.
-    """
-    gaps = []
-    for action, model, ts_attr, status, extra in AUDIT_GAP_CHECKS:
-        q = db.query(model).filter(ts_attr >= since)
-        if status is not None:
-            q = q.filter(model.status == status)
-        if extra is not None:
-            q = q.filter(extra)
-        expected = q.count()
-        written = db.query(AuditLog).filter(
-            AuditLog.action == action, AuditLog.timestamp >= since).count()
-        if expected > written:
-            gaps.append(f"audit gap: {action} expected {expected}, wrote {written}")
-    return gaps
+# SM-14 audit-gap checks were deleted with the ERP removal
+# (2026-11-17): every check compared an ERP business row
+# (PO / invoice / payroll / journal / stock / POS) against its
+# audit row, and no ERP business rows exist any more.
 
 
 # ------------------------------------------------------------------ DB bits
@@ -301,18 +228,16 @@ def main(argv=None) -> int:
     counts = count_signals(window_lines)
     pool_counts = count_pool_signals(window_lines)
 
-    # Dead-man check + own heartbeat + audit-gap check. A DB failure
+    # Dead-man check + own heartbeat. A DB failure
     # here must not kill the scan: the log counts are still worth
     # reporting, and the fallback (stderr + non-zero exit) is the alert
     # path.
     stale: list[str] = []
-    gaps: list[str] = []
     db_available = False
     db = None
     try:
         db = SessionLocal()
         stale = check_heartbeats(db)
-        gaps = check_audit_gaps(db, since)
         _record_heartbeat(db, "log_scan", "ok")
         db_available = True
     except Exception as exc:  # noqa: BLE001 - DB is optional for the scan
@@ -328,8 +253,6 @@ def main(argv=None) -> int:
     problems = []
     if counts["errors"]:
         problems.append(f"{counts['errors']} ERROR line(s)")
-    if counts["journal_failed"]:
-        problems.append(f"{counts['journal_failed']} journal-failure line(s)")
     if counts["lockouts"]:
         problems.append(f"{counts['lockouts']} lockout line(s)")
     if pool_counts["pool_waits"]:
@@ -338,13 +261,11 @@ def main(argv=None) -> int:
         problems.append(f"{pool_counts['lock_timeouts']} lock-timeout line(s)")
     if stale:
         problems.append(f"stale job heartbeat(s): {', '.join(stale)} (>{STALE_AFTER_HOURS}h or never ran)")
-    problems.extend(gaps)
 
     summary = (
         f"log_scan: {counts['total']} line(s) in window, {counts['errors']} ERROR, "
-        f"{counts['journal_failed']} journal-failed, {counts['lockouts']} lockout; "
+        f"{counts['lockouts']} lockout; "
         f"pool_waits: {pool_counts['pool_waits']}, lock_timeouts: {pool_counts['lock_timeouts']}; "
-        f"audit gaps: {'; '.join(gaps) if gaps else 'none'}; "
         f"stale heartbeats: {', '.join(stale) if stale else 'none'}"
     )
     print(summary)

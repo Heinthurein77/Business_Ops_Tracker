@@ -47,46 +47,41 @@ _UPLOAD_PATHS = {
     "/api/ceo/submit-report",   # attachment, app limit 10 MB
     "/api/ceo/profile",         # profile photo, app limit 5 MB
     "/api/ho/submit-report",    # attachment, app limit 10 MB
-    "/api/accounting/opening-balance",  # Excel import, no app-side limit
 }
-_UPLOAD_PATH_PATTERNS = (
-    re.compile(r"^/api/ops/expenses/\d+/receipt$"),  # receipt, app limit 10 MB
-)
+# No path-pattern upload routes remain (the expenses/receipt route was
+# deleted with the ERP removal, 2026-11-17).
+_UPLOAD_PATH_PATTERNS = ()
 
 
 def is_upload_path(path: str) -> bool:
     return path in _UPLOAD_PATHS or any(pattern.match(path) for pattern in _UPLOAD_PATH_PATTERNS)
 
 
-_EXPORT_PATH_PATTERNS = (
-    re.compile(r"^/api/ops/sales-customers/\d+/statement$"),
-    re.compile(r"^/api/ops/payroll-runs/\d+/lines/\d+/payslip$"),
-)
+# No path-pattern export routes remain (sales-customer statements and
+# payslips were deleted with the ERP removal, 2026-11-17).
+_EXPORT_PATH_PATTERNS = ()
 
 
 def is_export_path(path: str) -> bool:
     """The expensive report/export endpoints covered by the per-caller edge
-    budget (audit finding L2): every accounting report, any path containing
-    /export, the monthly chairman PDF, customer statements and payslip PDFs.
-    Normal API/dashboard traffic is deliberately NOT matched."""
+    budget (audit finding L2): any path containing /export and the monthly
+    chairman PDF. Normal API/dashboard traffic is deliberately NOT matched."""
     return (
-        path.startswith("/api/accounting/reports/")
-        or "/export" in path
+        "/export" in path
         or path == "/api/ops/monthly-report"
         or any(pattern.match(path) for pattern in _EXPORT_PATH_PATTERNS)
     )
 
 def is_heavy_get_path(path: str) -> bool:
     """The heaviest read endpoints (SM-4): full-group comparison, the admin
-    overview, the health dashboard and the journal list. Normal API and
-    dashboard traffic is deliberately NOT matched — only these get the
+    overview, the health dashboard and the admin operations page. Normal API
+    and dashboard traffic is deliberately NOT matched — only these get the
     modest per-caller GET budget in _heavy_get_budget_retry. Report/export
     paths are already covered by is_export_path above."""
     return path in {
         "/api/admin/comparison",
         "/api/admin/overview",
         "/api/admin/health-dashboard",
-        "/api/accounting/journal",
         "/api/admin/operations",
     }
 

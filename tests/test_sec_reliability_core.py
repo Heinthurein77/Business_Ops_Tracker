@@ -28,7 +28,7 @@ from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import sessionmaker
 
-from src.models import Account, AuditLog, Base, BusinessUnit, JournalEntry, JournalLine, User
+from src.models import AuditLog, Base, BusinessUnit, User
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -60,18 +60,6 @@ def db_file(tmp_path):
     yield session
     session.close()
     engine.dispose()
-
-
-def _fk_engine(url):
-    engine = create_engine(url)
-
-    @event.listens_for(engine, "connect")
-    def _fk(dbapi_connection, _record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
-
-    return engine
 
 
 # ------------------------------------------------------- raw-ASGI driver
@@ -372,38 +360,38 @@ class TestWriteBudget:
         app = self._middleware()
         headers = self._cookie("chairman")
         for _ in range(3):
-            status, _, _ = asgi_request(app, "POST", "/api/ops/expenses", headers=headers)
+            status, _, _ = asgi_request(app, "POST", "/api/ops/action-items", headers=headers)
             assert status == 200
-        status, out_headers, _ = asgi_request(app, "POST", "/api/ops/expenses", headers=headers)
+        status, out_headers, _ = asgi_request(app, "POST", "/api/ops/action-items", headers=headers)
         assert status == 429
         assert int(out_headers["retry-after"]) >= 1
 
     def test_budget_is_per_user_and_gets_are_never_budgeted(self):
         app = self._middleware()
         for _ in range(3):
-            asgi_request(app, "POST", "/api/ops/expenses", headers=self._cookie("chairman"))
+            asgi_request(app, "POST", "/api/ops/action-items", headers=self._cookie("chairman"))
         # A different user has their own budget.
-        status, _, _ = asgi_request(app, "POST", "/api/ops/expenses", headers=self._cookie("ceo_bu1"))
+        status, _, _ = asgi_request(app, "POST", "/api/ops/action-items", headers=self._cookie("ceo_bu1"))
         assert status == 200
         # GETs never consume the write budget.
         for _ in range(6):
-            status, _, _ = asgi_request(app, "GET", "/api/ops/expenses", headers=self._cookie("chairman"))
+            status, _, _ = asgi_request(app, "GET", "/api/ops/action-items", headers=self._cookie("chairman"))
             assert status == 200
 
     def test_unauthenticated_and_forged_cookies_fall_back_to_ip(self):
         app = self._middleware()
         for _ in range(3):
-            status, _, _ = asgi_request(app, "POST", "/api/ops/expenses")
+            status, _, _ = asgi_request(app, "POST", "/api/ops/action-items")
             assert status == 200
-        status, _, _ = asgi_request(app, "POST", "/api/ops/expenses")
+        status, _, _ = asgi_request(app, "POST", "/api/ops/action-items")
         assert status == 429
         # A forged cookie budgets the caller's own IP bucket, not someone else's.
         forged = {"cookie": "access_token=not-a-real-token"}
-        status, _, _ = asgi_request(app, "POST", "/api/ops/expenses", headers=forged)
+        status, _, _ = asgi_request(app, "POST", "/api/ops/action-items", headers=forged)
         assert status == 429
         # A different IP has its own budget.
         status, _, _ = asgi_request(
-            app, "POST", "/api/ops/expenses", headers={"x-forwarded-for": "8.8.8.8"}
+            app, "POST", "/api/ops/action-items", headers={"x-forwarded-for": "8.8.8.8"}
         )
         assert status == 200
 
@@ -412,9 +400,9 @@ class TestWriteBudget:
         caplog.set_level(logging.WARNING, logger="business_ops_tracker.error")
         headers = self._cookie("chairman")
         for _ in range(3):
-            asgi_request(app, "POST", "/api/ops/expenses", headers=headers)
+            asgi_request(app, "POST", "/api/ops/action-items", headers=headers)
         for _ in range(3):  # three 429s = "sustained"
-            status, _, _ = asgi_request(app, "POST", "/api/ops/expenses", headers=headers)
+            status, _, _ = asgi_request(app, "POST", "/api/ops/action-items", headers=headers)
             assert status == 429
         assert "Sustained write rate limiting for user:chairman" in caplog.text
 
@@ -429,9 +417,9 @@ class TestWriteBudget:
         headers = self._cookie("chairman")
         with mock.patch("time.monotonic", return_value=10.0):
             for _ in range(3):
-                asgi_request(app, "POST", "/api/ops/expenses", headers=headers)
+                asgi_request(app, "POST", "/api/ops/action-items", headers=headers)
             for _ in range(3):
-                status, _, _ = asgi_request(app, "POST", "/api/ops/expenses", headers=headers)
+                status, _, _ = asgi_request(app, "POST", "/api/ops/action-items", headers=headers)
                 assert status == 429
         assert "Sustained write rate limiting for user:chairman" in caplog.text
 
@@ -444,125 +432,6 @@ def _make_bus(db, code):
     db.commit()
     db.refresh(bu)
     return bu
-
-
-class TestJournalLineBuGuard:
-    @pytest.fixture()
-    def fk_db(self):
-        engine = _fk_engine("sqlite://")
-        Base.metadata.create_all(engine)
-        session = sessionmaker(bind=engine)()
-        yield session
-        session.close()
-        engine.dispose()
-
-    def test_cross_bu_line_rejected_at_db_level(self, fk_db):
-        bu1 = _make_bus(fk_db, "BU1")
-        bu2 = _make_bus(fk_db, "BU2")
-        acc1 = Account(business_unit_id=bu1.id, code="1110", name="Cash", account_type="asset")
-        acc2 = Account(business_unit_id=bu2.id, code="1110", name="Cash", account_type="asset")
-        fk_db.add_all([acc1, acc2])
-        fk_db.commit()
-        entry = JournalEntry(
-            business_unit_id=bu1.id, entry_no="JV-D12-1", entry_date=date(2026, 11, 9),
-            description="t", source="manual", status="draft",
-        )
-        fk_db.add(entry)
-        fk_db.commit()
-        # Same-BU line is fine.
-        fk_db.add(JournalLine(
-            entry_id=entry.id, business_unit_id=bu1.id, account_id=acc1.id,
-            debit=Decimal("100"), credit=Decimal("0"),
-        ))
-        fk_db.commit()
-        # Cross-BU line must fail in the database, not just in validation.
-        fk_db.add(JournalLine(
-            entry_id=entry.id, business_unit_id=bu1.id, account_id=acc2.id,
-            debit=Decimal("0"), credit=Decimal("100"),
-        ))
-        with pytest.raises(IntegrityError):
-            fk_db.commit()
-        fk_db.rollback()
-
-    def test_create_entry_sets_line_business_unit_id(self, fk_db):
-        from src.routers.accounting import create_entry
-
-        bu1 = _make_bus(fk_db, "BU1")
-        cash = Account(business_unit_id=bu1.id, code="1110", name="Cash", account_type="asset")
-        sales = Account(business_unit_id=bu1.id, code="4100", name="Sales", account_type="income")
-        fk_db.add_all([cash, sales])
-        fk_db.commit()
-        entry = create_entry(
-            fk_db, bu1.id, date(2026, 11, 9), "D-12 test", "manual", None,
-            [
-                {"account_id": cash.id, "debit": Decimal("500"), "credit": 0},
-                {"account_id": sales.id, "debit": 0, "credit": Decimal("500")},
-            ],
-        )
-        fk_db.commit()
-        assert len(entry.lines) == 2
-        assert all(line.business_unit_id == bu1.id for line in entry.lines)
-
-    def test_migrated_schema_has_column_fk_and_rejects_cross_bu(self, tmp_path):
-        """Runs the real migration chain to this revision on a scratch DB
-        and proves the guard exists there (not just in create_all)."""
-        db_path = tmp_path / "mig_d12.db"
-        url = f"sqlite:///{db_path}"
-        env = {
-            **os.environ,
-            "ENVIRONMENT": "test",
-            "DATABASE_URL": url,
-            "MIGRATION_DATABASE_URL": url,
-        }
-        result = subprocess.run(
-            [sys.executable, "-m", "alembic", "upgrade", "87d970971665"],
-            cwd=ROOT, env=env, capture_output=True, text=True, timeout=600,
-        )
-        assert result.returncode == 0, f"alembic upgrade failed:\n{result.stdout}\n{result.stderr}"
-        engine = _fk_engine(url)
-        try:
-            inspector = inspect(engine)
-            assert "business_unit_id" in {
-                c["name"] for c in inspector.get_columns("journal_lines")
-            }
-            fks = inspector.get_foreign_keys("journal_lines")
-            assert any(
-                fk["constrained_columns"] == ["business_unit_id", "account_id"]
-                and fk["referred_columns"] == ["business_unit_id", "id"]
-                for fk in fks
-            ), f"composite FK missing: {fks}"
-            assert any(
-                uq["column_names"] == ["business_unit_id", "id"]
-                for uq in inspector.get_unique_constraints("accounts")
-            )
-            session = sessionmaker(bind=engine)()
-            try:
-                bu1 = BusinessUnit(code="BU1", name="One")
-                bu2 = BusinessUnit(code="BU2", name="Two")
-                session.add_all([bu1, bu2])
-                session.commit()
-                acc2 = Account(business_unit_id=bu2.id, code="1110", name="Cash",
-                               account_type="asset")
-                session.add(acc2)
-                session.commit()
-                entry = JournalEntry(
-                    business_unit_id=bu1.id, entry_no="JV-MIG-1",
-                    entry_date=date(2026, 11, 9), description="t",
-                    source="manual", status="draft",
-                )
-                session.add(entry)
-                session.commit()
-                session.add(JournalLine(
-                    entry_id=entry.id, business_unit_id=bu1.id, account_id=acc2.id,
-                    debit=Decimal("1"), credit=Decimal("0"),
-                ))
-                with pytest.raises(IntegrityError):
-                    session.commit()
-                session.rollback()
-            finally:
-                session.close()
-        finally:
-            engine.dispose()
 
 
 # -------------------------------------------------------------------- D-13

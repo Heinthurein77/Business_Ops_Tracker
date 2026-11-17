@@ -1,7 +1,9 @@
-"""BOT review workstream D — migrations batch (M-D5, M-C5, M-D7, m23–m27).
+"""BOT review workstream D — migrations batch (m23–m27).
 
-Covers the new migration ee078d0716ad (per-BU unique document numbers,
-invoice_payments.currency, inventory stock CHECK) and the review's
+The ERP constraint tests from this batch (M-D5 unique document numbers,
+M-D7 payment currency, M-C5 stock CHECK) were deleted with the ERP
+removal (2026-11-17): those tables and constraints no longer exist.
+What remains is the chain assertions plus the review's
 migrations/tests minors:
 
 - m24: Postgres-only constraints are never executed by the suite (no
@@ -27,48 +29,16 @@ import re
 import sqlite3
 import subprocess
 import sys
-from datetime import date
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
-from sqlalchemy import create_engine, inspect
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import sessionmaker
-
-from src.accounting_templates import template_accounts
-from src.models import (
-    Account, Base, BusinessUnit, Customer, InventoryItem, InvoicePayment,
-    JournalEntry, JournalLine, PurchaseOrder, Quotation, SalesInvoice,
-    StockTransfer,
-)
-from src.routers.ops import (
-    CustomerIn, InvoiceIn, InvoiceLineIn, PaymentIn, POIn, POLineIn,
-    create_invoice, create_po, create_sales_customer, create_supplier,
-    record_payment, send_invoice, SupplierIn,
-)
-from src.routers.accounting import create_entry
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSIONS = ROOT / "alembic" / "versions"
-NEW_REVISION = "ee078d0716ad"
-PREV_HEAD = "c9ec96d6b1e5"
-# Current head after the 2026-11-09 sec-review fix pass linearised the
-# three new revisions (D-12 -> job heartbeats -> revenue anomaly flag).
-# Workstream A (realtime review) added 7f3a9c1e5b2d on top of it:
-# CM-8 version columns, CM-6 idempotency table, CC-1 stock-batch CHECK
-# + unique, Cm-7 year-close partial unique index.
-# 2026-11-16 review fix F-5 added 64f310f1ca3d on top of that:
-# CM-8 version column on quotations.
-# 2026-11-17 review fix G-2 added f452a085537d on top of that:
-# unique constraint on journal_entries.reversed_by_id.
-CURRENT_HEAD = "f452a085537d"
-CURRENT_HEAD_DOWN = "64f310f1ca3d"
-
-from types import SimpleNamespace
-
-ADMIN = SimpleNamespace(id=None, role="Chairman", business_unit_id=None)
+# Current head after the ERP removal (2026-11-17, phase 4): the drop
+# migration a720b6b7c616, on top of the 2026-11-17 G-2 fix f452a085537d.
+CURRENT_HEAD = "a720b6b7c616"
+CURRENT_HEAD_DOWN = "f452a085537d"
 
 
 # ------------------------------------------------------------------ helpers
@@ -137,48 +107,6 @@ def _balanced(expr):
     return depth == 0 and not in_single
 
 
-@pytest.fixture()
-def db():
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
-    bu = BusinessUnit(name="Distributor", code="D1")
-    session.add(bu)
-    session.commit()
-    id_by_code = {}
-    for code, name, acc_type, parent_code, is_header in template_accounts("distribution"):
-        acc = Account(business_unit_id=bu.id, code=code, name=name,
-                      account_type=acc_type, is_header=is_header, is_system=True,
-                      parent_id=id_by_code.get(parent_code) if parent_code else None)
-        session.add(acc)
-        session.flush()
-        id_by_code[code] = acc.id
-    session.commit()
-    session.test_bu = bu
-    session.test_ids = id_by_code
-    yield session
-    session.close()
-
-
-def _make_customer(db):
-    return create_sales_customer(
-        CustomerIn(business_unit_id=db.test_bu.id, name="Hotel"), user=ADMIN, db=db)
-
-
-def _make_invoice(db, price=100000, qty=10):
-    cust = _make_customer(db)
-    return create_invoice(InvoiceIn(
-        business_unit_id=db.test_bu.id, customer_id=cust["id"],
-        invoice_date=date.today(), due_date=None, tax_rate=5,
-        lines=[InvoiceLineIn(description="Goods", quantity=qty, unit_price=price)],
-    ), user=ADMIN, db=db)
-
-
-def _make_supplier(db):
-    return create_supplier(
-        SupplierIn(business_unit_id=db.test_bu.id, name="Supplier"), user=ADMIN, db=db)
-
-
 # ------------------------------------------------------- new migration: chain
 
 def test_new_migration_is_the_single_head():
@@ -194,6 +122,11 @@ def test_new_migration_is_the_single_head():
 
 
 def test_upgrade_head_then_downgrade_base_is_clean(tmp_path):
+    # The ERP-removal drop migration (a720b6b7c616) is one-way by design
+    # (plan §4.2): downgrade() refuses instead of re-creating 48 tables
+    # whose data is gone. So "upgrade head, downgrade base" no longer
+    # empties the DB — the downgrade must fail at the drop migration and
+    # leave the schema intact at the head.
     db_path = tmp_path / "chain.db"
     url = f"sqlite:///{db_path}"
     up = _run_alembic(url, "upgrade", "head")
@@ -203,258 +136,31 @@ def test_upgrade_head_then_downgrade_base_is_clean(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert not [t for t in tables if t.startswith("_alembic_tmp_")], (
         "leftover batch temp tables after upgrade head")
-    assert "invoice_payments" in tables
+    # 22 tracker data tables + alembic_version (48 ERP tables dropped).
+    assert tables == {
+        "action_items", "activity_logs", "alembic_version", "audit_logs",
+        "business_units", "ceo_profiles", "customer_metrics",
+        "daily_financials", "financial_notes", "health_statuses",
+        "ho_activity_logs", "ho_daily_financials", "ho_health_statuses",
+        "ho_monthly_targets", "ho_social_logs", "job_heartbeats",
+        "license_documents", "monthly_targets", "notifications",
+        "password_reset_requests", "social_logs", "staff_records", "users",
+    }, f"unexpected tables after upgrade head: {sorted(tables)}"
+    assert "invoice_payments" not in tables
+    assert "journal_entries" not in tables
+    assert _query(db_path, "SELECT version_num FROM alembic_version") == [
+        (CURRENT_HEAD,)]
     down = _run_alembic(url, "downgrade", "base")
-    assert down.returncode == 0, f"downgrade base failed:\n{down.stdout}\n{down.stderr}"
-    tables = {r[0] for r in conn.execute(
+    assert down.returncode != 0, "downgrade past the ERP-removal migration must refuse"
+    assert "one-way" in (down.stdout + down.stderr)
+    # Nothing was dropped: still at the head, same tables.
+    assert _query(db_path, "SELECT version_num FROM alembic_version") == [
+        (CURRENT_HEAD,)]
+    tables_after = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
-    assert tables == {"alembic_version"}, f"tables left after downgrade base: {tables}"
-    assert not [t for t in tables if t.startswith("_alembic_tmp_")]
+    assert tables_after == tables
+    assert not [t for t in tables_after if t.startswith("_alembic_tmp_")]
     conn.close()
-
-
-# ------------------------------------------------------- M-D5: unique numbers
-
-EXPECTED_UNIQUES = {
-    "journal_entries": ("uq_journal_entries_bu_entry_no", ["business_unit_id", "entry_no"]),
-    "purchase_orders": ("uq_purchase_orders_bu_po_no", ["business_unit_id", "po_no"]),
-    "sales_invoices": ("uq_sales_invoices_bu_invoice_no", ["business_unit_id", "invoice_no"]),
-    "quotations": ("uq_quotations_bu_quote_no", ["business_unit_id", "quote_no"]),
-    "sales_returns": ("uq_sales_returns_bu_return_no", ["business_unit_id", "return_no"]),
-    "purchase_returns": ("uq_purchase_returns_bu_return_no", ["business_unit_id", "return_no"]),
-    "stock_transfers": ("uq_stock_transfers_from_bu_transfer_no",
-                         ["from_business_unit_id", "transfer_no"]),
-}
-
-
-def test_migrated_schema_has_all_unique_constraints_and_currency(tmp_path):
-    db_path, url = _stage_db(tmp_path, "head")
-    engine = create_engine(url)
-    try:
-        inspector = inspect(engine)
-        for table, (name, columns) in EXPECTED_UNIQUES.items():
-            uniques = inspector.get_unique_constraints(table)
-            match = [u for u in uniques if u["name"] == name]
-            assert match, f"{table}: unique constraint {name} missing after migration (have {[u['name'] for u in uniques]})"
-            assert match[0]["column_names"] == columns
-        cols = {c["name"]: c for c in inspector.get_columns("invoice_payments")}
-        assert "currency" in cols
-        assert cols["currency"]["type"].length == 3
-        assert cols["currency"]["default"] == "'MMK'"
-    finally:
-        engine.dispose()
-
-
-def test_duplicate_numbers_rejected_on_migrated_db(tmp_path):
-    db_path, url = _stage_db(tmp_path, "head")
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.execute("INSERT INTO business_units (id, code, name, created_at) "
-                     "VALUES (1, 'B1', 'BU 1', '2026-01-01 00:00:00')")
-        conn.execute("INSERT INTO business_units (id, code, name, created_at) "
-                     "VALUES (2, 'B2', 'BU 2', '2026-01-01 00:00:00')")
-        conn.execute("INSERT INTO customers (id, business_unit_id, name, is_active, created_at) "
-                     "VALUES (1, 1, 'C', 1, '2026-01-01 00:00:00')")
-        conn.execute("INSERT INTO sales_invoices (id, business_unit_id, customer_id, invoice_no, "
-                     "status, invoice_date, tax_rate, currency, exchange_rate, created_at) "
-                     "VALUES (1, 1, 1, 'INV-1-0001', 'draft', '2026-11-09', 5, 'MMK', 1, '2026-01-01 00:00:00')")
-        conn.commit()
-        # Same BU, same number -> rejected.
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute("INSERT INTO sales_invoices (id, business_unit_id, customer_id, invoice_no, "
-                         "status, invoice_date, tax_rate, currency, exchange_rate, created_at) "
-                         "VALUES (2, 1, 1, 'INV-1-0001', 'draft', '2026-11-09', 5, 'MMK', 1, '2026-01-01 00:00:00')")
-        conn.rollback()
-        # A different BU may reuse the same number string.
-        conn.execute("INSERT INTO sales_invoices (id, business_unit_id, customer_id, invoice_no, "
-                     "status, invoice_date, tax_rate, currency, exchange_rate, created_at) "
-                     "VALUES (3, 2, 1, 'INV-1-0001', 'draft', '2026-11-09', 5, 'MMK', 1, '2026-01-01 00:00:00')")
-        conn.commit()
-        # Journal entry_no: same BU + same number rejected.
-        conn.execute("INSERT INTO journal_entries (id, business_unit_id, entry_no, entry_date, "
-                     "source, status, approval_status, created_at) "
-                     "VALUES (1, 1, 'JV-2026-11-001', '2026-11-09', 'manual', 'draft', 'not_required', '2026-01-01 00:00:00')")
-        conn.commit()
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute("INSERT INTO journal_entries (id, business_unit_id, entry_no, entry_date, "
-                         "source, status, approval_status, created_at) "
-                         "VALUES (2, 1, 'JV-2026-11-001', '2026-11-09', 'manual', 'draft', 'not_required', '2026-01-01 00:00:00')")
-        conn.rollback()
-    finally:
-        conn.close()
-
-
-def test_model_unique_constraints_reject_duplicates(db):
-    bu = db.test_bu
-    db.add(JournalEntry(business_unit_id=bu.id, entry_no="JV-2026-11-001",
-                        entry_date=date(2026, 11, 9), source="manual", status="draft"))
-    db.commit()
-    db.add(JournalEntry(business_unit_id=bu.id, entry_no="JV-2026-11-001",
-                        entry_date=date(2026, 11, 9), source="manual", status="draft"))
-    with pytest.raises(IntegrityError):
-        db.flush()
-    db.rollback()
-
-    sup = _make_supplier(db)
-    db.add(PurchaseOrder(business_unit_id=bu.id, supplier_id=sup["id"], po_no="PO-1-0001",
-                         status="draft", order_date=date(2026, 11, 9)))
-    db.commit()
-    db.add(PurchaseOrder(business_unit_id=bu.id, supplier_id=sup["id"], po_no="PO-1-0001",
-                         status="draft", order_date=date(2026, 11, 9)))
-    with pytest.raises(IntegrityError):
-        db.flush()
-    db.rollback()
-
-    bu2 = BusinessUnit(name="Second", code="D2")
-    db.add(bu2)
-    db.commit()
-    # Same number string in a different BU is fine.
-    db.add(PurchaseOrder(business_unit_id=bu2.id, supplier_id=sup["id"], po_no="PO-1-0001",
-                         status="draft", order_date=date(2026, 11, 9)))
-    db.commit()
-
-    db.add(StockTransfer(from_business_unit_id=bu.id, to_business_unit_id=bu2.id,
-                         transfer_no="TRF-1-0001", status="draft"))
-    db.commit()
-    db.add(StockTransfer(from_business_unit_id=bu.id, to_business_unit_id=bu2.id,
-                         transfer_no="TRF-1-0001", status="draft"))
-    with pytest.raises(IntegrityError):
-        db.flush()
-    db.rollback()
-
-
-def test_duplicate_invoice_number_returns_409_not_500(db):
-    # Two invoices exist; deleting the first makes count+1 collide with the
-    # second — the endpoint must answer 409, never store a duplicate.
-    inv1 = _make_invoice(db)
-    inv2 = _make_invoice(db)
-    assert inv1["invoice_no"] != inv2["invoice_no"]
-    row = db.query(SalesInvoice).filter(SalesInvoice.id == inv1["id"]).one()
-    db.delete(row)
-    db.commit()
-    cust = db.query(Customer).first()
-    with pytest.raises(HTTPException) as exc:
-        create_invoice(InvoiceIn(
-            business_unit_id=db.test_bu.id, customer_id=cust.id,
-            invoice_date=date.today(), due_date=None, tax_rate=5,
-            lines=[InvoiceLineIn(description="Goods", quantity=1, unit_price=1000)],
-        ), user=ADMIN, db=db)
-    assert exc.value.status_code == 409
-    assert inv2["invoice_no"] in exc.value.detail
-    # The colliding row is untouched and the session is still usable.
-    assert db.query(SalesInvoice).count() == 1
-
-
-def test_duplicate_po_number_returns_409_not_500(db):
-    sup = _make_supplier(db)
-    payload = lambda: POIn(
-        business_unit_id=db.test_bu.id, supplier_id=sup["id"],
-        order_date=date.today(),
-        lines=[POLineIn(item_name="Widget", quantity=1, unit_cost=1000)],
-    )
-    po1 = create_po(payload(), user=ADMIN, db=db)
-    po2 = create_po(payload(), user=ADMIN, db=db)
-    assert po1["po_no"] != po2["po_no"]
-    row = db.query(PurchaseOrder).filter(PurchaseOrder.id == po1["id"]).one()
-    db.delete(row)
-    db.commit()
-    with pytest.raises(HTTPException) as exc:
-        create_po(payload(), user=ADMIN, db=db)
-    assert exc.value.status_code == 409
-    assert po2["po_no"] in exc.value.detail
-
-
-def test_duplicate_journal_entry_number_returns_409_not_500(db):
-    def line(code, debit=0, credit=0):
-        return {"account_id": db.test_ids[code], "debit": Decimal(str(debit)),
-                "credit": Decimal(str(credit))}
-
-    e1 = create_entry(db, db.test_bu.id, date(2026, 11, 1), "first", "manual", None,
-                      [line("1110", debit=1000), line("4100", credit=1000)], post=True)
-    e2 = create_entry(db, db.test_bu.id, date(2026, 11, 1), "second", "manual", None,
-                      [line("1110", debit=500), line("4100", credit=500)], post=True)
-    db.commit()
-    assert e1.entry_no != e2.entry_no
-    db.delete(e1)
-    db.commit()
-    with pytest.raises(HTTPException) as exc:
-        create_entry(db, db.test_bu.id, date(2026, 11, 1), "third", "manual", None,
-                     [line("1110", debit=700), line("4100", credit=700)], post=True)
-    assert exc.value.status_code == 409
-    assert e2.entry_no in exc.value.detail
-
-
-# ------------------------------------------------------- M-D7: payment currency
-
-def test_payment_records_its_currency(db):
-    inv = _make_invoice(db)
-    send_invoice(inv["id"], user=ADMIN, db=db)
-    out = record_payment(inv["id"], PaymentIn(amount=100000, payment_date=date.today(),
-                                              method="cash"), user=ADMIN, db=db)
-    assert out["status"] == "partial"
-    pay = db.query(InvoicePayment).filter(InvoicePayment.invoice_id == inv["id"]).one()
-    assert pay.currency == "MMK"
-
-    # Explicit currency is stored as given (upper-cased).
-    inv2 = _make_invoice(db)
-    send_invoice(inv2["id"], user=ADMIN, db=db)
-    record_payment(inv2["id"], PaymentIn(amount=100000, payment_date=date.today(),
-                                         method="bank", currency="mmk"), user=ADMIN, db=db)
-    pay2 = db.query(InvoicePayment).filter(InvoicePayment.invoice_id == inv2["id"]).one()
-    assert pay2.currency == "MMK"
-
-
-def test_payment_in_foreign_currency_records_it(db):
-    cust = _make_customer(db)
-    inv = create_invoice(InvoiceIn(
-        business_unit_id=db.test_bu.id, customer_id=cust["id"],
-        invoice_date=date.today(), due_date=None, tax_rate=5, currency="USD",
-        exchange_rate=2100,
-        lines=[InvoiceLineIn(description="Goods", quantity=1, unit_price=100)],
-    ), user=ADMIN, db=db)
-    send_invoice(inv["id"], user=ADMIN, db=db)
-    record_payment(inv["id"], PaymentIn(amount=50, payment_date=date.today(),
-                                        method="bank", currency="USD"), user=ADMIN, db=db)
-    pay = db.query(InvoicePayment).filter(InvoicePayment.invoice_id == inv["id"]).one()
-    assert pay.currency == "USD"
-    # Mismatched currency is still rejected (workstream B's validation).
-    with pytest.raises(HTTPException) as exc:
-        record_payment(inv["id"], PaymentIn(amount=10, payment_date=date.today(),
-                                            method="bank", currency="MMK"), user=ADMIN, db=db)
-    assert exc.value.status_code == 400
-
-
-def test_invoice_payment_currency_column_default(db):
-    # ORM-side default matches the migration's server default.
-    assert InvoicePayment.__table__.c.currency.default.arg == "MMK"
-    assert InvoicePayment.__table__.c.currency.nullable is False
-
-
-# ------------------------------------------------------- M-C5: stock CHECK
-
-def test_stock_check_present_in_models_and_migration():
-    from sqlalchemy import CheckConstraint
-
-    checks = [c for c in InventoryItem.__table__.constraints
-              if isinstance(c, CheckConstraint)]
-    match = [c for c in checks if c.name == "ck_inventory_items_stock_non_negative"]
-    assert match, f"stock CHECK missing from models (have {[c.name for c in checks]})"
-    assert "current_stock >= 0" in str(match[0].sqltext)
-    # Postgres-only by design (repo convention — see _pg_check): the DDL is
-    # emitted for postgresql and skipped for sqlite, so the check protects
-    # production (Neon) while local SQLite relies on the API validation.
-    from sqlalchemy.dialects import postgresql, sqlite
-    from sqlalchemy.schema import CreateTable
-
-    ddl_pg = str(CreateTable(InventoryItem.__table__).compile(dialect=postgresql.dialect()))
-    ddl_sqlite = str(CreateTable(InventoryItem.__table__).compile(dialect=sqlite.dialect()))
-    assert "ck_inventory_items_stock_non_negative" in ddl_pg
-    assert "CHECK (current_stock >= 0)" in ddl_pg
-    assert "ck_inventory_items_stock_non_negative" not in ddl_sqlite
-    text = _migration_text(NEW_REVISION)
-    assert "ck_inventory_items_stock_non_negative" in text
-    assert "current_stock >= 0" in text
-    assert "create_check_constraint" in text
 
 
 # ------------------------------------------------------- m24: Postgres-only rules
@@ -517,10 +223,9 @@ def test_every_pg_check_in_models_has_a_migration():
     expected = {
         "ck_users_role", "ck_users_bu_assignment", "ck_users_username_lower",
         "ck_financial_notes_text", "ck_pwreset_status",
-        "ck_inventory_items_stock_non_negative",
-        # Workstream A (realtime review, migration 7f3a9c1e5b2d): the
-        # stock-batch quantity CHECK (CC-1).
-        "ck_stock_batches_qty_non_negative",
+        # (The ERP CHECKs — ck_inventory_items_stock_non_negative and
+        # ck_stock_batches_qty_non_negative — died with the ERP removal,
+        # 2026-11-17, so they no longer belong in this set.)
     }
     expected |= {f"ck_{t}_percent_range" for t in b1c5.ACTIVITY_TABLES}
     expected |= {f"ck_{t}_vitals_range" for t in b1c5.HEALTH_TABLES}
@@ -533,8 +238,6 @@ def test_every_pg_check_in_models_has_a_migration():
     assert names, "no ck_* constraints found in models.py"
     assert names <= expected, (
         f"model CHECKs with no migration behind them: {sorted(names - expected)}")
-    # And the new stock CHECK's migration really carries it.
-    assert "ck_inventory_items_stock_non_negative" in _migration_text(NEW_REVISION)
 
 
 def test_b1c5_integrity_constants_sane():

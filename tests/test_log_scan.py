@@ -4,19 +4,21 @@ The counting and staleness functions are pure and unit-tested directly;
 main() is tested with a tmp log file and a private in-memory DB whose
 SessionLocal is monkeypatched in (the same pattern as the scheduled
 alerts tests in tests/test_bot_review_coverage_batch.py).
+
+ERP parts were deleted with the ERP removal (2026-11-17): the
+``journal_failed`` bucket, the ``reconcile_journals`` heartbeat watch,
+and the audit-gap checks (check_audit_gaps) — all of them compared ERP
+business rows against audit rows, and no ERP rows exist any more.
 """
 import io
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import src.jobs.log_scan as log_scan
-from src.models import (
-    AuditLog, Base, IntercompanyTransaction, JobHeartbeat, JournalEntry,
-    Notification, PosSale, StockMovement, User,
-)
+from src.models import Base, JobHeartbeat, Notification, User
 
 NOW = datetime(2026, 11, 9, 12, 0, 0)
 
@@ -38,7 +40,6 @@ def _lines():
     return [
         f"{_stamp(base)} INFO business_ops_tracker: started",
         f"{_stamp(base + timedelta(minutes=1))} ERROR business_ops_tracker.error: Unhandled exception error_id=abcd",
-        f"{_stamp(base + timedelta(minutes=2))} WARNING business_ops_tracker: PO journal failed for PO-1-0001 (receive): boom",
         f"{_stamp(base + timedelta(minutes=3))} WARNING business_ops_tracker: LOGIN_LOCKOUT user=ceo_bu1",
         f"{_stamp(base + timedelta(minutes=4))} WARNING business_ops_tracker: account lockout triggered for ceo_bu1",
         "plain line with no timestamp at all",
@@ -48,19 +49,18 @@ def _lines():
 class TestCountSignals:
     def test_counts_each_bucket(self):
         counts = log_scan.count_signals(_lines())
-        assert counts == {"total": 6, "errors": 1, "journal_failed": 1, "lockouts": 2}
+        assert counts == {"total": 5, "errors": 1, "lockouts": 2}
 
     def test_empty_input(self):
-        assert log_scan.count_signals([]) == {"total": 0, "errors": 0, "journal_failed": 0, "lockouts": 0}
+        assert log_scan.count_signals([]) == {"total": 0, "errors": 0, "lockouts": 0}
 
     def test_matching_is_case_insensitive_and_error_needs_word_boundary(self):
         counts = log_scan.count_signals([
-            "JOURNAL FAILED for PO-9",
             "some ERRORLESS word here",  # ERROR as a substring is not a level
             "ERROR: disk full",
         ])
         assert counts["errors"] == 1
-        assert counts["journal_failed"] == 1
+        assert "journal_failed" not in counts  # bucket deleted with the ERP removal
 
 
 class TestLinesInWindow:
@@ -83,51 +83,28 @@ class TestStaleJobs:
     def test_fresh_heartbeat_not_stale(self):
         assert log_scan.stale_jobs(
             [("scheduled_alerts", NOW - timedelta(hours=1)),
-             ("log_scan", NOW - timedelta(hours=2)),
-             ("reconcile_journals", NOW - timedelta(hours=3))], now=NOW) == []
+             ("log_scan", NOW - timedelta(hours=2))], now=NOW) == []
 
     def test_older_than_36h_is_stale(self):
         assert log_scan.stale_jobs(
             [("scheduled_alerts", NOW - timedelta(hours=37)),
-             ("log_scan", NOW - timedelta(hours=1)),
-             ("reconcile_journals", NOW - timedelta(hours=1))], now=NOW) == ["scheduled_alerts"]
+             ("log_scan", NOW - timedelta(hours=1))], now=NOW) == ["scheduled_alerts"]
 
     def test_exactly_36h_is_not_stale(self):
         assert log_scan.stale_jobs(
             [("scheduled_alerts", NOW - timedelta(hours=36)),
-             ("log_scan", NOW - timedelta(hours=1)),
-             ("reconcile_journals", NOW - timedelta(hours=1))], now=NOW) == []
+             ("log_scan", NOW - timedelta(hours=1))], now=NOW) == []
 
     def test_job_that_never_ran_is_stale(self):
         # A dead-man check that only watches rows that exist cannot see a
         # cron that was never installed.
         assert log_scan.stale_jobs(
             [("log_scan", NOW - timedelta(hours=1))], now=NOW) == [
-                "scheduled_alerts", "reconcile_journals"]
+                "scheduled_alerts"]
 
     def test_missing_row_and_none_last_run(self):
         assert log_scan.stale_jobs(
-            [("scheduled_alerts", None), ("log_scan", NOW),
-             ("reconcile_journals", NOW)], now=NOW) == ["scheduled_alerts"]
-
-    # G-3: reconcile_journals (daily 07:30) writes a heartbeat on every
-    # run, so the dead-man check must flag it when it is missing/stale.
-    def test_reconcile_journals_missing_is_stale(self):
-        assert log_scan.stale_jobs(
-            [("scheduled_alerts", NOW - timedelta(hours=1)),
-             ("log_scan", NOW - timedelta(hours=1))], now=NOW) == ["reconcile_journals"]
-
-    def test_reconcile_journals_stale_after_36h(self):
-        assert log_scan.stale_jobs(
-            [("scheduled_alerts", NOW - timedelta(hours=1)),
-             ("log_scan", NOW - timedelta(hours=1)),
-             ("reconcile_journals", NOW - timedelta(hours=37))], now=NOW) == ["reconcile_journals"]
-
-    def test_reconcile_journals_within_36h_is_not_stale(self):
-        assert log_scan.stale_jobs(
-            [("scheduled_alerts", NOW - timedelta(hours=1)),
-             ("log_scan", NOW - timedelta(hours=1)),
-             ("reconcile_journals", NOW - timedelta(hours=36))], now=NOW) == []
+            [("scheduled_alerts", None), ("log_scan", NOW)], now=NOW) == ["scheduled_alerts"]
 
     # G-4: backup is a weekly job (Sundays 03:30) with an 8-day grace,
     # like audit_retention — and, like it, a missing row is not stale
@@ -201,7 +178,6 @@ class TestMain:
         engine, session = scan_db
         _seed_heartbeat(session, "scheduled_alerts", 1)
         _seed_heartbeat(session, "log_scan", 1)
-        _seed_heartbeat(session, "reconcile_journals", 1)
         # No backup row at all: weekly jobs only alert on a stale
         # existing row, never on a missing one (G-4).
         log_file = tmp_path / "app.log"
@@ -215,7 +191,6 @@ class TestMain:
         engine, session = scan_db
         _seed_heartbeat(session, "scheduled_alerts", 40)  # stale
         _seed_heartbeat(session, "log_scan", 1)
-        _seed_heartbeat(session, "reconcile_journals", 1)
         log_file = tmp_path / "app.log"
         log_file.write_text("\n".join(_lines()) + "\n")
         monkeypatch.setattr(log_scan, "SessionLocal", _fresh_db_session(scan_db))
@@ -224,39 +199,10 @@ class TestMain:
         assert len(notes) == 1
         assert notes[0].user_id == 1
         assert notes[0].type == "alert"
-        assert "journal-failure" in notes[0].message
+        assert "ERROR line(s)" in notes[0].message
         assert "scheduled_alerts" in notes[0].message
         # The scan upserted its own heartbeat while it was there.
         assert _heartbeat(engine, "log_scan") is not None
-
-    # G-3: a missing or stale reconcile_journals heartbeat must reach
-    # the Chairman, not pass silently.
-    def test_missing_reconcile_heartbeat_notifies_chairman(self, scan_db, tmp_path, monkeypatch):
-        engine, session = scan_db
-        _seed_heartbeat(session, "scheduled_alerts", 1)
-        _seed_heartbeat(session, "log_scan", 1)
-        # No reconcile_journals row: the 07:30 cron never ran / was
-        # never installed.
-        log_file = tmp_path / "app.log"
-        log_file.write_text(f"{_stamp(_now() - timedelta(hours=1))} INFO ok\n")
-        monkeypatch.setattr(log_scan, "SessionLocal", _fresh_db_session(scan_db))
-        assert log_scan.main(["--log-file", str(log_file), "--hours", "24"]) == 0
-        notes = _notifications(engine)
-        assert len(notes) == 1
-        assert "reconcile_journals" in notes[0].message
-
-    def test_stale_reconcile_heartbeat_notifies_chairman(self, scan_db, tmp_path, monkeypatch):
-        engine, session = scan_db
-        _seed_heartbeat(session, "scheduled_alerts", 1)
-        _seed_heartbeat(session, "log_scan", 1)
-        _seed_heartbeat(session, "reconcile_journals", 40)  # stale (> 36 h)
-        log_file = tmp_path / "app.log"
-        log_file.write_text(f"{_stamp(_now() - timedelta(hours=1))} INFO ok\n")
-        monkeypatch.setattr(log_scan, "SessionLocal", _fresh_db_session(scan_db))
-        assert log_scan.main(["--log-file", str(log_file), "--hours", "24"]) == 0
-        notes = _notifications(engine)
-        assert len(notes) == 1
-        assert "reconcile_journals" in notes[0].message
 
     # G-4: a stale backup heartbeat (weekly job, 8-day grace) must
     # reach the Chairman; a missing one must not alert yet.
@@ -264,7 +210,6 @@ class TestMain:
         engine, session = scan_db
         _seed_heartbeat(session, "scheduled_alerts", 1)
         _seed_heartbeat(session, "log_scan", 1)
-        _seed_heartbeat(session, "reconcile_journals", 1)
         _seed_heartbeat(session, "backup", 9 * 24)  # stale (> 8 days)
         log_file = tmp_path / "app.log"
         log_file.write_text(f"{_stamp(_now() - timedelta(hours=1))} INFO ok\n")
@@ -278,7 +223,6 @@ class TestMain:
         engine, session = scan_db
         _seed_heartbeat(session, "scheduled_alerts", 1)
         _seed_heartbeat(session, "log_scan", 1)
-        _seed_heartbeat(session, "reconcile_journals", 1)
         log_file = tmp_path / "app.log"
         log_file.write_text(f"{_stamp(_now() - timedelta(hours=1))} INFO ok\n")
         monkeypatch.setattr(log_scan, "SessionLocal", _fresh_db_session(scan_db))
@@ -290,7 +234,6 @@ class TestMain:
         engine, session = scan_db
         _seed_heartbeat(session, "scheduled_alerts", 1)
         _seed_heartbeat(session, "log_scan", 1)
-        _seed_heartbeat(session, "reconcile_journals", 1)
         log_file = tmp_path / "app.log"
         log_file.write_text(f"{_stamp(_now() - timedelta(hours=1))} INFO ok\n")
         monkeypatch.setenv("APP_LOG_FILE", str(log_file))
@@ -301,7 +244,6 @@ class TestMain:
         engine, session = scan_db
         _seed_heartbeat(session, "scheduled_alerts", 1)
         _seed_heartbeat(session, "log_scan", 1)
-        _seed_heartbeat(session, "reconcile_journals", 1)
         monkeypatch.setattr("sys.stdin", io.StringIO(f"{_stamp(_now() - timedelta(hours=1))} INFO ok\n"))
         monkeypatch.setattr(log_scan, "SessionLocal", _fresh_db_session(scan_db))
         assert log_scan.main(["--log-file", "-"]) == 0
@@ -331,7 +273,6 @@ class TestMain:
         session = sessionmaker(bind=engine)()
         _seed_heartbeat(session, "scheduled_alerts", 1)
         _seed_heartbeat(session, "log_scan", 1)
-        _seed_heartbeat(session, "reconcile_journals", 1)
         session.commit()
         log_file = tmp_path / "app.log"
         log_file.write_text(f"{_stamp(_now() - timedelta(hours=1))} ERROR something broke\n")
@@ -340,110 +281,3 @@ class TestMain:
         assert "no active Chairman" in capsys.readouterr().err
         session.close()
         engine.dispose()
-
-
-# ------------------------------------------------------------------ G-8 audit-gap checks
-
-def _audit_row(session, action, now):
-    session.add(AuditLog(action=action, username="chairman", timestamp=now))
-    session.commit()
-
-
-class TestAuditGapChecks:
-    """G-8: the SM-14 expected-vs-written comparison must cover settle /
-    reverse / transfer / production / POS, not just the original six."""
-
-    def test_settle_intercompany_gap_and_match(self, scan_db):
-        _, session = scan_db
-        now = _now()
-        session.add(IntercompanyTransaction(
-            from_business_unit_id=1, to_business_unit_id=2, amount=100,
-            txn_date=date(2026, 11, 9), status="settled", settled_at=now))
-        # An open transaction (never settled) expects no audit row.
-        session.add(IntercompanyTransaction(
-            from_business_unit_id=1, to_business_unit_id=2, amount=50,
-            txn_date=date(2026, 11, 9), status="open", settled_at=None))
-        session.commit()
-        gaps = log_scan.check_audit_gaps(session, since=now - timedelta(hours=1))
-        assert "audit gap: SETTLE_INTERCOMPANY expected 1, wrote 0" in gaps
-        _audit_row(session, "SETTLE_INTERCOMPANY", now)
-        gaps = log_scan.check_audit_gaps(session, since=now - timedelta(hours=1))
-        assert not any(g.startswith("audit gap: SETTLE_INTERCOMPANY") for g in gaps)
-
-    def test_reverse_journal_gap_counts_only_reversals(self, scan_db):
-        _, session = scan_db
-        now = _now()
-        orig = JournalEntry(business_unit_id=1, entry_no="JV-2026-11-001",
-                            entry_date=date(2026, 11, 9), source="manual",
-                            status="posted", created_at=now)
-        session.add(orig)
-        session.flush()
-        # The reversal entry itself (reversal_of_id set) is the business
-        # proof; a plain entry created in the window is not a reversal.
-        session.add(JournalEntry(business_unit_id=1, entry_no="JV-2026-11-002",
-                                 entry_date=date(2026, 11, 9), source="reversal",
-                                 status="posted", reversal_of_id=orig.id,
-                                 created_at=now))
-        session.add(JournalEntry(business_unit_id=1, entry_no="JV-2026-11-003",
-                                 entry_date=date(2026, 11, 9), source="manual",
-                                 status="posted", created_at=now))
-        session.commit()
-        gaps = log_scan.check_audit_gaps(session, since=now - timedelta(hours=1))
-        assert "audit gap: REVERSE_JOURNAL expected 1, wrote 0" in gaps
-        _audit_row(session, "REVERSE_JOURNAL", now)
-        gaps = log_scan.check_audit_gaps(session, since=now - timedelta(hours=1))
-        assert not any(g.startswith("audit gap: REVERSE_JOURNAL") for g in gaps)
-
-    def test_transfer_stock_gap_counts_only_transfer_movements(self, scan_db):
-        _, session = scan_db
-        now = _now()
-        # One quick transfer = one "Transfer to BU …" out-leg (the
-        # matching "Transfer from BU …" in-leg and every other movement
-        # kind must not count as an expected TRANSFER_STOCK row).
-        session.add(StockMovement(item_id=1, movement_type="out", quantity=2,
-                                  reason="Transfer to BU 2", created_at=now))
-        session.add(StockMovement(item_id=2, movement_type="in", quantity=2,
-                                  reason="Transfer from BU 1", created_at=now))
-        session.add(StockMovement(item_id=3, movement_type="out", quantity=1,
-                                  reason="POS sale #1", created_at=now))
-        session.add(StockMovement(item_id=4, movement_type="in", quantity=5,
-                                  reason=None, created_at=now))
-        session.commit()
-        gaps = log_scan.check_audit_gaps(session, since=now - timedelta(hours=1))
-        assert "audit gap: TRANSFER_STOCK expected 1, wrote 0" in gaps
-        _audit_row(session, "TRANSFER_STOCK", now)
-        gaps = log_scan.check_audit_gaps(session, since=now - timedelta(hours=1))
-        assert not any(g.startswith("audit gap: TRANSFER_STOCK") for g in gaps)
-
-    def test_complete_production_gap_counts_only_completed_leg(self, scan_db):
-        _, session = scan_db
-        now = _now()
-        # One completion = one finished-goods "… completed" in-movement;
-        # the component out-legs ("Production order #N", no "completed")
-        # must not count.
-        session.add(StockMovement(item_id=1, movement_type="in", quantity=10,
-                                  reason="Production order #3 completed",
-                                  created_at=now))
-        session.add(StockMovement(item_id=2, movement_type="out", quantity=4,
-                                  reason="Production order #3", created_at=now))
-        session.commit()
-        gaps = log_scan.check_audit_gaps(session, since=now - timedelta(hours=1))
-        assert "audit gap: COMPLETE_PRODUCTION expected 1, wrote 0" in gaps
-        _audit_row(session, "COMPLETE_PRODUCTION", now)
-        gaps = log_scan.check_audit_gaps(session, since=now - timedelta(hours=1))
-        assert not any(g.startswith("audit gap: COMPLETE_PRODUCTION") for g in gaps)
-
-    def test_create_pos_sale_gap_and_void_excluded(self, scan_db):
-        _, session = scan_db
-        now = _now()
-        session.add(PosSale(business_unit_id=1, status="completed",
-                            sale_date=date(2026, 11, 9), created_at=now))
-        # A voided sale expects no CREATE_POS_SALE audit row.
-        session.add(PosSale(business_unit_id=1, status="void",
-                            sale_date=date(2026, 11, 9), created_at=now))
-        session.commit()
-        gaps = log_scan.check_audit_gaps(session, since=now - timedelta(hours=1))
-        assert "audit gap: CREATE_POS_SALE expected 1, wrote 0" in gaps
-        _audit_row(session, "CREATE_POS_SALE", now)
-        gaps = log_scan.check_audit_gaps(session, since=now - timedelta(hours=1))
-        assert not any(g.startswith("audit gap: CREATE_POS_SALE") for g in gaps)

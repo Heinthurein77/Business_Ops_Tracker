@@ -103,7 +103,7 @@ class TestUnlockEndpoint:
 
         route = next(r for r in router.routes if getattr(r, "path", "") == "/api/admin/users/{user_id}/unlock-login")
         guard = next(d.call for d in route.dependant.dependencies if getattr(d.call, "__name__", "") == "dependency")
-        for role in ("CEO", "Accountant"):
+        for role in ("CEO",):
             with pytest.raises(InsufficientRoleException):
                 guard(user=SimpleNamespace(role=role, username="x"))
         for role in ("Chairman", "HO"):
@@ -174,18 +174,16 @@ class TestUploadPathCoverage:
         "/api/ceo/profile",
         "/api/ceo/submit-report",
         "/api/ho/submit-report",
-        "/api/ops/expenses/{expense_id}/receipt",
-        "/api/accounting/opening-balance",
     }
 
     def _upload_routes(self):
         import inspect
         import re as _re
 
-        from src.routers import accounting, ceo, ho, ops
+        from src.routers import ceo, ho, ops
 
         found = set()
-        for router_module in (ceo, ho, ops, accounting):
+        for router_module in (ceo, ho, ops):
             for route in router_module.router.routes:
                 endpoint = getattr(route, "endpoint", None)
                 if endpoint is None:
@@ -207,9 +205,9 @@ class TestUploadPathCoverage:
     def test_non_upload_paths_are_not_upload_paths(self):
         from src.edge import is_upload_path
 
-        assert not is_upload_path("/api/ops/expenses")
-        assert not is_upload_path("/api/accounting/reports/pl")
-        assert not is_upload_path("/api/ops/expenses/123/receipt/extra")
+        assert not is_upload_path("/api/ops/action-items")
+        assert not is_upload_path("/api/ceo/dashboard")
+        assert not is_upload_path("/api/ops/action-items/123/extra")
 
 
 # --------------------------------------------------------------------- L2
@@ -243,9 +241,9 @@ class TestExportBudget:
         app = self._middleware()
         headers = self._cookie("chairman")
         for _ in range(3):
-            status, _, _ = asgi_request(app, "GET", "/api/accounting/reports/pl", headers=headers)
+            status, _, _ = asgi_request(app, "GET", "/api/admin/export-excel", headers=headers)
             assert status == 200
-        status, out_headers, _ = asgi_request(app, "GET", "/api/accounting/reports/pl", headers=headers)
+        status, out_headers, _ = asgi_request(app, "GET", "/api/admin/export-excel", headers=headers)
         assert status == 429
         assert int(out_headers["retry-after"]) >= 1
 
@@ -269,24 +267,19 @@ class TestExportBudget:
         for _ in range(6):
             status, _, _ = asgi_request(app, "GET", "/api/ops/notifications", headers=headers)
             assert status == 200
-            status, _, _ = asgi_request(app, "GET", "/api/accounting/finance-summary", headers=headers)
+            status, _, _ = asgi_request(app, "GET", "/api/ceo/dashboard", headers=headers)
             assert status == 200
 
     def test_export_path_matching(self):
         from src.edge import is_export_path
 
         for path in (
-            "/api/accounting/reports/pl",
-            "/api/accounting/reports/export",
-            "/api/accounting/reports/tax",
-            "/api/ops/export-excel",
             "/api/admin/export-excel",
+            "/api/ops/export-excel",
             "/api/ops/monthly-report",
-            "/api/ops/sales-customers/42/statement",
-            "/api/ops/payroll-runs/3/lines/9/payslip",
         ):
             assert is_export_path(path), path
-        for path in ("/api/ops/inventory", "/api/auth/me", "/api/ops/expenses/1/receipt", "/api/admin/users"):
+        for path in ("/api/auth/me", "/api/admin/users", "/api/ops/action-items"):
             assert not is_export_path(path), path
 
 
@@ -351,87 +344,16 @@ class TestPeriodValidation:
                 validate_period(bad)
             assert exc.value.status_code == 422
 
-    def test_accounting_endpoints_422(self, db):
-        from src.models import BusinessUnit
-        from src.routers import accounting as acct
+    def test_monthly_report_rejects_bad_month(self, db):
+        # Kept from test_ops_and_modules_endpoints_422: monthly_report is
+        # the only surviving endpoint in that test (list_attendance,
+        # principal_report and bill_lease died with the ERP removal).
+        from src.routers.ops import monthly_report
 
-        bu = BusinessUnit(code="BU1", name="Shop")
-        db.add(bu)
-        db.commit()
-
-        calls = [
-            lambda: acct.profit_loss(bu.id, period="garbage", user=CHAIRMAN_NS, db=db),
-            lambda: acct.balance_sheet(bu.id, period="garbage", user=CHAIRMAN_NS, db=db),
-            lambda: acct.trial_balance(bu.id, period="2026-13", user=CHAIRMAN_NS, db=db),
-            lambda: acct.ledger(1, period="garbage", user=CHAIRMAN_NS, db=db),
-            lambda: acct.list_journal(bu.id, period="garbage", user=CHAIRMAN_NS, db=db),
-            lambda: acct.consolidated_pl(period="garbage", user=CHAIRMAN_NS, db=db),
-            lambda: acct.consolidated_bs(period="garbage", user=CHAIRMAN_NS, db=db),
-            lambda: acct.bu_comparison(period="garbage", user=CHAIRMAN_NS, db=db),
-            lambda: acct.tax_report(bu.id, period="garbage", user=CHAIRMAN_NS, db=db),
-            lambda: acct.cash_flow_report(bu.id, period="garbage", user=CHAIRMAN_NS, db=db),
-            lambda: acct.finance_summary(period="garbage", user=CHAIRMAN_NS, db=db),
-            lambda: acct.export_report("pl", business_unit_id=bu.id, period="garbage", user=CHAIRMAN_NS, db=db),
-        ]
-        for call in calls:
+        for bad in ("garbage", "2026-13"):
             with pytest.raises(HTTPException) as exc:
-                call()
+                monthly_report(month=bad, user=CHAIRMAN_NS, db=db)
             assert exc.value.status_code == 422
-
-        # Valid periods keep working on an empty set of books.
-        assert acct.profit_loss(bu.id, period="2026-10", user=CHAIRMAN_NS, db=db)["total_income"] == 0
-        assert acct.consolidated_pl(period="2026-10", user=CHAIRMAN_NS, db=db)["net_profit"] == 0
-        assert acct.finance_summary(period="2026-10", user=CHAIRMAN_NS, db=db)["period"] == "2026-10"
-
-    def test_ops_and_modules_endpoints_422(self, db):
-        from datetime import date
-        from decimal import Decimal
-
-        from src.models import BusinessUnit, Customer, LeaseContract, PropertyUnit
-        from src.routers.modules import bill_lease, principal_report
-        from src.routers.ops import list_attendance, monthly_report
-
-        bu = BusinessUnit(code="BU1", name="Shop")
-        db.add(bu)
-        db.commit()
-        tenant = Customer(business_unit_id=bu.id, name="Tenant")
-        unit = PropertyUnit(business_unit_id=bu.id, unit_no="A1")
-        db.add_all([tenant, unit])
-        db.commit()
-        lease = LeaseContract(
-            business_unit_id=bu.id, unit_id=unit.id, tenant_id=tenant.id,
-            monthly_rent=Decimal("1000"), start_date=date(2026, 1, 1), status="active",
-        )
-        db.add(lease)
-        db.commit()
-
-        calls = [
-            lambda: monthly_report(month="garbage", user=CHAIRMAN_NS, db=db),
-            lambda: monthly_report(month="2026-13", user=CHAIRMAN_NS, db=db),
-            lambda: list_attendance(month="garbage", user=CHAIRMAN_NS, db=db),
-            lambda: principal_report(period="garbage", user=CHAIRMAN_NS, db=db),
-            lambda: bill_lease(lease.id, period="garbage", user=CHAIRMAN_NS, db=db),
-        ]
-        for call in calls:
-            with pytest.raises(HTTPException) as exc:
-                call()
-            assert exc.value.status_code == 422
-
-    def test_body_period_patterns_reject_month_13(self):
-        from pydantic import ValidationError
-
-        from src.routers.accounting import BudgetIn, DepreciateIn, PeriodAction
-        from src.routers.ops import PayrollCreate
-
-        for build in (
-            lambda: PeriodAction(business_unit_id=1, period="2026-13"),
-            lambda: DepreciateIn(business_unit_id=1, period="2026-13"),
-            lambda: BudgetIn(business_unit_id=1, period="2026-13", account_code="1110", amount=1),
-            lambda: PayrollCreate(business_unit_id=1, period="2026-13"),
-        ):
-            with pytest.raises(ValidationError):
-                build()
-        assert PeriodAction(business_unit_id=1, period="2026-10").period == "2026-10"
 
 
 # --------------------------------------------------------------------- L4

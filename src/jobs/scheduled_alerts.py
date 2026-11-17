@@ -15,7 +15,6 @@ from datetime import datetime
 from src.database import SessionLocal
 from src.models import JobHeartbeat
 from src.utils import utcnow
-from src.routers.modules import run_check_batch_expiry
 from src.routers.ops import run_check_document_expiry, run_remind_missing_reports
 
 
@@ -38,8 +37,6 @@ def main() -> int:
         expiry = run_check_document_expiry(db, days=30)
         print(f"missing-report reminders sent: {reminded}")
         print(f"documents expiring soon: {expiry['checked']} (notifications sent: {expiry['notified']})")
-        batches = run_check_batch_expiry(db, days=30)
-        print(f"stock batches expiring soon: {batches['checked']} (notifications sent: {batches['notified']})")
         _record_heartbeat(db, "scheduled_alerts", "ok")
         return 0
     except Exception as exc:
