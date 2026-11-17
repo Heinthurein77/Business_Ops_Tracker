@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from src.auth import RESET_REQUEST_TTL_HOURS, bump_token_version, hash_password, require_roles
+from src.auth import RESET_REQUEST_TTL_HOURS, bump_token_version, hash_password, record_password_history, require_roles
 from src.client_ip import get_client_ip
 from src.config import settings
 from src.database import get_db
@@ -89,6 +89,8 @@ def list_users(user: User = Depends(require_chairman), db: Session = Depends(get
                 # True while a login lockout (src/throttle.py) is active for
                 # this account — drives the "Unlock login" action below.
                 "login_locked": login_lockout_remaining(db, u.username) is not None,
+                # M-01: drives the "Reset 2FA" action below.
+                "totp_enabled": bool(u.totp_enabled),
                 "last_login_display": format_local_datetime(u.last_login_at) if u.last_login_at else None,
                 "created_display": format_local_datetime(u.created_at),
             }
@@ -164,6 +166,8 @@ def create_user(
             detail="That account could not be created: the username is taken or this business unit already has an active CEO.",
         )
 
+    # m-27: the issued temporary password counts as a used password.
+    record_password_history(db, new_user)
     log_audit(db, user, "USER_CREATED", f"username={new_user.username} role={new_user.role}", request)
 
     _no_store(response)
@@ -194,7 +198,13 @@ def reset_user_password(
     if not target.is_active:
         raise HTTPException(status_code=400, detail="This account is deactivated — reactivate it before issuing a password")
 
+    old_hash = target.hashed_password
     temporary_password = _apply_temporary_password(target, settings.TEMP_PASSWORD_TTL_HOURS_RESET)
+    # m-27: record both the outgoing hash and the new temporary one, so
+    # the owner cannot rotate straight back to the password that was
+    # just reset away.
+    record_password_history(db, target, old_hash)
+    record_password_history(db, target)
 
     # If the user had already asked for this reset, that request is now
     # answered; otherwise still leave an Approved row as the record of it.
@@ -415,6 +425,30 @@ def unlock_user_login(
 # Chairman approves here. ---
 
 
+@router.post("/users/{user_id}/totp-disable")
+def disable_user_totp(
+    user_id: int,
+    request: Request,
+    user: User = Depends(require_chairman),
+    db: Session = Depends(get_db),
+):
+    """M-01: clears one account's TOTP enrollment (lost authenticator
+    device). The secret is wiped and every session for the account is
+    revoked, so a fresh sign-in is required — and a Chairman must enroll
+    again before any new session is issued, so clearing it can never
+    leave the Chairman account password-only."""
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    was_enabled = bool(target.totp_enabled)
+    target.totp_secret = None
+    target.totp_enabled = False
+    target.totp_enrolled_at = None
+    bump_token_version(db, target)
+    log_audit(db, user, "TOTP_DISABLED_BY_ADMIN", f"target_username={target.username}", request)
+    return {"ok": True, "was_enabled": was_enabled}
+
+
 @router.get("/password-resets")
 def list_password_resets(user: User = Depends(require_chairman), db: Session = Depends(get_db)):
     rows = (
@@ -485,7 +519,13 @@ def approve_password_reset(
     if not target.is_active:
         raise HTTPException(status_code=400, detail="This account is deactivated — reactivate it before issuing a password")
 
+    old_hash = target.hashed_password
     temporary_password = _apply_temporary_password(target, settings.TEMP_PASSWORD_TTL_HOURS_RESET)
+    # m-27: record both the outgoing hash and the new temporary one, so
+    # the owner cannot rotate straight back to the password that was
+    # just reset away.
+    record_password_history(db, target, old_hash)
+    record_password_history(db, target)
     reset_request.status = "Approved"
     reset_request.resolved_at = utcnow()
     reset_request.resolved_by = user.id

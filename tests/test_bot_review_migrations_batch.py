@@ -35,9 +35,11 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSIONS = ROOT / "alembic" / "versions"
-# Current head after the action-item reminder column (2026-11-17):
-# b7c2e9a4d1f5, on top of the ERP-removal drop a720b6b7c616.
-CURRENT_HEAD = "b7c2e9a4d1f5"
+# Current head after the TOTP + password-history migration (2026-11-17):
+# 87cba6ac0f1f, on top of the action-item reminder column b7c2e9a4d1f5.
+CURRENT_HEAD = "87cba6ac0f1f"
+CURRENT_HEAD_PARENT = "b7c2e9a4d1f5"
+# The one-way ERP-removal drop migration: a downgrade to base stops here.
 CURRENT_HEAD_DOWN = "a720b6b7c616"
 
 
@@ -118,7 +120,7 @@ def test_new_migration_is_the_single_head():
     assert script.get_heads() == [CURRENT_HEAD], (
         f"expected single head {CURRENT_HEAD}, got {script.get_heads()}")
     rev = script.get_revision(CURRENT_HEAD)
-    assert rev.down_revision == CURRENT_HEAD_DOWN
+    assert rev.down_revision == CURRENT_HEAD_PARENT
 
 
 def test_upgrade_head_then_downgrade_base_is_clean(tmp_path):
@@ -145,7 +147,7 @@ def test_upgrade_head_then_downgrade_base_is_clean(tmp_path):
         "ho_activity_logs", "ho_daily_financials", "ho_health_statuses",
         "ho_monthly_targets", "ho_social_logs", "job_heartbeats",
         "license_documents", "monthly_targets", "notifications",
-        "password_reset_requests", "social_logs", "staff_records", "users",
+        "password_history", "password_reset_requests", "social_logs", "staff_records", "users",
     }, f"unexpected tables after upgrade head: {sorted(tables)}"
     assert "invoice_payments" not in tables
     assert "journal_entries" not in tables
@@ -154,14 +156,17 @@ def test_upgrade_head_then_downgrade_base_is_clean(tmp_path):
     down = _run_alembic(url, "downgrade", "base")
     assert down.returncode != 0, "downgrade past the ERP-removal migration must refuse"
     assert "one-way" in (down.stdout + down.stderr)
-    # Nothing was dropped: the downgrade peeled off only the reversible
+    # Nothing else was dropped: the downgrade peeled off only the reversible
     # migrations above the one-way drop migration, then refused there —
-    # so the DB sits one step below head (same tables, same data).
+    # so the DB sits one step below head. The one exception is the newest
+    # migration's own table: its downgrade drops password_history (and the
+    # TOTP columns) before the refusal, so the table set loses exactly
+    # that one table.
     assert _query(db_path, "SELECT version_num FROM alembic_version") == [
         (CURRENT_HEAD_DOWN,)]
     tables_after = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
-    assert tables_after == tables
+    assert tables_after == tables - {"password_history"}
     assert not [t for t in tables_after if t.startswith("_alembic_tmp_")]
     conn.close()
 

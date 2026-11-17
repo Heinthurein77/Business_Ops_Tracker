@@ -31,6 +31,16 @@ from src.models import Base, User
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# M-01: the smoke-test Chairman has TOTP enrolled, so login tests must
+# present a current code (a fixed test secret, never a real one).
+CHAIRMAN_TOTP_SECRET = "JBSWY3DPEHPK3PXP"
+
+
+def _chairman_totp_code():
+    import pyotp
+
+    return pyotp.TOTP(CHAIRMAN_TOTP_SECRET).now()
+
 
 @pytest.fixture()
 def http_db(tmp_path):
@@ -44,7 +54,8 @@ def http_db(tmp_path):
     session = sessionmaker(bind=engine)()
     session.add(User(username="chairman", hashed_password=hash_password("Chairman123!"),
                      role="Chairman", is_active=True, require_password_change=False,
-                     is_profile_completed=True))
+                     is_profile_completed=True,
+                     totp_secret=CHAIRMAN_TOTP_SECRET, totp_enabled=True))
     session.commit()
     yield session
     session.close()
@@ -114,7 +125,8 @@ class TestHealthAndRouting:
 class TestLoginCookie:
     def test_login_sets_httponly_lax_cookie(self, client):
         r = client.post("/api/auth/login",
-                        json={"username": "chairman", "password": "Chairman123!"})
+                        json={"username": "chairman", "password": "Chairman123!",
+                              "totp_code": _chairman_totp_code()})
         assert r.status_code == 200, r.text
         cookie = _set_cookie_header(r)
         assert "access_token=" in cookie
@@ -146,7 +158,8 @@ class TestLoginCookie:
         env = {k: v for k, v in os.environ.items()
                if k not in ("ENVIRONMENT", "DATABASE_URL", "MIGRATION_DATABASE_URL",
                             "JWT_SECRET_KEY", "DATA_ENCRYPTION_KEY", "DATABASE_SSLMODE",
-                            "DATABASE_CA_CERT", "ALLOW_INSECURE_DATABASE")}
+                            "DATABASE_CA_CERT", "ALLOW_INSECURE_DATABASE",
+                            "ALLOWED_HOSTS", "ALLOWED_ORIGINS")}
         # A real Fernet key: src/crypto.py builds its cipher at import
         # from DATA_ENCRYPTION_KEY, so a placeholder string fails there.
         from cryptography.fernet import Fernet
@@ -155,6 +168,9 @@ class TestLoginCookie:
             "DATABASE_URL": f"sqlite:///{tmp_path}/prod-cookie.db",
             "JWT_SECRET_KEY": "prod-jwt-secret-that-is-long-enough-0123",
             "DATA_ENCRYPTION_KEY": Fernet.generate_key().decode(),
+            # m-35: both allowlists are required in production.
+            "ALLOWED_HOSTS": "app.example.com,localhost,127.0.0.1",
+            "ALLOWED_ORIGINS": "https://app.example.com",
             "PYTHONPATH": str(REPO_ROOT),
         })
         script = (
@@ -192,7 +208,8 @@ class TestUploadsGating:
         monkeypatch.setattr(settings, "LOCAL_UPLOAD_DIR", str(upload_dir))
 
         login = client.post("/api/auth/login",
-                            json={"username": "chairman", "password": "Chairman123!"})
+                            json={"username": "chairman", "password": "Chairman123!",
+                                  "totp_code": _chairman_totp_code()})
         assert login.status_code == 200
         cookie = _set_cookie_header(login).split(";")[0]
         r = client.get("/uploads/a.txt", headers={"cookie": cookie})

@@ -36,8 +36,12 @@ from src.config import settings
 
 PREFIX = "enc:v1:"
 
-# (table, column) pairs that use the encrypted types — the backfill migration
-# and the key-rotation script iterate this so they can never drift from models.
+# (table, column) pairs that use the encrypted types — the key-rotation
+# script iterates this so it can never drift from models. Migrations must
+# NOT import this list (a migration describes the schema as it was at its
+# own revision — see d3e7f1a5c9b4, whose list is frozen); a new encrypted
+# column needs no backfill migration of its own unless pre-existing rows
+# hold plaintext for it.
 ENCRYPTED_COLUMNS = [
     ("ceo_profiles", "phone_number"),
     ("ceo_profiles", "email"),
@@ -45,6 +49,7 @@ ENCRYPTED_COLUMNS = [
     ("ceo_profiles", "date_of_birth"),
     ("health_statuses", "other_notes"),
     ("ho_health_statuses", "other_notes"),
+    ("users", "totp_secret"),  # M-01: the TOTP secret is a credential — encrypted at rest
 ]
 
 

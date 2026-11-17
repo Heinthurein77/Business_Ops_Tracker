@@ -16,18 +16,58 @@ PASSWORD_MIN_BYTES = 12
 PASSWORD_MAX_BYTES = 72
 _USERNAME_PATTERN = re.compile(r"[a-z0-9_]{3,80}")
 
-# Words nobody may start their password with (compared in lower case, so
-# "Welcome123!x" and "PASSWORD-2026" are caught too, not just the exact word).
+# Words nobody may use in their password (compared in lower case). The
+# check is a substring match, not prefix-only: "xPassword123" and
+# "MyDragon!2026" are both too easy to guess. The list is the common
+# passwords and the words tied to this system — a password that merely
+# contains one of them is still a password an attacker will try first.
 _PASSWORD_DENYLIST = (
     "welcome123!",
+    "welcome",
     "password",
     "password123",
+    "password1",
+    "passw0rd",
     "admin",
+    "admin123",
     "chairman",
     "qwerty",
+    "qwerty123",
     "abcmib",
     "businessops",
+    "business",
+    "tracker",
+    "123456",
+    "123456789",
+    "12345678",
+    "1234567",
+    "12345",
+    "1234",
+    "123123",
+    "111111",
+    "000000",
+    "abc123",
+    "letmein",
+    "monkey",
+    "dragon",
+    "football",
+    "iloveyou",
+    "sunshine",
+    "master",
+    "shadow",
+    "superman",
+    "michael",
+    "login",
+    "changeme",
+    "secret",
+    "default",
 )
+
+# A password must use at least this many character classes (lowercase,
+# uppercase, digits, symbols) — unless it is a long passphrase, where
+# length alone carries the entropy (e.g. "correct horse battery").
+_PASSWORD_MIN_CLASSES = 2
+_PASSWORD_PASSPHRASE_MIN_CHARS = 20
 
 
 def _reject_nul(value: str) -> str:
@@ -51,10 +91,28 @@ def password_policy_error(password: str, username: Optional[str] = None, current
     if size > PASSWORD_MAX_BYTES:
         return f"Password is too long — at most {PASSWORD_MAX_BYTES} bytes (accented and non-Latin characters count as more than one)"
     lowered = password.lower()
-    if any(lowered.startswith(word) for word in _PASSWORD_DENYLIST):
+    if any(word in lowered for word in _PASSWORD_DENYLIST):
         return "That password is too easy to guess — choose something less predictable"
     if len(set(lowered)) < 5:
         return "Password is too repetitive — use a mix of different characters"
+    # m-27: at least two character classes (a single-class password such as
+    # "123456789012" is guessable however long it is), unless the password
+    # is a long passphrase.
+    if len(password) < _PASSWORD_PASSPHRASE_MIN_CHARS:
+        classes = sum(
+            (
+                any(c.islower() for c in password),
+                any(c.isupper() for c in password),
+                any(c.isdigit() for c in password),
+                any(not c.isalnum() and not c.isspace() for c in password),
+            )
+        )
+        if classes < _PASSWORD_MIN_CLASSES:
+            return (
+                "Password must use at least two kinds of characters "
+                "(lowercase, uppercase, digits, symbols) — or be a passphrase "
+                "of 20 or more characters"
+            )
     if username and len(username) >= 3 and username.lower() in lowered:
         return "Password must not contain your username"
     if current_password is not None and password == current_password:
@@ -65,11 +123,40 @@ def password_policy_error(password: str, username: Optional[str] = None, current
 class LoginRequest(BaseModel):
     username: str = Field(max_length=80)
     password: str = Field(min_length=1, max_length=128)
+    # M-01: the 6-digit TOTP code, required when the account has TOTP
+    # enabled. Optional in the schema so the first attempt (password only)
+    # can be answered with TOTP_REQUIRED and the frontend can prompt.
+    totp_code: Optional[str] = Field(default=None, max_length=10)
 
     @field_validator("username", "password")
     @classmethod
     def no_nul_bytes(cls, value: str) -> str:
         return _reject_nul(value)
+
+
+class TotpEnrollRequest(BaseModel):
+    # Setup token from a TOTP_ENROLLMENT_REQUIRED login response; omit
+    # when calling with a live session.
+    setup_token: Optional[str] = Field(default=None, max_length=500)
+
+
+class TotpConfirmRequest(BaseModel):
+    code: str = Field(min_length=6, max_length=10)
+    setup_token: Optional[str] = Field(default=None, max_length=500)
+
+    @field_validator("code")
+    @classmethod
+    def strip_code(cls, value: str) -> str:
+        return _reject_nul(value.strip().replace(" ", ""))
+
+
+class TotpDisableRequest(BaseModel):
+    code: str = Field(min_length=6, max_length=10)
+
+    @field_validator("code")
+    @classmethod
+    def strip_code(cls, value: str) -> str:
+        return _reject_nul(value.strip().replace(" ", ""))
 
 
 class ForgotPasswordRequest(BaseModel):
