@@ -1053,22 +1053,21 @@ def submit_report(
     health_other_notes = form_text(health_other_notes, "Health notes", MAX_NARRATIVE_TEXT_LEN)
     social_other_notes = form_text(social_other_notes, "Social notes", MAX_NARRATIVE_TEXT_LEN)
 
-    # SM-7: take the row locks for the day's rows BEFORE uploading, so a
-    # concurrent resubmit cannot slip in between the upload and the write
-    # and orphan the uploaded file (or overwrite it). The full row loads
-    # below re-use these same locks (same transaction, same session). For
-    # a first submission the rows do not exist yet, so no lock is taken —
-    # the double-submit 409 at commit time is the guard there, and its
-    # handler deletes the orphaned upload (see below).
-    for _model in (DailyFinancial, ActivityLog, HealthStatus, SocialLog):
-        db.query(_model).filter(
-            _model.business_unit_id == user.business_unit_id, _model.report_date == report_date
-        ).with_for_update().first()
-
-    # The attachment is checked and uploaded here, after the row locks
-    # above, so a slow upload no longer races a concurrent resubmit — the
-    # lock is held during the upload, but only on this BU's rows for this
-    # one day, so nothing else can contend on it.
+    # m-13: the attachment is validated and uploaded BEFORE any row is
+    # locked or written, and with NO database session held. get_db checks
+    # a pooled connection out (SELECT 1) before the handler runs, and the
+    # old code then took this day's row locks before the R2 upload — so a
+    # slow upload (up to ~90 s) held a pooled connection AND row locks.
+    # The pre-upload locks are not needed for orphan-safety: the write
+    # phase below re-takes the same row locks, a first-submission race
+    # still surfaces as the 409 at commit time (whose handler deletes
+    # the loser's upload), and a resubmission's post-commit cleanup
+    # deletes the previous attachment in every interleaving. So the
+    # upload now runs between validation and the writes, after
+    # db.close() releases the pooled connection; the write phase re-uses
+    # the same session object, which checks a fresh connection out on
+    # its next query (a new SessionLocal() here would hit a different
+    # database in tests that pass their own session).
     document_url = None
     if attachment is not None and attachment.filename:
         extension = attachment.filename.rsplit(".", 1)[-1].lower() if "." in attachment.filename else ""
@@ -1085,6 +1084,9 @@ def submit_report(
         if not content_matches_extension(extension, attachment.file):
             raise HTTPException(status_code=400, detail="File content does not match its file type")
 
+        # Release the pooled connection checked out by get_db before the
+        # (potentially slow) R2 upload; the session is reused below.
+        db.close()
         # D-4: an attachment that cannot be stored fails the submit (503)
         # instead of saving the report as if the evidence were attached.
         document_url = upload_attachment_or_503(attachment.file, attachment.filename)

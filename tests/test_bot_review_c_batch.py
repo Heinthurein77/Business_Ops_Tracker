@@ -626,3 +626,148 @@ class TestAdminExportCap:
         assert sheet.max_row == 10001  # header + exactly 10,000 data rows
         db.close()
         engine.dispose()
+
+
+# ---------------------------------------------------------------- m-13
+# Submit handlers must not hold a pooled connection (or row locks)
+# while the R2 upload runs: validate -> db.close() -> upload -> writes.
+
+class TestSubmitUploadHoldsNoSession:
+    """m-13: the R2 upload must run with no pooled connection held.
+
+    get_db checks a pooled connection out (SELECT 1) before the handler
+    runs. The spy below records engine.pool.checkedout() during the
+    upload — 0 means the pool slot is free, 1 means the upload is
+    holding it (the old code also held the day's row locks). The test
+    engine is file-backed with an explicit QueuePool so checkedout()
+    is meaningful (in-memory SQLite uses a SingletonThreadPool).
+    """
+
+    PDF_BYTES = b"%PDF-1.4 fake pdf content"
+
+    def _make_file_db(self, tmp_path):
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import QueuePool
+
+        from src.models import Base
+
+        engine = create_engine(f"sqlite:///{tmp_path}/m13.db",
+                               poolclass=QueuePool, pool_size=2, max_overflow=0)
+        Base.metadata.create_all(engine)
+        return engine, sessionmaker(bind=engine)()
+
+    def _seed(self, db):
+        from src.models import BusinessUnit, User
+
+        db.add(BusinessUnit(id=1, code="BU1", name="Unit 1"))
+        ceo = User(id=701, username="ceo_one", hashed_password="x",
+                   role="CEO", business_unit_id=1, is_active=True)
+        ho = User(id=702, username="ho_user", hashed_password="x",
+                  role="HO", business_unit_id=1, is_active=True)
+        db.add_all([ceo, ho])
+        db.commit()
+        return ceo, ho
+
+    def _validated_session(self, engine, db):
+        # get_db checks a pooled connection out with SELECT 1 before the
+        # handler runs — reproduce that so the spy can tell whether the
+        # upload still holds the session's connection.
+        from sqlalchemy import text
+
+        db.execute(text("SELECT 1"))
+        assert engine.pool.checkedout() == 1
+
+    def test_ceo_upload_runs_with_no_connection_held(self, tmp_path, monkeypatch):
+        import io
+
+        from fastapi import UploadFile
+        from starlette.requests import Request
+
+        import src.routers.ceo as ceo_router
+        from src.models import ActivityLog, DailyFinancial
+        from src.utils import today_local
+
+        engine, db = self._make_file_db(tmp_path)
+        ceo, _ho = self._seed(db)
+        self._validated_session(engine, db)
+        seen = {}
+        ceo_router._rate_limiter.reset()
+
+        def fake_upload(file_obj, filename):
+            seen["checkedout"] = engine.pool.checkedout()
+            return "https://bucket.r2.dev/activity-attachments/evidence.pdf"
+
+        monkeypatch.setattr(ceo_router, "upload_attachment_or_503", fake_upload)
+        request = Request({"type": "http", "headers": [], "client": ("8.8.8.8", 5555)})
+        ceo_router.submit_report(
+            request=request, report_date="", revenue="100000", cash_flow="0",
+            receivable="0", payable="0", other_amount="", financial_other_notes="",
+            meetings_attended="Standup", meetings_count="", site_visits="",
+            key_decisions="", key_achievement="", next_day_schedule="",
+            problems_today="", help_needed="", gym_percent="", swimming_percent="",
+            cycle_percent="", activity_other_notes="", daily_steps="",
+            heart_rate="", sleep_hours="", bp_systolic="", bp_diastolic="",
+            stress_level="", energy_mood="", weight_kg="", is_sick="false",
+            health_gym_percent=None, health_swimming_percent=None,
+            health_cycle_percent=None, health_other_notes="", event_flag="false",
+            meeting_flag="false", golf_flag="false", social_other_notes="",
+            attachment=UploadFile(filename="evidence.pdf",
+                                  file=io.BytesIO(self.PDF_BYTES)),
+            user=ceo, db=db)
+        assert seen == {"checkedout": 0}, "upload ran while a pooled connection was held"
+        # The submit still succeeds end to end, with the URL stored.
+        fin = db.query(DailyFinancial).filter(
+            DailyFinancial.business_unit_id == 1,
+            DailyFinancial.report_date == today_local()).one()
+        assert float(fin.revenue) == 100000.0
+        act = db.query(ActivityLog).filter(
+            ActivityLog.business_unit_id == 1,
+            ActivityLog.report_date == today_local()).one()
+        assert act.document_url == "https://bucket.r2.dev/activity-attachments/evidence.pdf"
+        db.close()
+        engine.dispose()
+
+    def test_ho_upload_runs_with_no_connection_held(self, tmp_path, monkeypatch):
+        import io
+
+        from fastapi import UploadFile
+        from starlette.requests import Request
+
+        import src.routers.ho as ho_router
+        from src.models import HeadOfficeActivityLog, HeadOfficeDailyFinancial
+        from src.utils import today_local
+
+        engine, db = self._make_file_db(tmp_path)
+        _ceo, ho = self._seed(db)
+        self._validated_session(engine, db)
+        seen = {}
+        ho_router._rate_limiter.reset()
+
+        def fake_upload(file_obj, filename):
+            seen["checkedout"] = engine.pool.checkedout()
+            return "https://bucket.r2.dev/activity-attachments/ho.pdf"
+
+        monkeypatch.setattr(ho_router, "upload_attachment_or_503", fake_upload)
+        request = Request({"type": "http", "headers": [], "client": ("8.8.8.8", 5555)})
+        ho_router.submit_report(
+            request, revenue="100000", cash_flow="20000", receivable="5000",
+            payable="3000", other_amount="1000", financial_other_notes="",
+            meetings_attended="Standup", site_visits="", key_decisions="",
+            next_day_schedule="", gym_percent="50", swimming_percent="",
+            cycle_percent="", activity_other_notes="", daily_steps="8000",
+            heart_rate="72", sleep_hours="7.5", bp_systolic="120",
+            bp_diastolic="80", health_other_notes="", event_flag="true",
+            meeting_flag="false", golf_flag="false", social_other_notes="",
+            attachment=UploadFile(filename="evidence.pdf",
+                                  file=io.BytesIO(self.PDF_BYTES)),
+            user=ho, db=db)
+        assert seen == {"checkedout": 0}, "upload ran while a pooled connection was held"
+        fin = db.query(HeadOfficeDailyFinancial).filter(
+            HeadOfficeDailyFinancial.report_date == today_local()).one()
+        assert float(fin.revenue) == 100000.0
+        act = db.query(HeadOfficeActivityLog).filter(
+            HeadOfficeActivityLog.report_date == today_local()).one()
+        assert act.document_url == "https://bucket.r2.dev/activity-attachments/ho.pdf"
+        db.close()
+        engine.dispose()
