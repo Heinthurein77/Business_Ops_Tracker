@@ -31,7 +31,7 @@ from src.auth import (
     hash_password,
 )
 from src.config import settings
-from src.database import SessionLocal, engine
+from src.database import SessionLocal, engine, probe_engine, verify_pooler_timeouts
 from src.edge import EdgeMiddleware
 from src.models import BusinessUnit, User
 from src.routers import admin, auth, ceo, ho, ops, users
@@ -347,6 +347,10 @@ async def lifespan(app: FastAPI):
         _run_startup_step("seeding", lambda: (seed_business_units(db), seed_users(db)))
     finally:
         db.close()
+    # M-09: on a Neon pooler URL the query timeouts are not sent at connect
+    # time — warn loudly if the per-role timeouts (deploy/db_roles.sql)
+    # cannot be verified as set. Never fails startup (see database.py).
+    verify_pooler_timeouts(engine)
     yield
 
 
@@ -375,6 +379,35 @@ app.include_router(ho.router)
 app.include_router(admin.router)
 app.include_router(users.router)
 app.include_router(ops.router)
+
+
+def _assert_unique_routes(fastapi_app) -> None:
+    """m-25: two routers share the /api/admin prefix (admin.py and
+    users.py), so a future route defined twice would silently shadow the
+    first with no warning. Fail fast at startup on any (path, method)
+    collision. Same path with different methods (GET + POST /api/ops/...)
+    is legitimate and is not a collision."""
+    from fastapi.routing import APIRoute
+
+    seen: dict[tuple[str, str], str] = {}
+    duplicates: list[str] = []
+    for route in fastapi_app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for method in sorted(route.methods or ()):
+            key = (route.path, method)
+            if key in seen:
+                duplicates.append(f"{method} {route.path} ({seen[key]} vs {route.name})")
+            else:
+                seen[key] = route.name
+    if duplicates:
+        raise RuntimeError(
+            "duplicate API routes (same path + method) — one shadows the other: "
+            + "; ".join(duplicates)
+        )
+
+
+_assert_unique_routes(app)
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +461,12 @@ def _db_is_ready(timeout_seconds: float = READY_TIMEOUT_SECONDS) -> bool:
 
     def _ping() -> None:
         try:
-            with engine.connect() as conn:
+            # m-16: the probe uses its own 1-connection engine (pool_size=1,
+            # pool_timeout=3 in src/database.py), so a probe checkout can
+            # never eat the main pool — and under pool exhaustion the thread
+            # no longer waits out the main pool's 10 s timeout after the
+            # probe already returned 503.
+            with probe_engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
             result["ok"] = True
         except Exception:

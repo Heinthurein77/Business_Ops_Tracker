@@ -23,10 +23,167 @@ def _make_db():
     return engine, session
 
 
-# ---------------------------------------------------------------- M-08 / m-14 / m-15
-# Deploy config is code here: the pool/concurrency balance, Caddy health
-# routing and log rotation are all asserted from the checked-in files so a
-# later edit cannot silently revert them.
+# ---------------------------------------------------------------- M-09
+# A Neon pooler URL silently drops the query timeouts; startup must warn
+# loudly when the per-role timeouts cannot be verified as set, and must
+# never fail startup over it.
+
+class _FakeResult:
+    def __init__(self, value):
+        self._value = value
+
+    def scalar(self):
+        return self._value
+
+
+class _FakeConn:
+    """Stands in for a DBAPI connection: SHOW returns the configured values."""
+    def __init__(self, values):
+        self._values = values
+        self.asked = []
+
+    def execute(self, stmt):
+        name = str(stmt).split()[-1]
+        self.asked.append(name)
+        return _FakeResult(self._values.get(name))
+
+
+class TestPoolerTimeoutWarning:
+    def test_pooler_host_detected(self):
+        from src.database import is_pooler_database_url
+
+        assert is_pooler_database_url(
+            "postgresql+psycopg2://u:p@ep-foo-pooler.us-east-2.aws.neon.tech/db")
+        assert is_pooler_database_url(
+            "postgresql+psycopg2://u:p@host.example.com:25061/db")
+        assert not is_pooler_database_url(
+            "postgresql+psycopg2://u:p@ep-foo.us-east-2.aws.neon.tech/db")
+        assert not is_pooler_database_url("sqlite://")
+
+    def test_unset_timeouts_reported_and_warned(self, caplog):
+        import logging
+
+        from src.database import check_pooler_timeouts
+
+        with caplog.at_level(logging.WARNING, logger="business_ops_tracker.database"):
+            missing = check_pooler_timeouts(
+                _FakeConn({"statement_timeout": "0", "lock_timeout": "0"}))
+        assert missing == ["statement_timeout", "lock_timeout"]
+        assert "pooler" in caplog.text and "statement_timeout" in caplog.text
+
+    def test_set_timeouts_are_quiet(self, caplog):
+        import logging
+
+        from src.database import check_pooler_timeouts
+
+        with caplog.at_level(logging.WARNING, logger="business_ops_tracker.database"):
+            missing = check_pooler_timeouts(
+                _FakeConn({"statement_timeout": "15s", "lock_timeout": "5s"}))
+        assert missing == []
+        assert "pooler" not in caplog.text
+
+    def test_verify_is_noop_for_non_pooler_url(self):
+        from src.database import verify_pooler_timeouts
+
+        # The test settings use SQLite, so this must return [] without
+        # touching any connection.
+        assert verify_pooler_timeouts() == []
+
+    def test_env_example_prefers_direct_neon_host(self):
+        text = (ROOT / ".env.example").read_text()
+        assert "prefer the DIRECT Neon host" in text
+        assert "deploy/db_roles.sql" in text
+
+
+# ---------------------------------------------------------------- m-16
+# /readyz must use its own 1-connection pool so probe checkouts can never
+# eat the main pool.
+
+class TestReadyzProbePool:
+    def test_probe_engine_is_separate_and_bounded(self):
+        from src.database import build_probe_engine, engine, probe_engine
+
+        assert probe_engine is not engine
+        probe = build_probe_engine(
+            "postgresql+psycopg2://u:p@db.example.com:5432/app",
+            {"connect_timeout": 10})
+        assert probe.pool.size() == 1
+        assert probe.pool._max_overflow == 0
+        assert probe.pool._timeout == 3
+        probe.dispose()
+
+    def test_db_is_ready_uses_probe_engine(self, monkeypatch):
+        import src.main as main_mod
+
+        seen = {}
+
+        class _Conn:
+            def __enter__(self):
+                seen["used"] = True
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def execute(self, stmt):
+                return None
+
+        class _Probe:
+            def connect(self):
+                return _Conn()
+
+        monkeypatch.setattr(main_mod, "probe_engine", _Probe())
+        assert main_mod._db_is_ready() is True
+        assert seen.get("used") is True
+
+
+# ---------------------------------------------------------------- m-25
+# Two routers share the /api/admin prefix; a future (path, method)
+# collision must fail fast at startup instead of silently shadowing.
+
+class TestUniqueRoutes:
+    def test_live_app_has_no_duplicate_routes(self):
+        from fastapi import FastAPI
+
+        from src.main import _assert_unique_routes, app
+
+        _assert_unique_routes(app)  # must not raise
+        assert isinstance(app, FastAPI)
+
+    def test_duplicate_route_is_rejected(self):
+        from fastapi import FastAPI
+
+        from src.main import _assert_unique_routes
+
+        dup = FastAPI()
+
+        @dup.get("/api/admin/users")
+        def _a():
+            return {}
+
+        @dup.get("/api/admin/users")
+        def _b():
+            return {}
+
+        with pytest.raises(RuntimeError, match="duplicate API routes"):
+            _assert_unique_routes(dup)
+
+    def test_same_path_different_method_is_allowed(self):
+        from fastapi import FastAPI
+
+        from src.main import _assert_unique_routes
+
+        ok = FastAPI()
+
+        @ok.get("/api/ops/documents")
+        def _a():
+            return {}
+
+        @ok.post("/api/ops/documents")
+        def _b():
+            return {}
+
+        _assert_unique_routes(ok)  # must not raise
 
 class TestDeployConfigReviewC:
     def test_dockerfile_limit_concurrency_matches_pool(self):
