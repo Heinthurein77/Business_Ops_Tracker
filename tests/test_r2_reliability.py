@@ -18,17 +18,13 @@ from types import SimpleNamespace
 import pytest
 from botocore.exceptions import ClientError
 from fastapi import HTTPException, UploadFile
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import text
 from starlette.requests import Request
 
 from src import r2_storage as r2_mod
 from src.auth import hash_password
 from src.config import settings
-from src.models import (
-    ActivityLog, Base, BusinessUnit, CeoProfile, DailyFinancial,
-    HeadOfficeActivityLog, User,
-)
+from src.models import (ActivityLog, BusinessUnit, CeoProfile, DailyFinancial, HeadOfficeActivityLog, User)
 from src.r2_storage import (
     PRESIGNED_URL_EXPIRY_SECONDS, extract_r2_key, presigned_url_for_key,
     upload_fileobj,
@@ -63,12 +59,9 @@ class _FakeS3:
         return self.presigned
 
 
-@pytest.fixture()
-def db():
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
-    session.add_all([
+@pytest.fixture(autouse=True)
+def _seed_db(db):
+    db.add_all([
         BusinessUnit(id=1, code="BU1", name="Shop One"),
         BusinessUnit(id=2, code="BU2", name="Shop Two"),
     ])
@@ -80,12 +73,9 @@ def db():
               role="HO", is_active=True)
     chairman = User(id=804, username="chairman", hashed_password=hash_password(PASSWORD),
                     role="Chairman", is_active=True)
-    session.add_all([ceo, ceo2, ho, chairman])
-    session.commit()
-    session.test_users = {"ceo": ceo, "ceo2": ceo2, "ho": ho, "chairman": chairman}
-    yield session
-    session.close()
-    engine.dispose()
+    db.add_all([ceo, ceo2, ho, chairman])
+    db.commit()
+    db.test_users = {"ceo": ceo, "ceo2": ceo2, "ho": ho, "chairman": chairman}
 
 
 def _configured_r2(monkeypatch):

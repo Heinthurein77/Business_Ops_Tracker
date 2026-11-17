@@ -107,12 +107,9 @@ class _FakeS3:
         return "https://presigned.example/object"
 
 
-@pytest.fixture()
-def db():
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
-    session.add_all([
+@pytest.fixture(autouse=True)
+def _seed_db(db):
+    db.add_all([
         BusinessUnit(id=1, code="BU1", name="Shop One"),
         BusinessUnit(id=2, code="BU2", name="Shop Two"),
     ])
@@ -120,12 +117,9 @@ def db():
                role="CEO", business_unit_id=1, is_active=True)
     ho = User(id=803, username="ho_user", hashed_password=hash_password(PASSWORD),
               role="HO", is_active=True)
-    session.add_all([ceo, ho])
-    session.commit()
-    session.test_users = {"ceo": ceo, "ho": ho}
-    yield session
-    session.close()
-    engine.dispose()
+    db.add_all([ceo, ho])
+    db.commit()
+    db.test_users = {"ceo": ceo, "ho": ho}
 
 
 def _ceo_submit(db, user, **overrides):

@@ -15,11 +15,11 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+
+
 
 from src.auth import InsufficientRoleException
-from src.models import ActivityLog, Base, BusinessUnit, DailyFinancial, User
+from src.models import ActivityLog, BusinessUnit, DailyFinancial, User
 from src.routers.admin import ceo_activity_calendar, require_admin
 from src.routers.ceo import ceo_dashboard, submit_report
 from src.utils import build_ceo_activity_calendar, today_local
@@ -29,12 +29,9 @@ HO = SimpleNamespace(id=91, role="HO", business_unit_id=None)
 REQUEST = SimpleNamespace(headers={}, client=SimpleNamespace(host="127.0.0.1"))
 
 
-@pytest.fixture()
-def db():
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
-    session.add_all([
+@pytest.fixture(autouse=True)
+def _seed_db(db):
+    db.add_all([
         BusinessUnit(id=1, code="BU1", name="Shop One"),
         BusinessUnit(id=2, code="BU2", name="Shop Two"),
     ])
@@ -44,30 +41,27 @@ def db():
                        business_unit_id=1, is_active=False)
     ceo2 = User(username="ceo_two", hashed_password="x", role="CEO", full_name="CEO Two",
                 business_unit_id=2, is_active=True)
-    session.add_all([ceo, predecessor, ceo2])
-    session.commit()
+    db.add_all([ceo, predecessor, ceo2])
+    db.commit()
     # the current CEO's own day (+ that day's financial row)
-    session.add(ActivityLog(business_unit_id=1, report_date=date(2026, 10, 14),
+    db.add(ActivityLog(business_unit_id=1, report_date=date(2026, 10, 14),
                             meetings_attended="Board meeting with HO",
                             key_decisions="Approved Q4 budget",
                             submitted_by=ceo.id))
-    session.add(DailyFinancial(business_unit_id=1, report_date=date(2026, 10, 14),
+    db.add(DailyFinancial(business_unit_id=1, report_date=date(2026, 10, 14),
                                revenue=Decimal("250000"), expenses=Decimal("0"),
                                net_profit=Decimal("0"), cash_in_hand=Decimal("0"),
                                cash_flow=Decimal("180000"), receivable=Decimal("40000"),
                                payable=Decimal("30000"), submitted_by=ceo.id))
     # a day left behind by the previous CEO of the same unit
-    session.add(ActivityLog(business_unit_id=1, report_date=date(2026, 10, 9),
+    db.add(ActivityLog(business_unit_id=1, report_date=date(2026, 10, 9),
                             meetings_attended="Predecessor supplier review",
                             submitted_by=predecessor.id))
     # another unit's day — must never leak into BU1's calendar
-    session.add(ActivityLog(business_unit_id=2, report_date=date(2026, 10, 14),
+    db.add(ActivityLog(business_unit_id=2, report_date=date(2026, 10, 14),
                             meetings_attended="Other unit meeting", submitted_by=ceo2.id))
-    session.commit()
-    session.test_users = {"ceo": ceo, "predecessor": predecessor, "ceo2": ceo2}
-    yield session
-    session.close()
-    engine.dispose()
+    db.commit()
+    db.test_users = {"ceo": ceo, "predecessor": predecessor, "ceo2": ceo2}
 
 
 def _cell(weeks, iso):
