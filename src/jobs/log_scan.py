@@ -33,8 +33,9 @@ from typing import Iterable
 
 from src.database import SessionLocal
 from src.models import (
-    AuditLog, InvoicePayment, JobHeartbeat, Notification, PayrollRun,
-    PurchaseOrder, SalesInvoice, StaffAdvance, User,
+    AuditLog, IntercompanyTransaction, InvoicePayment, JobHeartbeat,
+    JournalEntry, Notification, PayrollRun, PosSale, PurchaseOrder,
+    SalesInvoice, StaffAdvance, StockMovement, User,
 )
 from src.utils import utcnow
 
@@ -166,13 +167,40 @@ def stale_jobs(heartbeats, now=None, max_age_hours: int = STALE_AFTER_HOURS,
 # optional 4th element is a status the business row must be in to count
 # (approved_at is also stamped by reject_advance — it means "decided
 # at" — so only approved rows count as expected APPROVE_ADVANCE rows).
+# The optional 5th element is an extra SQLAlchemy filter on the
+# business rows. It is needed where the timestamp alone does not
+# identify the operation:
+# - REVERSE_JOURNAL: a reversal is a new JournalEntry with
+#   reversal_of_id set (no reversal timestamp exists on the original),
+#   so only reversal entries count.
+# - TRANSFER_STOCK: StockMovement rows are written by many operations
+#   (receive, sell, adjust, production); only the quick transfer's
+#   "Transfer to BU …" out-leg is a TRANSFER_STOCK — the same reason
+#   marker reconcile_journals uses to identify quick transfers.
+# - COMPLETE_PRODUCTION: ProductionOrder has no completion timestamp
+#   (production_date is set at creation), so the finished-goods
+#   "Production order #N completed" in-movement — exactly one per
+#   completion — is the business-side proof.
+# SELL_UNIT is deliberately NOT covered: PropertyUnit has no sold_at /
+# updated_at and the sell only flips status to "reserved" and links a
+# draft invoice, so there is no business-side timestamp to compare
+# against the window — wiring it would need a schema change.
 AUDIT_GAP_CHECKS = (
-    ("RECEIVE_PO", PurchaseOrder, PurchaseOrder.received_at, None),
-    ("PAY_PO", PurchaseOrder, PurchaseOrder.paid_at, None),
-    ("SEND_INVOICE", SalesInvoice, SalesInvoice.sent_at, None),
-    ("RECORD_PAYMENT", InvoicePayment, InvoicePayment.created_at, None),
-    ("PAY_PAYROLL", PayrollRun, PayrollRun.paid_at, None),
-    ("APPROVE_ADVANCE", StaffAdvance, StaffAdvance.approved_at, "approved"),
+    ("RECEIVE_PO", PurchaseOrder, PurchaseOrder.received_at, None, None),
+    ("PAY_PO", PurchaseOrder, PurchaseOrder.paid_at, None, None),
+    ("SEND_INVOICE", SalesInvoice, SalesInvoice.sent_at, None, None),
+    ("RECORD_PAYMENT", InvoicePayment, InvoicePayment.created_at, None, None),
+    ("PAY_PAYROLL", PayrollRun, PayrollRun.paid_at, None, None),
+    ("APPROVE_ADVANCE", StaffAdvance, StaffAdvance.approved_at, "approved", None),
+    ("SETTLE_INTERCOMPANY", IntercompanyTransaction, IntercompanyTransaction.settled_at,
+     "settled", None),
+    ("REVERSE_JOURNAL", JournalEntry, JournalEntry.created_at, None,
+     JournalEntry.reversal_of_id.isnot(None)),
+    ("TRANSFER_STOCK", StockMovement, StockMovement.created_at, None,
+     StockMovement.reason.like("Transfer to BU %")),
+    ("COMPLETE_PRODUCTION", StockMovement, StockMovement.created_at, None,
+     StockMovement.reason.like("Production order #% completed")),
+    ("CREATE_POS_SALE", PosSale, PosSale.created_at, "completed", None),
 )
 
 
@@ -191,10 +219,12 @@ def check_audit_gaps(db, since: datetime) -> list[str]:
     larger deficit is a real signal.
     """
     gaps = []
-    for action, model, ts_attr, status in AUDIT_GAP_CHECKS:
+    for action, model, ts_attr, status, extra in AUDIT_GAP_CHECKS:
         q = db.query(model).filter(ts_attr >= since)
         if status is not None:
             q = q.filter(model.status == status)
+        if extra is not None:
+            q = q.filter(extra)
         expected = q.count()
         written = db.query(AuditLog).filter(
             AuditLog.action == action, AuditLog.timestamp >= since).count()

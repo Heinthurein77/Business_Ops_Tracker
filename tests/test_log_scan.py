@@ -6,14 +6,17 @@ SessionLocal is monkeypatched in (the same pattern as the scheduled
 alerts tests in tests/test_bot_review_coverage_batch.py).
 """
 import io
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import src.jobs.log_scan as log_scan
-from src.models import Base, JobHeartbeat, Notification, User
+from src.models import (
+    AuditLog, Base, IntercompanyTransaction, JobHeartbeat, JournalEntry,
+    Notification, PosSale, StockMovement, User,
+)
 
 NOW = datetime(2026, 11, 9, 12, 0, 0)
 
@@ -337,3 +340,110 @@ class TestMain:
         assert "no active Chairman" in capsys.readouterr().err
         session.close()
         engine.dispose()
+
+
+# ------------------------------------------------------------------ G-8 audit-gap checks
+
+def _audit_row(session, action, now):
+    session.add(AuditLog(action=action, username="chairman", timestamp=now))
+    session.commit()
+
+
+class TestAuditGapChecks:
+    """G-8: the SM-14 expected-vs-written comparison must cover settle /
+    reverse / transfer / production / POS, not just the original six."""
+
+    def test_settle_intercompany_gap_and_match(self, scan_db):
+        _, session = scan_db
+        now = _now()
+        session.add(IntercompanyTransaction(
+            from_business_unit_id=1, to_business_unit_id=2, amount=100,
+            txn_date=date(2026, 11, 9), status="settled", settled_at=now))
+        # An open transaction (never settled) expects no audit row.
+        session.add(IntercompanyTransaction(
+            from_business_unit_id=1, to_business_unit_id=2, amount=50,
+            txn_date=date(2026, 11, 9), status="open", settled_at=None))
+        session.commit()
+        gaps = log_scan.check_audit_gaps(session, since=now - timedelta(hours=1))
+        assert "audit gap: SETTLE_INTERCOMPANY expected 1, wrote 0" in gaps
+        _audit_row(session, "SETTLE_INTERCOMPANY", now)
+        gaps = log_scan.check_audit_gaps(session, since=now - timedelta(hours=1))
+        assert not any(g.startswith("audit gap: SETTLE_INTERCOMPANY") for g in gaps)
+
+    def test_reverse_journal_gap_counts_only_reversals(self, scan_db):
+        _, session = scan_db
+        now = _now()
+        orig = JournalEntry(business_unit_id=1, entry_no="JV-2026-11-001",
+                            entry_date=date(2026, 11, 9), source="manual",
+                            status="posted", created_at=now)
+        session.add(orig)
+        session.flush()
+        # The reversal entry itself (reversal_of_id set) is the business
+        # proof; a plain entry created in the window is not a reversal.
+        session.add(JournalEntry(business_unit_id=1, entry_no="JV-2026-11-002",
+                                 entry_date=date(2026, 11, 9), source="reversal",
+                                 status="posted", reversal_of_id=orig.id,
+                                 created_at=now))
+        session.add(JournalEntry(business_unit_id=1, entry_no="JV-2026-11-003",
+                                 entry_date=date(2026, 11, 9), source="manual",
+                                 status="posted", created_at=now))
+        session.commit()
+        gaps = log_scan.check_audit_gaps(session, since=now - timedelta(hours=1))
+        assert "audit gap: REVERSE_JOURNAL expected 1, wrote 0" in gaps
+        _audit_row(session, "REVERSE_JOURNAL", now)
+        gaps = log_scan.check_audit_gaps(session, since=now - timedelta(hours=1))
+        assert not any(g.startswith("audit gap: REVERSE_JOURNAL") for g in gaps)
+
+    def test_transfer_stock_gap_counts_only_transfer_movements(self, scan_db):
+        _, session = scan_db
+        now = _now()
+        # One quick transfer = one "Transfer to BU …" out-leg (the
+        # matching "Transfer from BU …" in-leg and every other movement
+        # kind must not count as an expected TRANSFER_STOCK row).
+        session.add(StockMovement(item_id=1, movement_type="out", quantity=2,
+                                  reason="Transfer to BU 2", created_at=now))
+        session.add(StockMovement(item_id=2, movement_type="in", quantity=2,
+                                  reason="Transfer from BU 1", created_at=now))
+        session.add(StockMovement(item_id=3, movement_type="out", quantity=1,
+                                  reason="POS sale #1", created_at=now))
+        session.add(StockMovement(item_id=4, movement_type="in", quantity=5,
+                                  reason=None, created_at=now))
+        session.commit()
+        gaps = log_scan.check_audit_gaps(session, since=now - timedelta(hours=1))
+        assert "audit gap: TRANSFER_STOCK expected 1, wrote 0" in gaps
+        _audit_row(session, "TRANSFER_STOCK", now)
+        gaps = log_scan.check_audit_gaps(session, since=now - timedelta(hours=1))
+        assert not any(g.startswith("audit gap: TRANSFER_STOCK") for g in gaps)
+
+    def test_complete_production_gap_counts_only_completed_leg(self, scan_db):
+        _, session = scan_db
+        now = _now()
+        # One completion = one finished-goods "… completed" in-movement;
+        # the component out-legs ("Production order #N", no "completed")
+        # must not count.
+        session.add(StockMovement(item_id=1, movement_type="in", quantity=10,
+                                  reason="Production order #3 completed",
+                                  created_at=now))
+        session.add(StockMovement(item_id=2, movement_type="out", quantity=4,
+                                  reason="Production order #3", created_at=now))
+        session.commit()
+        gaps = log_scan.check_audit_gaps(session, since=now - timedelta(hours=1))
+        assert "audit gap: COMPLETE_PRODUCTION expected 1, wrote 0" in gaps
+        _audit_row(session, "COMPLETE_PRODUCTION", now)
+        gaps = log_scan.check_audit_gaps(session, since=now - timedelta(hours=1))
+        assert not any(g.startswith("audit gap: COMPLETE_PRODUCTION") for g in gaps)
+
+    def test_create_pos_sale_gap_and_void_excluded(self, scan_db):
+        _, session = scan_db
+        now = _now()
+        session.add(PosSale(business_unit_id=1, status="completed",
+                            sale_date=date(2026, 11, 9), created_at=now))
+        # A voided sale expects no CREATE_POS_SALE audit row.
+        session.add(PosSale(business_unit_id=1, status="void",
+                            sale_date=date(2026, 11, 9), created_at=now))
+        session.commit()
+        gaps = log_scan.check_audit_gaps(session, since=now - timedelta(hours=1))
+        assert "audit gap: CREATE_POS_SALE expected 1, wrote 0" in gaps
+        _audit_row(session, "CREATE_POS_SALE", now)
+        gaps = log_scan.check_audit_gaps(session, since=now - timedelta(hours=1))
+        assert not any(g.startswith("audit gap: CREATE_POS_SALE") for g in gaps)
