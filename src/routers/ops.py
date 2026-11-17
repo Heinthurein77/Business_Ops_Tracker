@@ -212,11 +212,42 @@ def list_action_items(
     return {"items": [serialize_action_item(db, i) for i in items]}
 
 
+def _validate_assignee(db: Session, user: User, assigned_to_id: Optional[int]) -> Optional[User]:
+    """m-34: an assignee must exist, be active, and — for a CEO creator —
+    belong to the caller's own business unit (a Chairman/HO creator
+    manages all BUs, so any active user is assignable by them). Returns
+    the assignee (None when unassigned) so callers can reuse it for the
+    notification link. Raises 400 BEFORE anything is created — the old
+    code only failed on the second commit (FK violation → 500) after the
+    item itself was already committed."""
+    if assigned_to_id is None:
+        return None
+    assignee = db.query(User).filter(User.id == assigned_to_id).first()
+    if assignee is None:
+        raise HTTPException(400, "Assigned user does not exist")
+    if not assignee.is_active:
+        raise HTTPException(400, "Assigned user is not active")
+    if user.role == "CEO" and assignee.business_unit_id != user.business_unit_id:
+        raise HTTPException(400, "Assignee must be in your business unit")
+    return assignee
+
+
+def _action_item_link(assignee: Optional[User]) -> str:
+    """M-13: an action-item link must be reachable by the assignee. A CEO
+    sees their items on /ceo (CeoOpsSection on the CEO dashboard);
+    Chairman/HO use /admin/daily-ops. The old '/admin' link bounced a
+    CEO to their home page — /admin is Chairman/HO-only."""
+    if assignee is not None and assignee.role == "CEO":
+        return "/ceo"
+    return "/admin/daily-ops"
+
+
 @router.post("/action-items")
 def create_action_item(payload: ActionItemIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     bu_id = bu_scope(user, payload.business_unit_id)
     if bu_id is None:
         raise HTTPException(400, "business_unit_id is required")
+    assignee = _validate_assignee(db, user, payload.assigned_to_id)
     item = ActionItem(
         business_unit_id=bu_id,
         title=payload.title.strip(),
@@ -233,7 +264,7 @@ def create_action_item(payload: ActionItemIn, user: User = Depends(get_current_u
         db.add(Notification(
             user_id=item.assigned_to_id, type="action_assigned",
             title="New action item assigned",
-            message=item.title, link="/admin",
+            message=item.title, link=_action_item_link(assignee),
         ))
         db.commit()
     _log_audit(db, user, "CREATE_ACTION_ITEM", f"id={item.id}")
@@ -264,6 +295,7 @@ def update_action_item(item_id: int, payload: ActionItemUpdate, user: User = Dep
     if payload.description is not None:
         item.description = payload.description
     if payload.assigned_to_id is not None:
+        _validate_assignee(db, user, payload.assigned_to_id)
         item.assigned_to_id = payload.assigned_to_id
     if payload.due_date is not None:
         item.due_date = payload.due_date
@@ -407,7 +439,8 @@ def run_remind_action_items(db: Session) -> dict:
             title = f"Action item due today: {item.title}"
             message = f"'{item.title}' ({bu_name}) is due today ({item.due_date.isoformat()})."
         db.add(Notification(user_id=assignee.id, type="action_due",
-                            title=title, message=message, link="/admin/daily-ops"))
+                            title=title, message=message,
+                            link=_action_item_link(assignee)))
         item.reminder_sent_at = utcnow()
         sent += 1
     db.commit()

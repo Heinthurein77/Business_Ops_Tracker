@@ -547,3 +547,127 @@ class TestHoLastSubmitter:
         from src.routers.ho import ho_dashboard
         out = ho_dashboard(user=db.test_users["ho"], db=db)
         assert out["last_submitted_by"] is None
+
+
+# ------------------------------------------------------------------ m-34 / M-13
+
+class TestActionItemAssigneeValidation:
+    def _teammate(self, db, user_id=806, active=True):
+        user = User(id=user_id, username=f"mate{user_id}", hashed_password="x",
+                    role="CEO", full_name="Teammate", business_unit_id=1,
+                    is_active=active)
+        db.add(user)
+        db.commit()
+        return user
+
+    def test_nonexistent_assignee_400_and_nothing_created(self, db):
+        from src.models import ActionItem
+        from src.routers.ops import ActionItemIn, create_action_item
+        ceo = db.test_users["ceo"]
+        with pytest.raises(HTTPException) as exc:
+            create_action_item(ActionItemIn(business_unit_id=1, title="Nope",
+                                            assigned_to_id=99999),
+                               user=ceo, db=db)
+        assert exc.value.status_code == 400
+        assert db.query(ActionItem).count() == 0
+
+    def test_cross_bu_assignee_400(self, db):
+        from src.routers.ops import ActionItemIn, create_action_item
+        ceo = db.test_users["ceo"]
+        with pytest.raises(HTTPException) as exc:
+            create_action_item(ActionItemIn(business_unit_id=1, title="X",
+                                            assigned_to_id=db.test_users["ceo2"].id),
+                               user=ceo, db=db)
+        assert exc.value.status_code == 400
+        assert "business unit" in exc.value.detail
+
+    def test_chairman_assignee_400_for_ceo_creator(self, db):
+        from src.routers.ops import ActionItemIn, create_action_item
+        ceo = db.test_users["ceo"]
+        with pytest.raises(HTTPException) as exc:
+            create_action_item(ActionItemIn(business_unit_id=1, title="X",
+                                            assigned_to_id=db.test_users["chairman"].id),
+                               user=ceo, db=db)
+        assert exc.value.status_code == 400
+
+    def test_inactive_assignee_400(self, db):
+        from src.routers.ops import ActionItemIn, create_action_item
+        self._teammate(db, active=False)
+        ceo = db.test_users["ceo"]
+        with pytest.raises(HTTPException) as exc:
+            create_action_item(ActionItemIn(business_unit_id=1, title="X",
+                                            assigned_to_id=806),
+                               user=ceo, db=db)
+        assert exc.value.status_code == 400
+        assert "not active" in exc.value.detail
+
+    def test_same_bu_assignee_ok_and_link_is_ceo_reachable(self, db):
+        from src.routers.ops import ActionItemIn, create_action_item
+        # One active CEO per BU (partial unique index), so the only
+        # same-BU assignee a CEO can pick is themselves — which is allowed
+        # and sends no notification (assignee == creator).
+        ceo = db.test_users["ceo"]
+        out = create_action_item(ActionItemIn(business_unit_id=1, title="Do it",
+                                              assigned_to_id=ceo.id),
+                                 user=ceo, db=db)
+        assert out["assigned_to_id"] == ceo.id
+        assert db.query(Notification).filter(
+            Notification.type == "action_assigned").count() == 0
+
+    def test_admin_may_assign_to_any_bu(self, db):
+        from src.routers.ops import ActionItemIn, create_action_item
+        chairman = db.test_users["chairman"]
+        out = create_action_item(ActionItemIn(business_unit_id=2, title="Do it",
+                                              assigned_to_id=db.test_users["ceo2"].id),
+                                 user=chairman, db=db)
+        assert out["assigned_to_id"] == db.test_users["ceo2"].id
+        note = db.query(Notification).filter(
+            Notification.type == "action_assigned").one()
+        assert note.link == "/ceo"
+
+    def test_admin_assigning_to_ho_links_to_daily_ops(self, db):
+        from src.routers.ops import ActionItemIn, create_action_item
+        chairman = db.test_users["chairman"]
+        create_action_item(ActionItemIn(business_unit_id=1, title="HO task",
+                                        assigned_to_id=db.test_users["ho"].id),
+                           user=chairman, db=db)
+        note = db.query(Notification).filter(
+            Notification.type == "action_assigned").one()
+        assert note.link == "/admin/daily-ops"
+
+    def test_update_validates_assignee(self, db):
+        from src.models import ActionItem
+        from src.routers.ops import ActionItemIn, ActionItemUpdate, create_action_item, update_action_item
+        ceo = db.test_users["ceo"]
+        out = create_action_item(ActionItemIn(business_unit_id=1, title="T"),
+                                 user=ceo, db=db)
+        with pytest.raises(HTTPException) as exc:
+            update_action_item(out["id"], ActionItemUpdate(assigned_to_id=99999),
+                               user=ceo, db=db)
+        assert exc.value.status_code == 400
+        item = db.query(ActionItem).filter(ActionItem.id == out["id"]).one()
+        assert item.assigned_to_id is None
+        with pytest.raises(HTTPException) as exc:
+            update_action_item(out["id"],
+                               ActionItemUpdate(assigned_to_id=db.test_users["ceo2"].id),
+                               user=ceo, db=db)
+        assert exc.value.status_code == 400
+
+    def test_action_due_link_is_role_aware(self, db):
+        from src.models import ActionItem
+        from src.routers.ops import run_remind_action_items
+        chairman = db.test_users["chairman"]
+        db.add_all([
+            ActionItem(business_unit_id=1, title="CEO task", status="pending",
+                       due_date=today_local(), assigned_to_id=db.test_users["ceo"].id,
+                       created_by_id=chairman.id),
+            ActionItem(business_unit_id=1, title="HO task", status="pending",
+                       due_date=today_local(), assigned_to_id=db.test_users["ho"].id,
+                       created_by_id=chairman.id),
+        ])
+        db.commit()
+        assert run_remind_action_items(db)["notified"] == 2
+        links = {n.user_id: n.link for n in db.query(Notification).filter(
+            Notification.type == "action_due").all()}
+        assert links[db.test_users["ceo"].id] == "/ceo"
+        assert links[db.test_users["ho"].id] == "/admin/daily-ops"
