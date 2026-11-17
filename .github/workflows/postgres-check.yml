@@ -62,6 +62,17 @@ jobs:
       - name: Install pytest
         run: pip install pytest==9.1.1
 
+      # Diagnostic step (CI red on e612511, 2026-11-17): see tests.yml —
+      # same step here. The postgres-check run failed in ~0s with exit 1,
+      # so this proves pytest is importable by the same `python` that runs
+      # the step and shows whether the job-level env reached it, without
+      # printing any secret value (DATABASE_URL here holds a password).
+      - name: Verify pytest and env
+        run: |
+          which python pip
+          pip show pytest
+          python -c "import os, pytest; print('pytest', pytest.__version__); print('ENVIRONMENT', os.environ.get('ENVIRONMENT')); print('DATABASE_URL set', bool(os.environ.get('DATABASE_URL')))"
+
       - name: Run migration chain on Postgres
         run: python -m alembic upgrade head
 

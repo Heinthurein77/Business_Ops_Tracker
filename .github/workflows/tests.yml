@@ -37,6 +37,19 @@ jobs:
       - name: Install pytest
         run: pip install pytest==9.1.1
 
+      # Diagnostic step (CI red on e612511, 2026-11-17): the tests run
+      # failed in ~3s with exit 2 and the postgres-check run in ~0s with
+      # exit 1, and the logs are not readable without repo-admin rights.
+      # This step makes the next failure diagnosable: it proves pytest is
+      # actually importable by the same `python` that runs the suite, and
+      # shows whether the job-level env (ENVIRONMENT / DATABASE_URL)
+      # reached the step — without printing any secret value.
+      - name: Verify pytest and env
+        run: |
+          which python pip
+          pip show pytest
+          python -c "import os, pytest; print('pytest', pytest.__version__); print('ENVIRONMENT', os.environ.get('ENVIRONMENT')); print('DATABASE_URL set', bool(os.environ.get('DATABASE_URL')))"
+
       # The SPA smoke test (test_spa_route_returns_index_html) serves
       # frontend/dist/index.html, so the production build must run BEFORE
       # pytest — on a fresh checkout dist/ does not exist yet, and pytest
