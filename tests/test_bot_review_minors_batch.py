@@ -16,32 +16,25 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import sessionmaker
 
 from src.config import settings
 from src.main import app as fastapi_app
 from src.main import lifespan, seed_business_units
-from src.models import Base, BusinessUnit
+from src.models import BusinessUnit
 from src.utils import utcnow
 
 CHAIRMAN = SimpleNamespace(id=1, role="Chairman", business_unit_id=None)
 
 
-@pytest.fixture()
-def db():
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
+@pytest.fixture(autouse=True)
+def _seed_db(db):
     bu1 = BusinessUnit(id=1, code="BU1", name="Shop One")
     bu2 = BusinessUnit(id=2, code="BU2", name="Shop Two")
-    session.add_all([bu1, bu2])
-    session.commit()
-    session.test_bu = bu1
-    session.test_bu2 = bu2
-    yield session
-    session.close()
+    db.add_all([bu1, bu2])
+    db.commit()
+    db.test_bu = bu1
+    db.test_bu2 = bu2
 
 
 # ---------------------------------------------------------------- P3-2

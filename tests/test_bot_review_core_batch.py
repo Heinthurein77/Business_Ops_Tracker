@@ -17,15 +17,13 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException, Response
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 from starlette.requests import Request
 
 from src.auth import hash_password
 from src.client_ip import _from_named_header
 from src.crypto import EncryptedDate
 from src.edge import EdgeMiddleware
-from src.models import AuditLog, Base, BusinessUnit, User
+from src.models import AuditLog, BusinessUnit, User
 from src.routers.admin import report_logs
 from src.routers.auth import login as login_endpoint
 from src.routers.users import create_user, reset_user_password
@@ -36,19 +34,14 @@ HO = SimpleNamespace(id=2, role="HO", business_unit_id=None, username="ho_staff"
 REQUEST = SimpleNamespace(headers={}, client=SimpleNamespace(host="127.0.0.1"))
 
 
-@pytest.fixture()
-def db():
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
-    session.add_all([
+@pytest.fixture(autouse=True)
+def _seed_db(db):
+    db.add_all([
         BusinessUnit(id=1, code="BU1", name="Shop One"),
         BusinessUnit(id=2, code="BU2", name="Shop Two"),
         User(username="boss", hashed_password="x", role="Chairman", full_name="Boss"),
     ])
-    session.commit()
-    yield session
-    session.close()
+    db.commit()
 
 
 # ------------------------------------------------------------------ m4/m5

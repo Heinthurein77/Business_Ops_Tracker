@@ -12,10 +12,8 @@ from datetime import date
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
-from src.models import ActivityLog, Base, BusinessUnit, User
+from src.models import ActivityLog, BusinessUnit, User
 from src.routers.admin import activity_dashboard
 from src.routers.ceo import ceo_dashboard, submit_report
 from src.utils import build_ceo_activity_calendar, today_local
@@ -27,12 +25,9 @@ PROBLEMS = "Delivery truck broke down; two routes delayed"
 HELP = "Need Chairman approval to rent a backup truck this week"
 
 
-@pytest.fixture()
-def db():
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
-    session.add_all([
+@pytest.fixture(autouse=True)
+def _seed_db(db):
+    db.add_all([
         BusinessUnit(id=1, code="BU1", name="Shop One"),
         BusinessUnit(id=2, code="BU2", name="Shop Two"),
     ])
@@ -43,24 +38,21 @@ def db():
                business_unit_id=1, is_active=True)
     ceo2 = User(id=502, username="ceo_two", hashed_password="x", role="CEO", full_name="CEO Two",
                 business_unit_id=2, is_active=True)
-    session.add_all([ceo, ceo2])
-    session.commit()
+    db.add_all([ceo, ceo2])
+    db.commit()
     # BU1's latest report (today) asks for help; BU2's latest report has a
     # problems note but a whitespace-only help field — not an escalation.
-    session.add(ActivityLog(business_unit_id=1, report_date=today_local(),
+    db.add(ActivityLog(business_unit_id=1, report_date=today_local(),
                             meetings_attended="Ops review",
                             problems_today=PROBLEMS, help_needed=HELP,
                             submitted_by=ceo.id))
-    session.add(ActivityLog(business_unit_id=2, report_date=date(2026, 10, 10),
+    db.add(ActivityLog(business_unit_id=2, report_date=date(2026, 10, 10),
                             meetings_attended="Supplier call",
                             problems_today="Rain delayed the market run",
                             help_needed="   ",
                             submitted_by=ceo2.id))
-    session.commit()
-    session.test_users = {"ceo": ceo, "ceo2": ceo2}
-    yield session
-    session.close()
-    engine.dispose()
+    db.commit()
+    db.test_users = {"ceo": ceo, "ceo2": ceo2}
 
 
 _SUBMIT_DEFAULTS = dict(

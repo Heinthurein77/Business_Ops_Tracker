@@ -8,20 +8,15 @@ assigned to inactive users never notify.
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
-from src.models import ActionItem, Base, BusinessUnit, Notification, User
+from src.models import ActionItem, BusinessUnit, Notification, User
 from src.routers.ops import run_remind_action_items
 from src.utils import today_local, utcnow
 
 
-@pytest.fixture()
-def db():
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
-    session.add_all([
+@pytest.fixture(autouse=True)
+def _seed_db(db):
+    db.add_all([
         BusinessUnit(id=1, code="BU1", name="Shop One"),
         BusinessUnit(id=2, code="BU2", name="Shop Two"),
         User(id=1, username="chairman", hashed_password="x", role="Chairman",
@@ -31,9 +26,7 @@ def db():
         User(id=11, username="ceo_gone", hashed_password="x", role="CEO",
              business_unit_id=1, is_active=False),
     ])
-    session.commit()
-    yield session
-    session.close()
+    db.commit()
 
 
 def _item(db, title, due, status="pending", assignee=10, bu=1):
