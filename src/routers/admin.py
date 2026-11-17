@@ -1462,7 +1462,7 @@ def ceo_monthly_summary(
     import calendar as _cal
     from io import BytesIO
 
-    from fpdf import FPDF
+    from fpdf import FPDF, XPos, YPos
 
     business_unit = db.query(BusinessUnit).filter(BusinessUnit.id == business_unit_id).first()
     if business_unit is None:
@@ -1574,18 +1574,18 @@ def ceo_monthly_summary(
     W = pdf.w - 20
 
     pdf.set_font("helvetica", "B", 18)
-    pdf.cell(W, 10, "CEO Monthly Summary", ln=1)
+    pdf.cell(W, 10, "CEO Monthly Summary", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_font("helvetica", "", 11)
     pdf.set_text_color(100, 100, 100)
     ceo_label = (
         f"{ceo_user.full_name or ceo_user.username} ({ceo_user.username})" if ceo_user else "No active CEO assigned"
     )
-    pdf.cell(W, 6, t(f"{business_unit.name} ({business_unit.code})  |  {month_label}  |  Generated {today.isoformat()}"), ln=1)
+    pdf.cell(W, 6, t(f"{business_unit.name} ({business_unit.code})  |  {month_label}  |  Generated {today.isoformat()}"), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_text_color(0, 0, 0)
     pdf.ln(4)
 
     pdf.set_font("helvetica", "B", 13)
-    pdf.cell(W, 8, "Overview", ln=1)
+    pdf.cell(W, 8, "Overview", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_font("helvetica", "", 11)
     for key, value in [
         ("CEO", ceo_label),
@@ -1594,23 +1594,23 @@ def ceo_monthly_summary(
         ("Month revenue", money(month_revenue)),
     ]:
         pdf.cell(45, 6.5, key)
-        pdf.cell(0, 6.5, t(value), ln=1)
+        pdf.cell(0, 6.5, t(value), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.ln(3)
 
     def _section(title: str):
         pdf.set_font("helvetica", "B", 13)
-        pdf.cell(W, 8, title, ln=1)
+        pdf.cell(W, 8, title, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.set_font("helvetica", "", 11)
 
     def _dated_entries(entries, empty_text: str):
         if not entries:
             pdf.set_font("helvetica", "I", 11)
-            pdf.cell(W, 6.5, empty_text, ln=1)
+            pdf.cell(W, 6.5, empty_text, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
             pdf.set_font("helvetica", "", 11)
             return
         for entry_date, text in entries:
             pdf.set_font("helvetica", "B", 10.5)
-            pdf.cell(W, 5.5, entry_date.strftime("%d %b %Y"), ln=1)
+            pdf.cell(W, 5.5, entry_date.strftime("%d %b %Y"), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
             pdf.set_font("helvetica", "", 11)
             pdf.multi_cell(W, 6, t(text.strip()))
             pdf.ln(1.5)
@@ -1626,11 +1626,11 @@ def ceo_monthly_summary(
     _section("Help Requests")
     if not help_requests:
         pdf.set_font("helvetica", "I", 11)
-        pdf.cell(W, 6.5, "No help requests this month.", ln=1)
+        pdf.cell(W, 6.5, "No help requests this month.", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.set_font("helvetica", "", 11)
     for log in help_requests:
         pdf.set_font("helvetica", "B", 10.5)
-        pdf.cell(W, 5.5, log.report_date.strftime("%d %b %Y"), ln=1)
+        pdf.cell(W, 5.5, log.report_date.strftime("%d %b %Y"), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.set_font("helvetica", "", 11)
         pdf.multi_cell(W, 6, t(log.help_needed.strip()))
         if log.help_resolved_at is not None:
@@ -1650,7 +1650,7 @@ def ceo_monthly_summary(
             pdf.set_font("helvetica", "", 10.5)
             pdf.set_text_color(185, 28, 28)
             pdf.set_x(pdf.l_margin)
-            pdf.cell(W, 5.5, t("Status: Open - awaiting a response"), ln=1)
+            pdf.cell(W, 5.5, t("Status: Open - awaiting a response"), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
             pdf.set_text_color(0, 0, 0)
         pdf.set_font("helvetica", "", 11)
         pdf.ln(1.5)
@@ -1669,11 +1669,11 @@ def ceo_monthly_summary(
             health_lines.append((f"Average {label.lower()} completion", f"{average:.0f}%"))
     if not health_lines:
         pdf.set_font("helvetica", "I", 11)
-        pdf.cell(W, 6.5, "No health data recorded this month.", ln=1)
+        pdf.cell(W, 6.5, "No health data recorded this month.", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.set_font("helvetica", "", 11)
     for key, value in health_lines:
         pdf.cell(55, 6.5, key)
-        pdf.cell(0, 6.5, t(value), ln=1)
+        pdf.cell(0, 6.5, t(value), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
     buf = BytesIO(pdf.output())
     filename = f"ceo_monthly_summary_{business_unit.code}_{month_start.strftime('%Y-%m')}.pdf"

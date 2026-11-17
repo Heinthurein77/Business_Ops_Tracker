@@ -681,7 +681,7 @@ def monthly_report(month: Optional[str] = None, user: User = Depends(require_adm
     expiring_docs = [d for d in db.query(LicenseDocument).all()
                      if d.expiry_date and 0 <= (d.expiry_date - today).days <= 30]
 
-    from fpdf import FPDF
+    from fpdf import FPDF, XPos, YPos
 
     def t(text):
         """Strip characters the core latin-1 PDF font can't render."""
@@ -693,11 +693,11 @@ def monthly_report(month: Optional[str] = None, user: User = Depends(require_adm
     W = pdf.w - 20
 
     pdf.set_font("helvetica", "B", 18)
-    pdf.cell(W, 10, "Business Operations - Monthly Report", ln=1)
+    pdf.cell(W, 10, "Business Operations - Monthly Report", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_font("helvetica", "", 11)
     pdf.set_text_color(100, 100, 100)
     label = month_start.strftime("%B %Y")
-    pdf.cell(W, 6, f"{label}  |  Generated {today.isoformat()}", ln=1)
+    pdf.cell(W, 6, f"{label}  |  Generated {today.isoformat()}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_text_color(0, 0, 0)
     pdf.ln(4)
 
@@ -705,7 +705,7 @@ def monthly_report(month: Optional[str] = None, user: User = Depends(require_adm
         return f"Ks {v:,.0f}"
 
     pdf.set_font("helvetica", "B", 13)
-    pdf.cell(W, 8, "Portfolio Summary", ln=1)
+    pdf.cell(W, 8, "Portfolio Summary", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_font("helvetica", "", 11)
     summary = [
         ("Total revenue", money(totals["revenue"])),
@@ -716,11 +716,11 @@ def monthly_report(month: Optional[str] = None, user: User = Depends(require_adm
     ]
     for k, v in summary:
         pdf.cell(60, 6.5, k)
-        pdf.cell(0, 6.5, v, ln=1)
+        pdf.cell(0, 6.5, v, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.ln(3)
 
     pdf.set_font("helvetica", "B", 13)
-    pdf.cell(W, 8, "Business Unit Performance", ln=1)
+    pdf.cell(W, 8, "Business Unit Performance", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     headers = [("BU", 52), ("Revenue", 30), ("Cash Flow", 30), ("Target", 30), ("Ach. %", 18), ("Reports", 20)]
     pdf.set_font("helvetica", "B", 10)
     for h, w in headers:
@@ -738,7 +738,7 @@ def monthly_report(month: Optional[str] = None, user: User = Depends(require_adm
     pdf.ln(3)
 
     pdf.set_font("helvetica", "B", 13)
-    pdf.cell(W, 8, "Alerts", ln=1)
+    pdf.cell(W, 8, "Alerts", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_font("helvetica", "", 11)
     alerts = []
     no_report = [r["name"] for r in rows if r["reports"] == 0]
@@ -771,7 +771,7 @@ def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
                  from_date: Optional[date] = None, to_date: Optional[date] = None,
                  limit: int = OPS_EXPORT_MAX_ROWS,
                  user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Download one Operations Center tab as an .xlsx workbook.
+    """Download one Daily Ops tab as an .xlsx workbook.
 
     Row-capped at `limit` (max 5000); the actions tab defaults
     to the last 90 days unless from_date/to_date are given. Staff and

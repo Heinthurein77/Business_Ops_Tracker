@@ -21,8 +21,7 @@
 # running (a slow run is skipped, not duplicated). flock exits 99 only
 # on lock conflict (--conflict-exit-code 99, util-linux >= 2.36); any
 # other non-zero exit is the job's own failure and is preserved so cron
-# still reports it. The skip is logged with a timestamp. New cron lines
-# (e.g. the reconciliation job) must follow the same pattern.
+# still reports it. The skip is logged with a timestamp. New cron lines must follow the same pattern.
 #
 # Times are server time (Asia/Yangon on the VPS).
 
@@ -45,7 +44,7 @@
 # Log: ~/bot-audit-retention.log
 0 3 * * 0 flock -E 99 -n ~/bot-audit-retention.lock -c 'cd ~/business-ops-tracker && docker compose -f docker-compose.prod.yml exec -T app python -m src.scripts.audit_retention' >> ~/bot-audit-retention.log 2>&1; rc=$?; if [ $rc -eq 99 ]; then echo "$(date) audit_retention skipped: already running" >> ~/bot-audit-retention.log; exit 0; else exit $rc; fi
 
-# --- log_scan: daily count of ERROR / journal-failure / lockout lines in
+# --- log_scan: daily count of ERROR / lockout lines in
 # the last 24 h of app logs + dead-man check on the JobHeartbeat table
 # (alerts the Chairman in-app if a job has not run in > 36 h). Daily
 # 09:00. The module reads the logs from stdin, counts the signals, checks
@@ -61,9 +60,3 @@
 # in the container) because it shells out to pg_dump / docker.
 # Log: ~/bot-backup.log
 30 3 * * 0 flock -E 99 -n ~/bot-backup.lock -c 'cd ~/business-ops-tracker && BACKUP_DIR=~/bot-backups ./scripts/backup.sh' >> ~/bot-backup.log 2>&1; rc=$?; if [ $rc -eq 99 ]; then echo "$(date) backup skipped: already running" >> ~/bot-backup.log; exit 0; else exit $rc; fi
-
-# --- reconcile_journals: list operations whose journal never posted
-# (SC-1 / SM-9 / SM-10) and notify Chairman/HO once per run while any
-# failure persists, plus a job_heartbeats row for the dead-man check.
-# Daily 07:30. Follows the same flock pattern as the lines above.
-# Log: ~/bot-reconcile.log

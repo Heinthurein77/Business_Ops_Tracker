@@ -351,7 +351,7 @@ class EdgeMiddleware:
                 return
 
         # 4c. Heavy-GET budget (SM-4) — the full-group comparison, admin
-        # overview, health dashboard and journal list have no budget at
+        # overview and health dashboard have no budget at
         # all today, so a burst of dashboard reloads hits the pool
         # directly. Modest (60/min per caller); normal dashboard traffic
         # never reaches it.
