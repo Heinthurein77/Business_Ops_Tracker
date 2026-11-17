@@ -424,6 +424,8 @@ def view_upload(key: str = Query(...), user: User = Depends(get_current_user),
         if owner_bu_id is not None and user.role == "CEO" and user.business_unit_id:
             if owner_bu_id != user.business_unit_id:
                 raise HTTPException(403, "Attachment belongs to another business unit")
+    # M-04: record who viewed which attachment (key only, never contents).
+    _log_audit(db, user, "VIEW_UPLOAD", f"key={key}")
     # Sm-9: the 302 target is a 15-minute bearer URL — Cache-Control:
     # no-store so browsers never cache the resolved presigned URL (a
     # cached copy would keep working as a bearer link past its purpose,
@@ -710,6 +712,9 @@ def monthly_report(month: Optional[str] = None, user: User = Depends(require_adm
     month_end = date(month_start.year, month_start.month, _cal.monthrange(month_start.year, month_start.month)[1])
     days_in_month = (month_end - month_start).days + 1
 
+    # M-04: the Chairman PDF export — audit who pulled it, for which month.
+    _log_audit(db, user, "MONTHLY_REPORT_EXPORT", f"month={month_start.isoformat()}")
+
     from src.models import MonthlyTarget
 
     fin = (db.query(DailyFinancial.business_unit_id,
@@ -845,6 +850,9 @@ def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
     from openpyxl.styles import Font, PatternFill
 
     bu_id = bu_scope(user, business_unit_id)
+    # M-04: exports carry PII/health/financial data — audit who pulled
+    # which tab (never the rows themselves).
+    _log_audit(db, user, "OPS_EXCEL_EXPORT", f"tab={tab} bu_id={bu_id}")
     bu_names = {bu.id: bu.name for bu in db.query(BusinessUnit).all()}
     header_fill = PatternFill(start_color="1F2937", end_color="1F2937", fill_type="solid")
     header_font = Font(bold=True, color="FFFFFF")

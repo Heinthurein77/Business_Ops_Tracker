@@ -13,7 +13,7 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from src.models import Base, BusinessUnit, Notification, User
+from src.models import AuditLog, Base, BusinessUnit, Notification, User
 from src.routers.ceo import set_monthly_target as ceo_set_monthly_target
 from src.routers.ceo import submit_report as ceo_submit_report
 from src.routers.ho import set_monthly_target as ho_set_monthly_target
@@ -217,3 +217,68 @@ class TestMidRequestRevocationRecheck:
         ceo = db.test_users["ceo"]
         ceo._token_tv = ceo.token_version  # token as issued, never revoked
         assert _ceo_submit(db, ceo) == {"ok": True}
+
+
+# ------------------------------------------------------------------ M-04
+
+class TestAuditGapsClosed:
+    def _audit_actions(self, db):
+        fresh = _fresh_session(db)
+        try:
+            return [row.action for row in fresh.query(AuditLog).all()]
+        finally:
+            fresh.close()
+
+    def test_create_business_unit_audited(self, db):
+        from src.routers.admin import BUCreateIn, create_business_unit
+        chairman = db.test_users["chairman"]
+        out = create_business_unit(BUCreateIn(name="New Unit B"), user=chairman, db=db)
+        actions = self._audit_actions(db)
+        assert "BUSINESS_UNIT_CREATED" in actions
+        fresh = _fresh_session(db)
+        try:
+            row = fresh.query(AuditLog).filter(
+                AuditLog.action == "BUSINESS_UNIT_CREATED").one()
+            assert f"bu_id={out['id']}" in (row.details or "")
+        finally:
+            fresh.close()
+
+    def test_update_business_unit_audited(self, db):
+        from src.routers.admin import BUUpdateIn, update_business_unit
+        chairman = db.test_users["chairman"]
+        update_business_unit(1, BUUpdateIn(name="Shop One Renamed"), user=chairman, db=db)
+        assert "BUSINESS_UNIT_UPDATED" in self._audit_actions(db)
+
+    def test_ceo_monthly_summary_audited(self, db):
+        from src.routers.admin import ceo_monthly_summary
+        chairman = db.test_users["chairman"]
+        ceo_monthly_summary(business_unit_id=1, month="", user=chairman, db=db)
+        assert "CEO_MONTHLY_SUMMARY_EXPORT" in self._audit_actions(db)
+
+    def test_monthly_report_audited(self, db):
+        from src.routers.ops import monthly_report
+        chairman = db.test_users["chairman"]
+        monthly_report(month=None, user=chairman, db=db)
+        assert "MONTHLY_REPORT_EXPORT" in self._audit_actions(db)
+
+    def test_export_excel_audited(self, db):
+        from src.routers.ops import export_excel
+        # Chairman (no BU filter): the CEO path of this endpoint has a
+        # separate pre-existing filter-after-limit 500, flagged in the
+        # workstream report rather than fixed here.
+        chairman = db.test_users["chairman"]
+        export_excel(tab="actions", user=chairman, db=db)
+        assert "OPS_EXCEL_EXPORT" in self._audit_actions(db)
+
+    def test_view_upload_audited(self, db):
+        from src.models import ActivityLog
+        from src.routers.ops import view_upload
+        ceo = db.test_users["ceo"]
+        db.add(ActivityLog(
+            business_unit_id=1, report_date=today_local(),
+            document_url="https://test-bucket.r2.dev/activity-attachments/abc123.png?X-Amz-Expires=900",
+            submitted_by=ceo.id))
+        db.commit()
+        resp = view_upload(key="activity-attachments/abc123.png", user=ceo, db=db)
+        assert resp.status_code == 302
+        assert "VIEW_UPLOAD" in self._audit_actions(db)

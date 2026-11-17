@@ -1482,6 +1482,10 @@ def ceo_monthly_summary(
     month_end = date(year, month_num, days_in_month)
     month_label = month_start.strftime("%B %Y")
 
+    # M-04: a PDF carrying a health snapshot + PII — audit the export.
+    log_audit(db, user, "CEO_MONTHLY_SUMMARY_EXPORT",
+              f"bu_id={business_unit_id} month={month_start.isoformat()}")
+
     ceo_user = (
         db.query(User)
         .filter(User.business_unit_id == business_unit.id, User.role == "CEO", User.is_active == True)  # noqa: E712
@@ -2023,6 +2027,8 @@ def create_business_unit(payload: BUCreateIn, user: User = Depends(require_admin
     db.add(bu)
     db.commit()
     db.refresh(bu)
+    # M-04: BU creation is a structural change — audit it.
+    log_audit(db, user, "BUSINESS_UNIT_CREATED", f"bu_id={bu.id} name={bu.name}")
     return _serialize_bu_admin(db, bu)
 
 
@@ -2045,6 +2051,8 @@ def update_business_unit(bu_id: int, payload: BUUpdateIn, user: User = Depends(r
         bu.name = name
     db.commit()
     db.refresh(bu)
+    # M-04: BU rename is a structural change — audit it.
+    log_audit(db, user, "BUSINESS_UNIT_UPDATED", f"bu_id={bu_id} name={bu.name}")
     out = _serialize_bu_admin(db, bu)
     out["note"] = note
     return out
