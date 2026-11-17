@@ -332,6 +332,51 @@ def run_remind_missing_reports(db: Session) -> int:
     return sent
 
 
+@router.post("/notifications/remind-actions")
+def remind_actions(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Notify assignees of action items due today or overdue."""
+    _log_audit(db, user, "REMIND_ACTIONS", "")
+    return run_remind_action_items(db)
+
+
+def run_remind_action_items(db: Session) -> dict:
+    """Job-callable: notify assignees of open action items due today or
+    overdue. Throttled per item to one reminder per 7 days (same pattern
+    as run_check_document_expiry's expiry_notified_at). Unassigned items
+    and items assigned to inactive users are skipped — there is nobody
+    to notify."""
+    today = today_local()
+    items = db.query(ActionItem).filter(
+        ActionItem.status.in_(["pending", "in_progress"]),
+        ActionItem.due_date.is_not(None),
+        ActionItem.due_date <= today,
+        ActionItem.assigned_to_id.is_not(None),
+    ).all()
+    sent = 0
+    for item in items:
+        if item.reminder_sent_at and item.reminder_sent_at > utcnow() - timedelta(days=7):
+            continue
+        assignee = db.query(User).filter(User.id == item.assigned_to_id, User.is_active == True).first()  # noqa: E712
+        if assignee is None:
+            continue
+        bu = db.query(BusinessUnit).filter(BusinessUnit.id == item.business_unit_id).first()
+        bu_name = bu.name if bu else f"BU {item.business_unit_id}"
+        overdue_days = (today - item.due_date).days
+        if overdue_days > 0:
+            title = f"Action item overdue: {item.title}"
+            message = (f"'{item.title}' ({bu_name}) was due {item.due_date.isoformat()} "
+                       f"({overdue_days} day{'s' if overdue_days != 1 else ''} overdue).")
+        else:
+            title = f"Action item due today: {item.title}"
+            message = f"'{item.title}' ({bu_name}) is due today ({item.due_date.isoformat()})."
+        db.add(Notification(user_id=assignee.id, type="action_due",
+                            title=title, message=message, link="/admin/daily-ops"))
+        item.reminder_sent_at = utcnow()
+        sent += 1
+    db.commit()
+    return {"checked": len(items), "notified": sent}
+
+
 @router.get("/uploads/view")
 def view_upload(key: str = Query(...), user: User = Depends(get_current_user),
                 db: Session = Depends(get_db)):
@@ -634,7 +679,7 @@ def run_check_document_expiry(db: Session, days: int = 30) -> dict:
                 continue
             seen.add(u.id)
             db.add(Notification(user_id=u.id, type="document_expiry",
-                                title=title, message=message, link="/admin/operations-center"))
+                                title=title, message=message, link="/admin/daily-ops"))
             sent += 1
         d.expiry_notified_at = utcnow()
     db.commit()

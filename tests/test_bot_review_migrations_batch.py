@@ -35,10 +35,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSIONS = ROOT / "alembic" / "versions"
-# Current head after the ERP removal (2026-11-17, phase 4): the drop
-# migration a720b6b7c616, on top of the 2026-11-17 G-2 fix f452a085537d.
-CURRENT_HEAD = "a720b6b7c616"
-CURRENT_HEAD_DOWN = "f452a085537d"
+# Current head after the action-item reminder column (2026-11-17):
+# b7c2e9a4d1f5, on top of the ERP-removal drop a720b6b7c616.
+CURRENT_HEAD = "b7c2e9a4d1f5"
+CURRENT_HEAD_DOWN = "a720b6b7c616"
 
 
 # ------------------------------------------------------------------ helpers
@@ -125,8 +125,9 @@ def test_upgrade_head_then_downgrade_base_is_clean(tmp_path):
     # The ERP-removal drop migration (a720b6b7c616) is one-way by design
     # (plan §4.2): downgrade() refuses instead of re-creating 48 tables
     # whose data is gone. So "upgrade head, downgrade base" no longer
-    # empties the DB — the downgrade must fail at the drop migration and
-    # leave the schema intact at the head.
+    # empties the DB — the downgrade reverses only the reversible
+    # migrations above it, then fails at the drop migration and leaves
+    # the schema intact one step below head.
     db_path = tmp_path / "chain.db"
     url = f"sqlite:///{db_path}"
     up = _run_alembic(url, "upgrade", "head")
@@ -153,9 +154,11 @@ def test_upgrade_head_then_downgrade_base_is_clean(tmp_path):
     down = _run_alembic(url, "downgrade", "base")
     assert down.returncode != 0, "downgrade past the ERP-removal migration must refuse"
     assert "one-way" in (down.stdout + down.stderr)
-    # Nothing was dropped: still at the head, same tables.
+    # Nothing was dropped: the downgrade peeled off only the reversible
+    # migrations above the one-way drop migration, then refused there —
+    # so the DB sits one step below head (same tables, same data).
     assert _query(db_path, "SELECT version_num FROM alembic_version") == [
-        (CURRENT_HEAD,)]
+        (CURRENT_HEAD_DOWN,)]
     tables_after = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert tables_after == tables

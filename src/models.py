@@ -543,6 +543,7 @@ class ActionItem(Base):
     status = Column(String(20), default="pending", nullable=False, index=True)  # pending/in_progress/done
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     completed_at = Column(DateTime, nullable=True)
+    reminder_sent_at = Column(DateTime, nullable=True)  # last due/overdue reminder sent
     created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")

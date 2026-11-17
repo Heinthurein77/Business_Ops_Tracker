@@ -1,13 +1,15 @@
-"""Scheduled alert job: missing-report reminders + document-expiry alerts.
+"""Scheduled alert job: missing-report reminders + document-expiry alerts
++ action-item due/overdue reminders.
 
 Run once daily from cron on the server, e.g.:
 
     # 8:30 AM every day (server time), inside the running container:
     30 8 * * * cd ~/business-ops-tracker && docker compose -f docker-compose.prod.yml exec -T app python -m src.jobs.scheduled_alerts >> ~/bot-alerts.log 2>&1
 
-Both checks are idempotent/throttled in src/routers/ops.py:
+All three checks are idempotent/throttled in src/routers/ops.py:
 - Missing reports: one notification per CEO per run for today's missing report.
 - Document expiry: one alert per document per 7 days.
+- Action items: one reminder per item per 7 days when due today or overdue.
 """
 import sys
 from datetime import datetime
@@ -15,7 +17,7 @@ from datetime import datetime
 from src.database import SessionLocal
 from src.models import JobHeartbeat
 from src.utils import utcnow
-from src.routers.ops import run_check_document_expiry, run_remind_missing_reports
+from src.routers.ops import run_check_document_expiry, run_remind_action_items, run_remind_missing_reports
 
 
 def _record_heartbeat(db, job_name: str, status: str) -> None:
@@ -35,8 +37,10 @@ def main() -> int:
     try:
         reminded = run_remind_missing_reports(db)
         expiry = run_check_document_expiry(db, days=30)
+        actions = run_remind_action_items(db)
         print(f"missing-report reminders sent: {reminded}")
         print(f"documents expiring soon: {expiry['checked']} (notifications sent: {expiry['notified']})")
+        print(f"action items due/overdue: {actions['checked']} (reminders sent: {actions['notified']})")
         _record_heartbeat(db, "scheduled_alerts", "ok")
         return 0
     except Exception as exc:
