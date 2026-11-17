@@ -1,10 +1,10 @@
 /** SM-5: staleness indicator for dashboards.
  *
- * Dashboards load once on mount and never refresh again, so a page left
- * open shows silently stale data indefinitely. Every dashboard renders
- * this next to its title: the time its data was last loaded, plus a manual
- * refresh button that re-runs the page's load(). It does not poll — the
- * user refreshes deliberately, and mutate actions refetch before acting.
+ * Dashboards load once on mount and refresh again when the tab regains
+ * focus (useRefreshOnFocus, m-09) — a page left open no longer shows
+ * silently stale data indefinitely. It does not poll on an interval:
+ * the timestamp below plus this manual refresh button are still the
+ * deliberate-refresh path, and mutate actions refetch before acting.
  */
 export default function LastUpdated({ updatedAt, onRefresh, refreshing }) {
   const label = updatedAt

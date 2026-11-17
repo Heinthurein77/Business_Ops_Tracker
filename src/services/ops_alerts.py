@@ -13,7 +13,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from src.models import ActionItem, BusinessUnit, DailyFinancial, LicenseDocument, Notification, User
-from src.utils import APP_TZ, notify, today_local, utcnow
+from src.utils import APP_TZ, clamp_days, notify, today_local, utcnow
 
 
 def _action_item_link(assignee: Optional[User]) -> str:
@@ -101,6 +101,9 @@ def run_remind_action_items(db: Session) -> dict:
 
 def run_check_document_expiry(db: Session, days: int = 30) -> dict:
     """Job-callable: notify CEOs + Chairman/HO about documents expiring soon."""
+    # m-01: the cron job calls this directly, so clamp here too — a huge
+    # days used to overflow timedelta() and 500 the 08:30 run.
+    days = clamp_days(days)
     today = today_local()
     horizon = today + timedelta(days=days)
     docs = db.query(LicenseDocument).filter(

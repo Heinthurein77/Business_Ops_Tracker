@@ -6,6 +6,7 @@ import AdminSidebar, { displayNameOf } from '../components/AdminSidebar';
 import CeoProfileCard from '../components/CeoProfileCard';
 import Footer from '../components/Footer';
 import LastUpdated from '../components/LastUpdated';
+import useRefreshOnFocus from '../hooks/useRefreshOnFocus';
 import QuadrantStatusCircle from '../components/QuadrantStatusCircle';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
@@ -113,6 +114,9 @@ export default function AdminDashboardPage() {
     loadOverview().catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // m-09: re-run the overview when the tab regains focus (no polling).
+  useRefreshOnFocus(loadOverview);
 
   const selectedBuId = Number(searchParams.get('bu')) || ov?.operations?.[0]?.bu_id || null;
 

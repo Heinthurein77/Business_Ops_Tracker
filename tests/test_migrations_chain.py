@@ -7,9 +7,9 @@ run migrations, and the bug only surfaced as a 500 against a real database.
 
 This test runs the REAL migration chain on an empty scratch DB (subprocess
 ``alembic upgrade head`` — no ``create_all`` anywhere) and asserts:
-1. exactly one migration head (6d20531e9b89, the hot-query composite
-   indexes, 2026-11-17, re-chained at merge time on top of the TOTP
-   columns + password_history migration 87cba6ac0f1f);
+1. exactly one migration head (621509460777, the idempotency_keys table
+   (m-10), 2026-11-17, re-chained at merge time on top of the hot-query
+   composite indexes 6d20531e9b89);
 2. every model table and every model column exists in the migrated schema;
 3. a tracker row can be inserted and read back through the models
    against the migrated schema.
@@ -59,8 +59,8 @@ def test_single_migration_head():
 
     cfg = Config(str(ROOT / "alembic.ini"))
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == ["6d20531e9b89"], (
-        f"expected single head 6d20531e9b89 (hot-query composite indexes), got {heads}")
+    assert heads == ["621509460777"], (
+        f"expected single head 621509460777 (idempotency_keys table, m-10), got {heads}")
 
 
 def test_migrated_schema_matches_models(migrated_engine):

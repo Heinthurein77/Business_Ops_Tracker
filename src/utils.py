@@ -157,6 +157,23 @@ def parse_month_or_default(month: str, today: Optional[date] = None) -> tuple[in
     return year, month_num
 
 
+def clamp_limit(limit: int) -> int:
+    """m-01: one shared clamp for every list endpoint — raw limit/offset/
+    days used to flow straight into .offset().limit() / timedelta(), so a
+    caller could request ?limit=10000000 (unbounded .all() into memory)
+    or a huge days (timedelta overflow -> 500). Mirrors the codebase's
+    own pattern at admin.py report-logs (limit 1..500)."""
+    return max(1, min(limit, 500))
+
+
+def clamp_offset(offset: int) -> int:
+    return max(0, offset)
+
+
+def clamp_days(days: int) -> int:
+    return max(1, min(days, 365))
+
+
 def notify(db, user_id: int, type: str, title: str, message: str, link: Optional[str] = None):
     """M-12: the one in-app Notification constructor — was built inline at
     8 sites (ops, admin, ceo, log_scan, throttle) with no shared helper,

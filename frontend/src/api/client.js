@@ -55,13 +55,22 @@ function getJson(path) {
   return fetch(path, { credentials: 'include' }).then(handle);
 }
 
-function postJson(path, data) {
+function postJson(path, data, extraHeaders = {}) {
   return fetch(path, {
     method: 'POST',
     credentials: 'include',
-    headers: JSON_HEADERS,
+    headers: { ...JSON_HEADERS, ...extraHeaders },
     body: JSON.stringify(data ?? {}),
   }).then(handle);
+}
+
+// m-10: one fresh UUID per create attempt, sent as Idempotency-Key so a
+// retried request replays the first response instead of creating a
+// second row. crypto.randomUUID is available in all modern browsers;
+// the fallback only covers very old ones.
+function newIdempotencyKey() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  return `idem-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function postForm(path, formData) {
@@ -150,7 +159,7 @@ export const api = {
     const query = q.toString();
     return getJson(`/api/ops/action-items${query ? `?${query}` : ''}`);
   },
-  createActionItem: (payload) => postJson('/api/ops/action-items', payload),
+  createActionItem: (payload) => postJson('/api/ops/action-items', payload, { 'Idempotency-Key': newIdempotencyKey() }),
   updateActionItem: (id, payload) => fetch(`/api/ops/action-items/${id}`, {
     method: 'PATCH', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
   }).then(handle),
@@ -162,6 +171,7 @@ export const api = {
   markNotificationRead: (id) => postJson(`/api/ops/notifications/${id}/read`),
   markAllNotificationsRead: () => postJson('/api/ops/notifications/read-all'),
   remindMissingReports: () => postJson('/api/ops/notifications/remind-missing'),
+  remindActionItems: () => postJson('/api/ops/notifications/remind-actions'),
 
   submitStaff: (payload) => postJson('/api/ops/staff', payload),
   listStaff: (params = {}) => {
@@ -188,7 +198,7 @@ export const api = {
     const query = q.toString();
     return getJson(`/api/ops/documents${query ? `?${query}` : ''}`);
   },
-  createDocument: (payload) => postJson('/api/ops/documents', payload),
+  createDocument: (payload) => postJson('/api/ops/documents', payload, { 'Idempotency-Key': newIdempotencyKey() }),
   deleteDocument: (id) => fetch(`/api/ops/documents/${id}`, {
     method: 'DELETE', credentials: 'include',
   }).then(handle),

@@ -5,6 +5,7 @@ import AdminSidebar from '../components/AdminSidebar';
 import DatePicker from '../components/DatePicker';
 import Footer from '../components/Footer';
 import LastUpdated from '../components/LastUpdated';
+import useRefreshOnFocus from '../hooks/useRefreshOnFocus';
 import QuadrantStatusCircle from '../components/QuadrantStatusCircle';
 import { BUDGET_BADGE_CLASS, BUDGET_STATUS_LABEL, formatVariance, money } from '../utils/quadrantMetrics';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
@@ -35,6 +36,9 @@ export default function OperationsPage() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // m-09: re-run the load when the tab regains focus (no polling).
+  useRefreshOnFocus(load);
 
   const filtered = useMemo(() => {
     if (!data) return [];

@@ -671,3 +671,30 @@ class JobHeartbeat(Base):
     job_name = Column(String(80), primary_key=True)
     last_run_at = Column(DateTime, nullable=False)
     last_status = Column(String(20), nullable=False)  # ok / failed
+
+
+class IdempotencyKey(Base):
+    """m-10: replay record for Idempotency-Key'd tracker creates.
+
+    A retried request (double-click, network retry) that re-sends the
+    same (user, endpoint, key) gets the stored response back instead of
+    creating a second row. One row per (user, endpoint, key) — the
+    unique constraint is the race guard: two concurrent replays both
+    miss the lookup, but only one insert wins and the loser replays
+    the winner's stored response. The stored body is the exact JSON
+    the first call returned, so a replay is indistinguishable from
+    the original response.
+    """
+    __tablename__ = "idempotency_keys"
+    __table_args__ = (
+        UniqueConstraint("user_id", "endpoint", "idempotency_key",
+                         name="uq_idempotency_user_endpoint_key"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    endpoint = Column(String(200), nullable=False)
+    idempotency_key = Column(String(128), nullable=False)
+    response_status = Column(Integer, nullable=False)
+    response_body = Column(Text, nullable=False)  # JSON of the first response
+    created_at = Column(DateTime, default=_utcnow, nullable=False)

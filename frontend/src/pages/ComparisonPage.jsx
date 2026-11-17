@@ -5,6 +5,7 @@ import { api } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
 import LastUpdated from '../components/LastUpdated';
+import useRefreshOnFocus from '../hooks/useRefreshOnFocus';
 import { useTheme } from '../context/ThemeContext';
 import { BUDGET_BADGE_CLASS, BUDGET_STATUS_LABEL } from '../utils/quadrantMetrics';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
@@ -49,6 +50,9 @@ export default function ComparisonPage() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // m-09: re-run the load when the tab regains focus (no polling).
+  useRefreshOnFocus(load);
 
   const sorted = useMemo(() => {
     if (!data) return [];
