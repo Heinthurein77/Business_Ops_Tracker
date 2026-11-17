@@ -133,6 +133,14 @@ class User(Base):
     # — the only revocation mechanism available for these otherwise-stateless
     # tokens.
     token_version = Column(Integer, default=0, nullable=False)
+    # M-01 (TOTP second factor): the per-user TOTP secret, encrypted at
+    # rest with the same field encryption as the profile columns
+    # (src/crypto.py). totp_enabled is False until the owner proves
+    # possession by confirming a code; the Chairman may not log in at all
+    # without an enabled TOTP (see routers/auth.py login()).
+    totp_secret = Column(EncryptedText, nullable=True)
+    totp_enabled = Column(Boolean, default=False, nullable=False)
+    totp_enrolled_at = Column(DateTime, nullable=True)
     # Set only while the account's password is a Chairman-issued temporary
     # one; login treats an expired temporary password like a wrong one, so an
     # unclaimed credential can't stay live indefinitely. Cleared as soon as
@@ -484,6 +492,19 @@ class CeoProfile(Base):
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
     user = relationship("User")
+
+
+class PasswordHistory(Base):
+    """Last passwords per user (m-27): the last 5 hashes are kept so a
+    password cannot be reused by rotating back to it. Rows older than the
+    newest 5 per user are pruned on write (see src/auth.py
+    record_password_history)."""
+    __tablename__ = "password_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    hashed_password = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
 
 class PasswordResetRequest(Base):

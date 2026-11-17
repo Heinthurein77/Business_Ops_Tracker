@@ -27,6 +27,7 @@ _SCRUBBED = (
     "ENVIRONMENT", "DATABASE_URL", "MIGRATION_DATABASE_URL",
     "JWT_SECRET_KEY", "DATA_ENCRYPTION_KEY", "DATABASE_SSLMODE",
     "DATABASE_CA_CERT", "ALLOW_INSECURE_DATABASE",
+    "ALLOWED_HOSTS", "ALLOWED_ORIGINS",
 )
 
 _GOOD_PROD = {
@@ -37,6 +38,9 @@ _GOOD_PROD = {
     # Any non-empty value passes the presence check (Fernet validity is
     # checked where the key is used, not at boot).
     "DATA_ENCRYPTION_KEY": "test-only-not-a-real-fernet-key",
+    # m-35: both allowlists are required in production.
+    "ALLOWED_HOSTS": "app.example.com,localhost,127.0.0.1",
+    "ALLOWED_ORIGINS": "https://app.example.com",
 }
 
 
@@ -107,6 +111,23 @@ class TestProdRefusals:
     def test_unknown_environment_refused(self, tmp_path):
         _assert_refused(_prod(ENVIRONMENT="staging"), tmp_path, "ENVIRONMENT")
         _assert_refused(_prod(ENVIRONMENT="prod"), tmp_path, "ENVIRONMENT")
+
+    def test_missing_allowed_hosts_refused(self, tmp_path):
+        # m-35: production must not boot with the Host check disabled.
+        env = _prod()
+        del env["ALLOWED_HOSTS"]
+        _assert_refused(env, tmp_path, "ALLOWED_HOSTS")
+
+    def test_missing_allowed_origins_refused(self, tmp_path):
+        env = _prod()
+        del env["ALLOWED_ORIGINS"]
+        _assert_refused(env, tmp_path, "ALLOWED_ORIGINS")
+
+    def test_missing_both_allowlists_refused(self, tmp_path):
+        env = _prod()
+        del env["ALLOWED_HOSTS"]
+        del env["ALLOWED_ORIGINS"]
+        _assert_refused(env, tmp_path, "ALLOWED_HOSTS")
 
 
 class TestGoodConfigsBoot:

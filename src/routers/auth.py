@@ -2,6 +2,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -16,6 +17,8 @@ from src.auth import (
     get_optional_user,
     hash_password,
     is_temp_password_expired,
+    password_was_used,
+    record_password_history,
     resolve_redirect_path,
     serialize_user,
     verify_password,
@@ -25,7 +28,23 @@ from src.client_ip import get_client_ip
 from src.config import settings
 from src.database import get_db
 from src.models import PasswordResetRequest, User
-from src.schemas import ForcePasswordChangeRequest, ForgotPasswordRequest, LoginRequest, PASSWORD_MAX_BYTES, password_policy_error
+from src.schemas import (
+    ForcePasswordChangeRequest,
+    ForgotPasswordRequest,
+    LoginRequest,
+    TotpConfirmRequest,
+    TotpDisableRequest,
+    TotpEnrollRequest,
+    PASSWORD_MAX_BYTES,
+    password_policy_error,
+)
+from src.totp import (
+    decode_totp_setup_token,
+    issue_totp_setup_token,
+    new_totp_secret,
+    totp_provisioning_uri,
+    verify_totp_code,
+)
 from src.throttle import (
     PASSWORD_CHANGE_FAILED,
     PASSWORD_RESET_REQUESTED,
@@ -128,6 +147,25 @@ def login(payload: LoginRequest, request: Request, response: Response, db: Sessi
         log_audit(db, user, "LOGIN_FAILED", f"username={username}", request, username=username)
         raise HTTPException(status_code=401, detail=_LOGIN_FAILED_DETAIL)
 
+    # M-01: second factor, checked before any session is issued. The
+    # Chairman may not sign in at all without an enrolled TOTP: a correct
+    # password alone earns only a short-lived setup token, and the caller
+    # must complete enrollment (below) before a session exists.
+    if user.role == "Chairman" and not user.totp_enabled:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": "TOTP_ENROLLMENT_REQUIRED",
+                "totp_setup_token": issue_totp_setup_token(user.username),
+            },
+        )
+    if user.totp_enabled:
+        if not payload.totp_code:
+            raise HTTPException(status_code=401, detail="TOTP_REQUIRED")
+        if not verify_totp_code(user.totp_secret, payload.totp_code):
+            log_audit(db, user, "LOGIN_FAILED", f"username={username}", request, username=username)
+            raise HTTPException(status_code=401, detail=_LOGIN_FAILED_DETAIL)
+
     user.last_login_at = utcnow()
     db.commit()
     # Sm-7: login is a session-establishment point — flag a CEO whose row
@@ -135,6 +173,18 @@ def login(payload: LoginRequest, request: Request, response: Response, db: Sessi
     # owner check), the same warning get_current_user emits per request.
     warn_null_bu_ceo(user)
     log_audit(db, user, "LOGIN_SUCCESS", "", request)
+    if user.role == "Chairman":
+        # m-17: the bootstrap password file has served its purpose once
+        # the Chairman signs in — delete it so the credential stops
+        # existing on disk. Local import: main.py imports this router, so
+        # a top-level import would be circular. Best effort only: login
+        # must never fail over cleanup.
+        try:
+            from src.main import _delete_bootstrap_password_file
+
+            _delete_bootstrap_password_file()
+        except Exception:  # noqa: BLE001 - cleanup must not break login
+            logger.warning("Could not delete the bootstrap password file after Chairman login")
 
     _issue_session_cookie(response, user)
     response.headers["Cache-Control"] = "no-store"
@@ -270,11 +320,23 @@ def force_password_change(
         raise HTTPException(status_code=400, detail="Current password is incorrect")
     if payload.new_password == payload.current_password:
         raise HTTPException(status_code=400, detail="New password must be different from your current password")
+    # m-27: rotating back to a recent password is a reuse, not a change.
+    if password_was_used(db, user, payload.new_password):
+        raise HTTPException(
+            status_code=400,
+            detail="That password was used recently — choose a different one",
+        )
 
     try:
+        old_hash = user.hashed_password
         user.hashed_password = hash_password(payload.new_password)
     except InvalidPasswordError:
         raise HTTPException(status_code=400, detail="Password contains invalid characters or is too long")
+    # m-27: record both the outgoing hash and the new one — otherwise a
+    # rotation back to the immediately previous password would not be
+    # caught (the old password was set before history existed).
+    record_password_history(db, user, old_hash)
+    record_password_history(db, user)
     user.require_password_change = False
     user.temp_password_expires_at = None
     bump_token_version(db, user)
@@ -288,3 +350,111 @@ def force_password_change(
     response.headers["Cache-Control"] = "no-store"
 
     return {"ok": True, "redirect_to": resolve_redirect_path(user)}
+
+
+# ---------------------------------------------------------------------------
+# TOTP second factor (M-01)
+# ---------------------------------------------------------------------------
+
+def _resolve_totp_user(db: Session, session_user, setup_token):
+    """The account a TOTP enrollment/confirm call acts on: the live session
+    when there is one, else the username carried by a valid setup token
+    (issued by login() after a correct password for a Chairman with no
+    enrolled TOTP). Neither credential alone is a session — enrollment
+    only stores a secret until a code proves possession."""
+    if session_user is not None:
+        return session_user
+    username = decode_totp_setup_token(setup_token)
+    if username is None:
+        return None
+    return db.query(User).filter(User.username == username).first()
+
+
+@router.post("/totp/enroll")
+def totp_enroll(
+    payload: TotpEnrollRequest,
+    request: Request,
+    user: User = Depends(get_optional_user),
+    db: Session = Depends(get_db),
+):
+    """Starts (or restarts) TOTP enrollment: generates a fresh secret,
+    stores it encrypted, and returns the otpauth URL + secret for the
+    authenticator app. The secret is NOT enabled until /totp/confirm
+    proves possession with a code."""
+    target = _resolve_totp_user(db, user, payload.setup_token)
+    if target is None or not target.is_active:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    if target.totp_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="Two-factor authentication is already enabled for this account",
+        )
+    secret = new_totp_secret()
+    target.totp_secret = secret
+    target.totp_enabled = False
+    target.totp_enrolled_at = None
+    db.commit()
+    log_audit(db, target, "TOTP_ENROLL_STARTED", "", request)
+    return {"otpauth_url": totp_provisioning_uri(secret, target.username), "secret": secret}
+
+
+@router.post("/totp/confirm")
+def totp_confirm(
+    payload: TotpConfirmRequest,
+    request: Request,
+    user: User = Depends(get_optional_user),
+    db: Session = Depends(get_db),
+):
+    """Completes enrollment: the code proves the owner holds the
+    authenticator the secret was just shown to. Only after this does
+    login() start demanding a code."""
+    target = _resolve_totp_user(db, user, payload.setup_token)
+    if target is None or not target.is_active:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    if target.totp_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="Two-factor authentication is already enabled for this account",
+        )
+    if not target.totp_secret:
+        raise HTTPException(
+            status_code=400,
+            detail="Start two-factor setup first — no enrollment is in progress",
+        )
+    if not verify_totp_code(target.totp_secret, payload.code):
+        log_audit(db, target, "TOTP_CONFIRM_FAILED", "", request)
+        raise HTTPException(
+            status_code=400,
+            detail="That code is not valid — check your authenticator app and try again",
+        )
+    target.totp_enabled = True
+    target.totp_enrolled_at = utcnow()
+    db.commit()
+    log_audit(db, target, "TOTP_ENABLED", "", request)
+    return {"ok": True}
+
+
+@router.post("/totp/disable")
+def totp_disable_self(
+    payload: TotpDisableRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Removes the caller's own TOTP enrollment (proving possession with
+    a current code). Every session is revoked: a fresh sign-in is
+    required, and a Chairman must enroll again before any new session is
+    issued."""
+    if not user.totp_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="Two-factor authentication is not enabled for this account",
+        )
+    if not verify_totp_code(user.totp_secret, payload.code):
+        raise HTTPException(status_code=400, detail="That code is not valid")
+    user.totp_secret = None
+    user.totp_enabled = False
+    user.totp_enrolled_at = None
+    bump_token_version(db, user)
+    log_audit(db, user, "TOTP_DISABLED", "", request)
+    return {"ok": True}

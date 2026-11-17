@@ -223,16 +223,21 @@ def _alert_breaker_trip(action: str, total: int, distinct_ips: int, distinct_use
     )
 
 
-def check_client_ip_configuration() -> None:
+def check_client_ip_configuration() -> bool:
     """SM-3 startup self-check: resolve the client IP for a synthetic
     request shaped like the deployed proxy setup and verify it is not a
     private address. When CLIENT_IP_HEADER / TRUSTED_PROXY_HOPS is
     misconfigured the app sees the proxy's own (private) address for every
     caller, per-IP throttling silently switches off, and only the
     per-username lockout stands between a guessing run and the global
-    breaker. Best effort and never raises — a failed check must not stop
-    the app from starting; the ERROR log line (picked up by the log scan)
-    is the signal.
+    breaker.
+
+    Returns True when the check passes, False when it fails (the failure is
+    also logged at ERROR, so the daily log scan picks it up). It never
+    raises — callers decide what a failure means: in production
+    enforce_client_ip_configuration() turns it into a startup failure
+    (m-28), because a silently disabled per-IP throttle is not a condition
+    to serve traffic under.
 
     The synthetic request carries a public client IP (8.8.8.8) as seen by
     one private proxy hop, which is the shape the production Caddy setup
@@ -264,6 +269,7 @@ def check_client_ip_configuration() -> None:
                 "proxied request — per-IP throttling may be off. Check CLIENT_IP_HEADER / "
                 "TRUSTED_PROXY_HOPS."
             )
+            return False
         elif not ip_is_throttle_key(resolved):
             logger.error(
                 "Startup client-IP self-check: resolved client IP %s is a private address — "
@@ -271,8 +277,26 @@ def check_client_ip_configuration() -> None:
                 "TRUSTED_PROXY_HOPS (and run uvicorn with --no-proxy-headers).",
                 resolved,
             )
+            return False
+        return True
     except Exception as exc:  # noqa: BLE001 - self-check must never break startup
         logger.warning("Startup client-IP self-check failed to run: %s", exc)
+        return False
+
+
+def enforce_client_ip_configuration() -> None:
+    """m-28: fails startup in production when the client-IP self-check
+    fails. A misconfigured proxy silently disables per-IP login throttling
+    — the app must not serve traffic in that state. Outside production
+    the check is advisory only (local dev has no proxy at all)."""
+    from src.config import settings
+
+    if settings.IS_PRODUCTION and not check_client_ip_configuration():
+        raise RuntimeError(
+            "Client-IP self-check failed in production — per-IP login throttling "
+            "would be disabled. Check CLIENT_IP_HEADER / TRUSTED_PROXY_HOPS "
+            "(and run uvicorn with --no-proxy-headers)."
+        )
 
 
 def _seconds_until_below_limit(
@@ -424,7 +448,15 @@ def check_login_throttle(db: Session, username: str, ip: Optional[str], now: Opt
     # ORIGINAL trigger — attempts now cannot extend it — and the failure
     # count for a new lock starts from the cycle epoch, so nothing recorded
     # before or during this lock can re-trigger the next one.
-    trusted = _has_recent_success(db, username, ip, now)
+    # m-28: the trusted-IP bypass never applies to the Chairman account.
+    # On a shared office/NAT egress IP, an on-network attacker would
+    # otherwise inherit the bypass for any account that has logged in from
+    # that IP — including the single most privileged account. The Chairman
+    # always faces the full per-username lockout, trusted network or not.
+    is_chairman = (
+        db.query(User.role).filter(User.username == username).scalar() == "Chairman"
+    )
+    trusted = _has_recent_success(db, username, ip, now) and not is_chairman
     remaining, epoch = _lock_state(db, username, now)
     if remaining is not None:
         return None if trusted else Throttled(remaining)

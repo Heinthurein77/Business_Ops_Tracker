@@ -27,6 +27,9 @@ bcrypt==4.0.1
 # (Fernet) and it used to arrive only as a transitive dependency of python-jose.
 PyJWT==2.15.0
 cryptography==50.0.1
+# pyotp (M-01): TOTP second factor — RFC 6238 time-based one-time codes
+# for the Chairman (required) and any other account that enrolls.
+pyotp==2.9.0
 boto3==1.35.90
 openpyxl==3.1.5
 python-dotenv==1.2.3

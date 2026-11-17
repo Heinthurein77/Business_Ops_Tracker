@@ -68,6 +68,13 @@ MATRIX = {
     # Unlock-login is the one users route HO may use (it lives on the
     # /api/admin router, prefix /api/admin).
     ("POST", "/api/admin/users/{user_id}/unlock-login"): {"Chairman", "HO"},
+    # M-01: TOTP enrollment is reachable with a live session OR a
+    # short-lived setup token (get_optional_user), self-disable needs a
+    # session, and the admin reset is Chairman-only.
+    ("POST", "/api/auth/totp/enroll"): {"OPTIONAL"},
+    ("POST", "/api/auth/totp/confirm"): {"OPTIONAL"},
+    ("POST", "/api/auth/totp/disable"): {"AUTHENTICATED"},
+    ("POST", "/api/admin/users/{user_id}/totp-disable"): {"Chairman"},
 }
 
 

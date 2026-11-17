@@ -7,6 +7,7 @@ Access model mirrors the rest of the app:
 """
 import logging
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query

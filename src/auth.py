@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from src.config import settings
 from src.database import get_db
-from src.models import User
+from src.models import PasswordHistory, User
 from src.utils import utcnow
 
 logger = logging.getLogger(__name__)
@@ -124,6 +124,43 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         # A password passlib refuses to process (NUL byte, oversize) can never
         # match a stored hash — a failed check, not a server error.
         return False
+
+
+# --- Password history (m-27) ---
+
+PASSWORD_HISTORY_KEEP = 5
+
+
+def record_password_history(db: Session, user: User, hashed_password: Optional[str] = None) -> None:
+    """Records a hash in the history and prunes everything older than the
+    newest PASSWORD_HISTORY_KEEP rows for that user, so the table stays
+    bounded. Records `hashed_password` when given, else the user's current
+    hash. Callers commit (force-password-change commits via
+    bump_token_version; the admin reset paths commit the same way)."""
+    db.add(PasswordHistory(user_id=user.id, hashed_password=hashed_password or user.hashed_password))
+    db.flush()
+    rows = (
+        db.query(PasswordHistory)
+        .filter(PasswordHistory.user_id == user.id)
+        .order_by(PasswordHistory.id.desc())
+        .all()
+    )
+    for stale in rows[PASSWORD_HISTORY_KEEP:]:
+        db.delete(stale)
+
+
+def password_was_used(db: Session, user: User, plain_password: str) -> bool:
+    """True when `plain_password` matches any of the user's last
+    PASSWORD_HISTORY_KEEP hashes — a rotation back to a recent password is
+    a reuse, not a change."""
+    rows = (
+        db.query(PasswordHistory)
+        .filter(PasswordHistory.user_id == user.id)
+        .order_by(PasswordHistory.id.desc())
+        .limit(PASSWORD_HISTORY_KEEP)
+        .all()
+    )
+    return any(verify_password(plain_password, row.hashed_password) for row in rows)
 
 
 def is_temp_password_expired(user: User, now: Optional[datetime] = None) -> bool:
@@ -271,4 +308,6 @@ def serialize_user(user: User) -> dict:
         "business_unit_id": user.business_unit_id,
         "require_password_change": user.require_password_change,
         "profile_completed": user.is_profile_completed,
+        # M-01: drives the frontend's two-factor setup prompt.
+        "totp_enabled": bool(getattr(user, "totp_enabled", False)),
     }

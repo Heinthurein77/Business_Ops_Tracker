@@ -70,7 +70,7 @@ services:
       # but the container clock also stamps model date defaults — keep
       # it on Yangon time so nothing lands on the previous day.
       TZ: Asia/Yangon
-      DATABASE_URL: <redacted>
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set to the Neon connection string}
       # Database TLS (D-m8) — same values as the app service below:
       # migrations connect through the same config, so the migrate job
       # must verify the server's identity too, not just the web process.

@@ -472,13 +472,16 @@ class TestBootstrapChairmanPassword:
 
         chairman = db.query(User).filter(User.username == "chairman").one()
         assert chairman.require_password_change is True
-        password_file = tmp_path / ".bootstrap_chairman_password"
+        # m-17: the file lives next to the uploads directory, never inside
+        # it (the uploads directory is served in non-production).
+        password_file = tmp_path.parent / ".bootstrap_chairman_password"
         assert password_file.is_file()
         assert stat.S_IMODE(password_file.stat().st_mode) == 0o600
         full_password = password_file.read_text()
         assert len(full_password) >= 12
         assert verify_password(full_password, chairman.hashed_password)
-        # The log carries only a truncated hint, never the full value.
+        # The log carries the file path only — never the full value, and
+        # not even a prefix hint (m-17).
         assert full_password not in caplog.text
-        assert full_password[:4] in caplog.text
+        assert full_password[:4] not in caplog.text
         assert str(password_file) in caplog.text

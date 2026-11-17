@@ -22,7 +22,21 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 
-from src.crypto import ENCRYPTED_COLUMNS, decrypt_text, encrypt_text, encryption_enabled, is_encrypted
+from src.crypto import decrypt_text, encrypt_text, encryption_enabled, is_encrypted
+
+# Frozen at this revision (2026-09-24): the columns this migration widens
+# and backfills. Do NOT import the live ENCRYPTED_COLUMNS from src/crypto
+# here — a migration must describe the schema as it was at its own
+# revision, and a later column (e.g. users.totp_secret, added 2026-11-17)
+# does not exist yet when this runs on a fresh database.
+ENCRYPTED_COLUMNS = [
+    ("ceo_profiles", "phone_number"),
+    ("ceo_profiles", "email"),
+    ("ceo_profiles", "address"),
+    ("ceo_profiles", "date_of_birth"),
+    ("health_statuses", "other_notes"),
+    ("ho_health_statuses", "other_notes"),
+]
 
 
 revision: str = 'd3e7f1a5c9b4'

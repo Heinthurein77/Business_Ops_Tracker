@@ -66,7 +66,7 @@ _report_submit_timestamps: dict[int, deque] = defaultdict(deque)
 _report_submit_lock = threading.Lock()
 
 MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
-ALLOWED_ATTACHMENT_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "gif", "webp", "doc", "docx", "xls", "xlsx", "csv", "txt"}
+ALLOWED_ATTACHMENT_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "gif", "webp", "docx", "xlsx", "csv", "txt"}
 
 logger = logging.getLogger(__name__)
 

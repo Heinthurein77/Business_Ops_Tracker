@@ -218,6 +218,23 @@ export default function ManageUsersPage() {
     }
   }
 
+  async function handleResetTotp(u) {
+    // M-01: lost authenticator device. Clearing revokes every session for
+    // the account; a Chairman must enroll again before any new session is
+    // issued, so this can never leave that account password-only.
+    setBusyUserId(u.id);
+    setBanner(null);
+    try {
+      await api.totpDisableUser(u.id);
+      await loadUsers();
+      showBanner({ text: `${u.username}'s two-factor authentication was reset — they will set it up again at next sign-in.`, tone: 'success' });
+    } catch (err) {
+      showBanner({ text: err instanceof ApiError ? err.message : 'Failed to reset two-factor authentication', tone: 'error' });
+    } finally {
+      setBusyUserId(null);
+    }
+  }
+
   if (!users) {
     return (
       <div className={`min-h-screen flex items-center justify-center ${PAGE_BG}`}>
@@ -539,6 +556,9 @@ export default function ManageUsersPage() {
                         {u.login_locked && (
                           <span className="text-[11px] font-semibold text-red-700 dark:text-red-400 bg-red-500/10 border border-red-500/20 dark:border-red-500/30 px-2.5 py-0.5 rounded-full">Login locked</span>
                         )}
+                        {u.totp_enabled && (
+                          <span className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 dark:border-indigo-500/30 px-2.5 py-0.5 rounded-full">2FA on</span>
+                        )}
                       </div>
                     </td>
                     <td className="px-6 py-3.5 text-slate-500 dark:text-slate-400">{u.last_login_display || 'Never'}</td>
@@ -552,6 +572,16 @@ export default function ManageUsersPage() {
                             className="text-xs font-semibold text-white bg-red-600 hover:bg-red-700 px-3 py-1.5 rounded-lg shadow-sm shadow-red-600/30 transition-colors disabled:opacity-50 whitespace-nowrap"
                           >
                             Unlock Login
+                          </button>
+                        )}
+                        {u.totp_enabled && (
+                          <button
+                            type="button"
+                            disabled={busyUserId === u.id}
+                            onClick={() => handleResetTotp(u)}
+                            className="text-xs font-semibold text-indigo-700 dark:text-indigo-400 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/20 dark:border-indigo-500/30 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50 whitespace-nowrap"
+                          >
+                            Reset 2FA
                           </button>
                         )}
                         <button

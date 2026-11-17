@@ -64,8 +64,27 @@ User unlock (`POST /api/admin/users/{id}/unlock-login`) is Chairman + HO.
 | HO | `/api/ho/*` (dashboard, monthly-target, submit-report) | HO only |
 | Admin — shared | `/api/admin/*` except the Chairman-only list above (overview, comparison, operations, business units, report logs, CEO profiles, health/activity dashboards, exports) | Chairman, HO |
 | Admin — Chairman-only | See table above | Chairman only |
-| Users (on the `/api/admin` router) | `/api/admin/users/*` (create/list/deactivate/reset — Chairman; unlock-login — Chairman, HO) and `/api/admin/password-resets/*` (Chairman) | Chairman (unlock: + HO) |
+| Users (on the `/api/admin` router) | `/api/admin/users/*` (create/list/deactivate/reset — Chairman; unlock-login — Chairman, HO; totp-disable — Chairman) and `/api/admin/password-resets/*` (Chairman) | Chairman (unlock: + HO) |
 | Ops — everything else | Action items, notifications, staff, customers, documents, forecast | Any authenticated user — **BU scoping is enforced inside the handler** (`bu_scope`), not by a role gate. A CEO naming another BU gets 403; Chairman/HO pass a BU explicitly. |
+| TOTP second factor | `POST /api/auth/totp/enroll`, `POST /api/auth/totp/confirm` (live session **or** short-lived setup token), `POST /api/auth/totp/disable` (session + current code), `POST /api/admin/users/{id}/totp-disable` (Chairman) | See below |
+
+## TOTP second factor (M-01)
+
+- The Chairman **must** have TOTP enrolled: `POST /api/auth/login` with a
+  correct password but no enrolled TOTP returns 403
+  `TOTP_ENROLLMENT_REQUIRED` with a 10-minute setup token and issues **no
+  session**. Enrollment (`/totp/enroll` → `/totp/confirm`) accepts that
+  token or a live session; only after confirming a code does login demand
+  one (`TOTP_REQUIRED` when missing, generic 401 when wrong).
+- HO/CEO enrollment is optional, via the same endpoints or the
+  `/totp-setup` page. The per-user secret is encrypted at rest
+  (`users.totp_secret`, `src/crypto.py`).
+- Recovery when the device is lost: the Chairman clears an enrollment from
+  User Management (`POST /api/admin/users/{id}/totp-disable`, which also
+  revokes every session for the account), or an operator runs
+  `python -m src.scripts.reset_totp <username>`. Clearing the Chairman's
+  enrollment forces re-enrollment at the next sign-in, so the account is
+  never left password-only.
 
 ## Rules for adding a route
 
