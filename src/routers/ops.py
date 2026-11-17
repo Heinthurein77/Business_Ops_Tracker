@@ -3754,8 +3754,13 @@ def list_quotations(business_unit_id: Optional[int] = None, status: Optional[str
 
 
 @router.post("/quotations")
-def create_quotation(payload: QuotationIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_quotation(payload: QuotationIn, user: User = Depends(get_current_user), db: Session = Depends(get_db),
+                     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     bu_scope(user, payload.business_unit_id)
+    endpoint = "POST /api/ops/quotations"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
     cust = db.query(Customer).filter(Customer.id == payload.customer_id, Customer.is_active == True).first()  # noqa: E712
     if not cust or cust.business_unit_id != payload.business_unit_id:
         raise HTTPException(404, "Customer not found in this BU")
@@ -3783,7 +3788,9 @@ def create_quotation(payload: QuotationIn, user: User = Depends(get_current_user
     db.commit()
     db.refresh(q)
     _log_audit(db, user, "CREATE_QUOTATION", f"id={q.id}")
-    return serialize_quotation(db, q)
+    out = serialize_quotation(db, q)
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
+    return out
 
 
 class QuotationUpdate(BaseModel):
@@ -4527,11 +4534,16 @@ def list_advances(business_unit_id: Optional[int] = None, status: Optional[str] 
 
 
 @router.post("/staff-advances")
-def create_advance(payload: AdvanceIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_advance(payload: AdvanceIn, user: User = Depends(get_current_user), db: Session = Depends(get_db),
+                   idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     emp = db.query(Employee).filter(Employee.id == payload.employee_id, Employee.is_active == True).first()  # noqa: E712
     if not emp:
         raise HTTPException(404, "Employee not found")
     bu_scope(user, emp.business_unit_id)
+    endpoint = "POST /api/ops/staff-advances"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
     adv = StaffAdvance(
         employee_id=emp.id, business_unit_id=emp.business_unit_id,
         amount=Decimal(str(payload.amount)), remaining_amount=Decimal(str(payload.amount)),
@@ -4543,7 +4555,9 @@ def create_advance(payload: AdvanceIn, user: User = Depends(get_current_user), d
     db.commit()
     db.refresh(adv)
     _log_audit(db, user, "CREATE_ADVANCE", f"id={adv.id}")
-    return serialize_advance(db, adv)
+    out = serialize_advance(db, adv)
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
+    return out
 
 
 @router.post("/staff-advances/{advance_id}/approve")

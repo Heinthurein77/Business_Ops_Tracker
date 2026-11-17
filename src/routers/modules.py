@@ -1080,9 +1080,14 @@ def list_stock_transfers(from_business_unit_id: Optional[int] = None,
 
 @router.post("/stock-transfers")
 def create_stock_transfer(payload: StockTransferIn, user: User = Depends(get_current_user),
-                          db: Session = Depends(get_db)):
+                          db: Session = Depends(get_db),
+                          idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     from src.models import StockTransfer, StockTransferLine
     bu_scope(user, payload.from_business_unit_id)
+    endpoint = "POST /api/modules/stock-transfers"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
     if payload.from_business_unit_id == payload.to_business_unit_id:
         raise HTTPException(400, "Source and destination must be different BUs")
     if not db.query(BusinessUnit).filter(BusinessUnit.id == payload.to_business_unit_id).first():
@@ -1111,7 +1116,9 @@ def create_stock_transfer(payload: StockTransferIn, user: User = Depends(get_cur
     db.commit()
     db.refresh(t)
     _log_audit(db, user, "CREATE_STOCK_TRANSFER", f"id={t.id}")
-    return serialize_transfer(db, t)
+    out = serialize_transfer(db, t)
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
+    return out
 
 
 @router.post("/stock-transfers/{transfer_id}/send")

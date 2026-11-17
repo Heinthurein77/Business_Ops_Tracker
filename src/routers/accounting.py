@@ -612,9 +612,15 @@ class JournalIn(BaseModel):
 
 @router.post("/journal")
 def create_journal(payload: JournalIn, user: User = Depends(require_accounting),
-                   db: Session = Depends(get_db)):
+                   db: Session = Depends(get_db),
+                   idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
+    from src.routers.ops import _idempotency_lookup, _idempotency_store
     check_bu_access(user, payload.business_unit_id)
     bu_or_404(db, payload.business_unit_id)
+    endpoint = "POST /api/accounting/journal"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
     lines = [ln.model_dump() for ln in payload.lines]
     e = create_entry(db, payload.business_unit_id, payload.entry_date,
                      payload.description or "", "manual", user.id, lines,
@@ -629,7 +635,9 @@ def create_journal(payload: JournalIn, user: User = Depends(require_accounting),
     db.commit()
     db.refresh(e)
     _log_audit(db, user, "CREATE_JOURNAL", f"id={e.id}")
-    return serialize_entry(db, e)
+    out = serialize_entry(db, e)
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
+    return out
 
 
 @router.get("/journal")
@@ -1838,11 +1846,17 @@ def list_bank_txns(bank_id: int, user: User = Depends(require_accounting),
 
 @router.post("/bank-accounts/{bank_id}/transactions")
 def add_bank_txn(bank_id: int, payload: BankTxnIn, user: User = Depends(require_accounting),
-                 db: Session = Depends(get_db)):
+                 db: Session = Depends(get_db),
+                 idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
+    from src.routers.ops import _idempotency_lookup, _idempotency_store
     b = db.query(BankAccount).filter(BankAccount.id == bank_id).first()
     if not b:
         raise HTTPException(404, "Bank account not found")
     check_bu_access(user, b.business_unit_id)
+    endpoint = "POST /api/accounting/bank-accounts/{bank_id}/transactions"
+    replay = _idempotency_lookup(db, user, endpoint, idempotency_key)
+    if replay is not None:
+        return replay
     t = BankTransaction(bank_account_id=bank_id, txn_date=payload.txn_date,
                         description=payload.description,
                         deposit=Decimal(str(payload.deposit)),
@@ -1852,7 +1866,9 @@ def add_bank_txn(bank_id: int, payload: BankTxnIn, user: User = Depends(require_
     db.commit()
     db.refresh(t)
     _log_audit(db, user, "ADD_BANK_TXN", f"bank_id={bank_id}")
-    return {"id": t.id, "ok": True}
+    out = {"id": t.id, "ok": True}
+    _idempotency_store(db, user, endpoint, idempotency_key, out)
+    return out
 
 
 class ReconcileIn(BaseModel):
