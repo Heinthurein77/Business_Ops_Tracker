@@ -6,7 +6,9 @@ Access model mirrors the rest of the app:
 - Chairman / HO ("admin"): all business units
 """
 import logging
-from datetime import date, datetime, timedelta
+import threading
+from contextlib import contextmanager
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from src.auth import get_current_user, require_roles
 from src.database import get_db
-from src.utils import _sanitize_excel_cell, log_audit, today_local, utcnow, validate_period
+from src.utils import APP_TZ, _sanitize_excel_cell, log_audit, today_local, utcnow, validate_period
 from src.models import (
     ActionItem,
     ActivityLog,
@@ -36,6 +38,24 @@ router = APIRouter(prefix="/api/ops", tags=["ops"])
 require_admin = require_roles("Chairman", "HO")
 
 logger = logging.getLogger(__name__)
+
+# m-08: one in-process lock for the manual reminder endpoints. The cron
+# lines already have flock, but a manual trigger (or two admins clicking)
+# runs in-process with no lock — overlapping runs could both pass a
+# throttle/dedupe check before either commits. Non-blocking: if held,
+# the caller gets a clear 409 instead of a duplicate run.
+_REMINDER_LOCK = threading.Lock()
+
+
+@contextmanager
+def _reminder_lock_or_409():
+    if not _REMINDER_LOCK.acquire(blocking=False):
+        raise HTTPException(
+            409, "A reminder run is already in progress — please try again shortly.")
+    try:
+        yield
+    finally:
+        _REMINDER_LOCK.release()
 
 def _log_audit(db, user, action, details=""):
     """Local wrapper around src.utils.log_audit (R-3 audit trail).
@@ -307,13 +327,22 @@ def mark_all_read(user: User = Depends(get_current_user), db: Session = Depends(
 @router.post("/notifications/remind-missing")
 def remind_missing(user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Notify CEOs whose BU has not submitted today's DailyFinancial."""
-    _log_audit(db, user, "REMIND_MISSING", "")
-    return {"notified": run_remind_missing_reports(db)}
+    with _reminder_lock_or_409():
+        _log_audit(db, user, "REMIND_MISSING", "")
+        return {"notified": run_remind_missing_reports(db)}
 
 
 def run_remind_missing_reports(db: Session) -> int:
-    """Job-callable: notify CEOs whose BU hasn't submitted today."""
+    """Job-callable: notify CEOs whose BU hasn't submitted today.
+
+    m-08: deduped per CEO per day — unlike the 7-day throttles on
+    document-expiry and action-item reminders, this used to send one
+    notification per run, so a manual re-run (or a cron + manual overlap)
+    duplicated reminders. "Today" is the Yangon business day, so the
+    cutoff is Yangon midnight expressed in UTC (created_at is naive UTC).
+    """
     today = today_local()
+    day_start_utc = datetime.combine(today, time.min).replace(tzinfo=APP_TZ).astimezone(timezone.utc).replace(tzinfo=None)
     submitted_bu_ids = {
         row[0] for row in db.query(DailyFinancial.business_unit_id).filter(DailyFinancial.report_date == today).all()
     }
@@ -321,6 +350,13 @@ def run_remind_missing_reports(db: Session) -> int:
     sent = 0
     for ceo in ceos:
         if ceo.business_unit_id and ceo.business_unit_id not in submitted_bu_ids:
+            already = db.query(Notification).filter(
+                Notification.user_id == ceo.id,
+                Notification.type == "missing_report",
+                Notification.created_at >= day_start_utc,
+            ).first()
+            if already is not None:
+                continue
             db.add(Notification(
                 user_id=ceo.id, type="missing_report",
                 title="Report not submitted today",
@@ -335,8 +371,9 @@ def run_remind_missing_reports(db: Session) -> int:
 @router.post("/notifications/remind-actions")
 def remind_actions(user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Notify assignees of action items due today or overdue."""
-    _log_audit(db, user, "REMIND_ACTIONS", "")
-    return run_remind_action_items(db)
+    with _reminder_lock_or_409():
+        _log_audit(db, user, "REMIND_ACTIONS", "")
+        return run_remind_action_items(db)
 
 
 def run_remind_action_items(db: Session) -> dict:
@@ -613,11 +650,20 @@ def list_documents(business_unit_id: Optional[int] = None, expiring_soon: bool =
     q = db.query(LicenseDocument)
     if bu_id is not None:
         q = q.filter(LicenseDocument.business_unit_id == bu_id)
+    if expiring_soon:
+        # m-11: filter in SQL before pagination. The old code fetched the
+        # page and filtered in Python, so `count` was the post-filter page
+        # length and a page could come back short while matching rows sat
+        # on later pages. Same threshold as before (expiry within 30 days,
+        # including already-expired rows), now enforced by the query — and
+        # `count` is the total matching count, not the page length.
+        horizon = today_local() + timedelta(days=30)
+        q = q.filter(LicenseDocument.expiry_date.isnot(None),
+                     LicenseDocument.expiry_date <= horizon)
+    total = q.count()
     rows = q.order_by(LicenseDocument.expiry_date.asc()).offset(offset).limit(limit).all()
     items = [serialize_document(db, d) for d in rows]
-    if expiring_soon:
-        items = [i for i in items if i["days_left"] is not None and i["days_left"] <= 30]
-    return {"items": items, "count": len(items)}
+    return {"items": items, "count": total}
 
 
 @router.post("/documents")
@@ -654,8 +700,9 @@ def delete_document(document_id: int, user: User = Depends(get_current_user), db
 def check_document_expiry(days: int = 30, user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Notify each BU's CEO + all Chairman/HO about documents expiring within
     `days`. Throttled per document to one alert per 7 days."""
-    _log_audit(db, user, "CHECK_DOCUMENT_EXPIRY", f"days={days}")
-    return run_check_document_expiry(db, days)
+    with _reminder_lock_or_409():
+        _log_audit(db, user, "CHECK_DOCUMENT_EXPIRY", f"days={days}")
+        return run_check_document_expiry(db, days)
 
 
 def run_check_document_expiry(db: Session, days: int = 30) -> dict:

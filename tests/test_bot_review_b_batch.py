@@ -431,3 +431,95 @@ class TestLogScanBlindness:
         err = capsys.readouterr().err
         assert "heartbeat check unavailable" in err
         assert "ALERT" in err
+
+
+# ------------------------------------------------------------------ m-08 / m-11
+
+class TestMissingReportDedupeAndLock:
+    def test_double_run_sends_one_notification(self, db):
+        from decimal import Decimal
+        from src.models import DailyFinancial
+        from src.routers.ops import run_remind_missing_reports
+        # BU1 submitted today; BU2 did not.
+        db.add(DailyFinancial(business_unit_id=1, report_date=today_local(),
+                              revenue=Decimal("1000"), expenses=Decimal("0"),
+                              net_profit=Decimal("0"), cash_in_hand=Decimal("0")))
+        db.commit()
+        assert run_remind_missing_reports(db) == 1
+        assert run_remind_missing_reports(db) == 0
+        notes = db.query(Notification).filter(
+            Notification.type == "missing_report").all()
+        assert len(notes) == 1
+        assert notes[0].user_id == db.test_users["ceo2"].id
+
+    def test_manual_endpoints_409_when_a_run_is_in_progress(self, db):
+        import src.routers.ops as ops
+        chairman = db.test_users["chairman"]
+        assert ops._REMINDER_LOCK.acquire(blocking=False)
+        try:
+            for call in (lambda: ops.remind_missing(user=chairman, db=db),
+                         lambda: ops.remind_actions(user=chairman, db=db),
+                         lambda: ops.check_document_expiry(user=chairman, db=db)):
+                with pytest.raises(HTTPException) as exc:
+                    call()
+                assert exc.value.status_code == 409
+                assert "already in progress" in exc.value.detail
+        finally:
+            ops._REMINDER_LOCK.release()
+
+    def test_manual_endpoint_works_when_lock_free(self, db):
+        import src.routers.ops as ops
+        chairman = db.test_users["chairman"]
+        assert ops.remind_missing(user=chairman, db=db)["notified"] == 2
+
+
+class TestExpiringSoonSqlFilter:
+    def _seed_docs(self, db):
+        from src.models import LicenseDocument
+        today = today_local()
+        docs = [
+            ("Soon 5d", today + timedelta(days=5)),
+            ("Soon 10d", today + timedelta(days=10)),
+            ("Expired", today - timedelta(days=1)),
+            ("Later 40d", today + timedelta(days=40)),
+            ("Later 100d", today + timedelta(days=100)),
+        ]
+        for title, expiry in docs:
+            db.add(LicenseDocument(business_unit_id=1, title=title,
+                                   document_type="license", expiry_date=expiry,
+                                   created_by_id=db.test_users["ceo"].id))
+        db.commit()
+
+    def test_expiring_soon_counts_all_matches_not_just_the_page(self, db):
+        from src.routers.ops import list_documents
+        self._seed_docs(db)
+        ceo = db.test_users["ceo"]
+        # 3 matching rows (5d, 10d, expired); limit 2 must still report 3.
+        out = list_documents(expiring_soon=True, limit=2, offset=0, user=ceo, db=db)
+        assert out["count"] == 3
+        assert len(out["items"]) == 2
+        assert {i["title"] for i in out["items"]} <= {"Soon 5d", "Soon 10d", "Expired"}
+
+    def test_expiring_soon_second_page_reaches_remaining_match(self, db):
+        from src.routers.ops import list_documents
+        self._seed_docs(db)
+        ceo = db.test_users["ceo"]
+        out = list_documents(expiring_soon=True, limit=2, offset=2, user=ceo, db=db)
+        assert out["count"] == 3
+        assert len(out["items"]) == 1
+        assert out["items"][0]["title"] in {"Soon 5d", "Soon 10d", "Expired"}
+
+    def test_expiring_soon_never_returns_far_future_docs(self, db):
+        from src.routers.ops import list_documents
+        self._seed_docs(db)
+        ceo = db.test_users["ceo"]
+        out = list_documents(expiring_soon=True, limit=100, offset=0, user=ceo, db=db)
+        assert {i["title"] for i in out["items"]} == {"Soon 5d", "Soon 10d", "Expired"}
+
+    def test_unfiltered_list_still_returns_everything(self, db):
+        from src.routers.ops import list_documents
+        self._seed_docs(db)
+        ceo = db.test_users["ceo"]
+        out = list_documents(expiring_soon=False, limit=100, offset=0, user=ceo, db=db)
+        assert out["count"] == 5
+        assert len(out["items"]) == 5
