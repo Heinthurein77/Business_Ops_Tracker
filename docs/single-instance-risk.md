@@ -9,7 +9,7 @@ is a known procedure instead of a surprise.
 
 | Layer | As deployed | Why it is single |
 |---|---|---|
-| App | One `bot_app` container, one uvicorn worker (`Dockerfile` CMD has no `--workers`) | A crash, a bad deploy, or one long-running request blocks the whole group ERP |
+| App | One `bot_app` container, one uvicorn worker (`Dockerfile` CMD has no `--workers`) | A crash, a bad deploy, or one long-running request blocks the whole tracker |
 | Database | One Neon Postgres database, no replica/standby in either deploy path (the DO database is explicitly a dev-tier single node, `production: false`) | Neon down = whole app down, including the CEO daily-report form |
 | Uploads | One Cloudflare R2 bucket, no versioning configured in the repo (versioning is a dashboard step — see `docs/backup-recovery.md`) | Bucket loss = attachment loss, except what versioning retains |
 | Proxy (compose path) | One Caddy container (tls profile only) | Caddy down = no public access (the app itself keeps running on 127.0.0.1:8123) |
@@ -51,9 +51,9 @@ split (and effectively double) it; moving it to the DB comes first.
    second). RPO 1 h, RTO 4 h.
 
 ### R2 down / uploads failing
-1. Receipt uploads fail loud (503) by design; CEO/HO daily-report
-   attachments are the silent case — check `~/bot-log-scan.log` for
-   the R2 failure lines and re-attach the missing documents.
+1. CEO/HO daily-report attachments are the silent case — check
+   `~/bot-log-scan.log` for the R2 failure lines and re-attach the
+   missing documents.
 2. If R2 is down for an extended period, the app keeps working without
    uploads (local fallback is dev-only and refuses in production);
    tell users to hold attachments and upload once R2 is back.

@@ -37,10 +37,10 @@ data goes in.
    ```bash
    DATABASE_URL='<scratch connection string>' alembic heads
    DATABASE_URL='<scratch connection string>' alembic upgrade head
-   # expect: single head ee078d0716ad, upgrade is a no-op
+   # expect: single head a720b6b7c616, upgrade is a no-op
    ```
 3. Start the app against the scratch DB (test env) and spot-check: a
-   CEO can log in, the trial balance balances (Dr = Cr), and one
+   CEO can log in, the CEO dashboard loads, and one
    attachment URL resolves from R2.
 4. Record the drill (date, restorer, time taken, result) in the runbook.
    A drill that is not recorded did not happen.
@@ -56,7 +56,8 @@ data goes in.
 4. Run the migration-chain check above against the restored DB.
 5. Update `DATABASE_URL` (and `MIGRATION_DATABASE_URL`, if the roles
    are in use) to the restored database and `up -d --build`.
-6. Verify §2D of the runbook (login, FinanceStrip, trial balance).
+6. Verify §2D of the runbook (login, CEO dashboard, one attachment
+   resolves).
 7. If Neon PITR is unavailable, restore the latest weekly dump instead:
    ```bash
    pg_restore -d '<new empty database URL>' --clean --if-exists ~/bot-backups/bot-<latest>.dump

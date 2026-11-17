@@ -8,18 +8,18 @@ rule differently.
 
 Source of truth in code: `src/auth.py` (`require_roles`, `get_current_user`,
 `bump_token_version`), `src/models.py` (`User.role`,
-`ck_users_bu_assignment`), `src/routers/accounting.py`
-(`scoped_bu_id`, `check_bu_access`, `effective_bu_id`,
-`require_group_access`), `src/routers/ops.py` (`bu_scope`).
+`ck_users_bu_assignment`), `src/routers/ops.py` (`bu_scope`).
 
-## The four roles
+(The Accountant role and the whole `/api/accounting/*` group were
+deleted with the ERP removal, 2026-11-17. There are three roles now.)
+
+## The three roles
 
 | Role | Who | Scope |
 |---|---|---|
 | **Chairman** | The owner. Exactly one account. | Group-wide. Only role that can manage users, approve password resets, and use the HO monthly-target override. |
 | **HO** (Head Office staff) | Head-office staff. | Group-wide. Sees and approves across all BUs. Cannot manage users, cannot approve password resets, cannot use the HO monthly-target override (that override would let HO bypass the once-a-month lock its own `/api/ho/monthly-target` enforces — see `src/routers/admin.py`). |
 | **CEO** | One per business unit (at most one *active* CEO per BU, enforced by a partial unique index). | Pinned to exactly one BU (`business_unit_id` is NOT NULL for CEOs). Every CEO endpoint resolves the BU from the user, never from a request parameter. |
-| **Accountant** | Per-BU bookkeeper (created by the Chairman). | Pinned to one BU — except legacy accountants (see below). |
 
 Roles are a single string column (`User.role`); there is no multi-role or
 permission-flag system. A request is authenticated by the `__Host-`
@@ -28,28 +28,15 @@ session cookie (production) carrying an HS256 JWT (`sub`, `tv`,
 every password change, which revokes **all** of that user's sessions at
 once. There is no per-device session list (see `docs/session-policy.md`).
 
-## Per-BU pinning (and the legacy NULL-BU accountant)
+## Per-BU pinning
 
-- **CEO:** `business_unit_id` always set. `ops.bu_scope` and
-  `accounting.check_bu_access` reject any other BU with 403; naming no BU
-  means their own BU. CEOs can only read/write their own BU's ops,
-  inventory, expenses, payroll, and accounting data.
-- **Accountant, created after 2026-10-22:** creating an accountant
-  REQUIRES a `business_unit_id`, and it can never be unassigned afterwards.
-  The accountant is pinned across the accounting API
-  (`accounting.scoped_bu_id` / `effective_bu_id`): naming another BU is a
-  403, naming none means their BU. Group-level surfaces — consolidated
-  reports, BU comparison, intercompany, finance summary — are 403 for a
-  BU-assigned accountant (`require_group_access`); the frontend also hides
-  the Group tab for them.
-- **Accountant, legacy (created before per-BU assignment existed):**
-  `business_unit_id` is NULL. They keep the group-wide accounting access
-  they have always had rather than being locked out mid-flight. The DB
-  check constraint (`ck_users_bu_assignment`) deliberately allows NULL for
-  accountants for this reason. Do NOT "fix" a legacy NULL by assigning a
-  BU without the Chairman's say-so — it narrows that accountant's access.
+- **CEO:** `business_unit_id` always set. `ops.bu_scope` rejects any
+  other BU with 403; naming no BU means their own BU. CEOs can only
+  read/write their own BU's daily-ops data (action items, staff,
+  customers, documents, notifications).
 - **Chairman / HO:** `business_unit_id` is always NULL (enforced by the
-  same check constraint). They are group-level and never carry a BU.
+  same check constraint, `ck_users_bu_assignment`). They are group-level
+  and never carry a BU.
 
 ## Chairman-vs-HO split
 
@@ -78,18 +65,14 @@ User unlock (`POST /api/admin/users/{id}/unlock-login`) is Chairman + HO.
 | Admin — shared | `/api/admin/*` except the Chairman-only list above (overview, comparison, operations, business units, report logs, CEO profiles, health/activity dashboards, exports) | Chairman, HO |
 | Admin — Chairman-only | See table above | Chairman only |
 | Users (on the `/api/admin` router) | `/api/admin/users/*` (create/list/deactivate/reset — Chairman; unlock-login — Chairman, HO) and `/api/admin/password-resets/*` (Chairman) | Chairman (unlock: + HO) |
-| Approvals (ops + accounting) | PO approve/reject, expense review, payroll approve/pay, staff-advance approve/reject, period close/reopen, journal approve/reject | Chairman, HO |
-| Ops — leave review | `POST /api/ops/leave-requests/{id}/review` | Chairman, HO, **CEO** (a CEO reviews their own BU's leave requests) |
-| Ops / modules — everything else | Inventory, expenses, staff, suppliers, projects, shipments, BOMs, production, real estate, stock transfers, action items, notifications | Any authenticated user — **BU scoping is enforced inside the handler** (`bu_scope` / `check_bu_access`), not by a role gate. A CEO or BU-assigned accountant naming another BU gets 403; Chairman/HO/legacy accountants pass a BU explicitly. |
-| Accounting | `/api/accounting/*` (CoA, journals, accounts, periods, reports, provision) | Chairman, HO, Accountant — with per-BU pinning and `require_group_access` on group-level reports as above |
+| Ops — everything else | Action items, notifications, staff, customers, documents, forecast | Any authenticated user — **BU scoping is enforced inside the handler** (`bu_scope`), not by a role gate. A CEO naming another BU gets 403; Chairman/HO pass a BU explicitly. |
 
 ## Rules for adding a route
 
 1. Pick the narrowest group above; use `require_roles(...)` at the
    endpoint, never a frontend-only check.
-2. If the route touches one BU, resolve the BU through `bu_scope` /
-   `effective_bu_id` / `check_bu_access` — never trust a raw
-   `business_unit_id` from the request body.
+2. If the route touches one BU, resolve the BU through `bu_scope` —
+   never trust a raw `business_unit_id` from the request body.
 3. Add the route to the matrix in `tests/test_auth_matrix.py` if it
    belongs to a role-gated group; the test fails on any route that is
    neither role-gated, session-gated, nor on the public allowlist.

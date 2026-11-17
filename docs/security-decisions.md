@@ -21,9 +21,8 @@ and `health_statuses.other_notes` / `ho_health_statuses.other_notes`.
 They are Fernet-encrypted under `DATA_ENCRYPTION_KEY` (`enc:v1:` prefix,
 newest-key-first rotation via `src/scripts/rotate_data_key.py`).
 
-**What is not:** everything else — all financial figures, salaries,
-journal/invoice/PO data, usernames, and every other piece of PII — sits
-in plaintext in the database. It relies on provider disk encryption
+**What is not:** everything else — all figures, usernames, and every
+other piece of PII — sits in plaintext in the database. It relies on provider disk encryption
 (Neon / DigitalOcean managed Postgres encrypt data at rest) and on
 `DATABASE_URL` secrecy. Disk encryption protects a stolen disk, not a
 stolen credential.
@@ -40,8 +39,8 @@ plus the same ciphertext, so they need the same protection as the live
 database.
 
 **Decision:** the 6-column scope is deliberate and stays as-is. Widening
-in-app encryption to financial figures would break the SQL reporting the
-whole app is built on (sums, filters, trial balances run in the database,
+in-app encryption to figures would break the SQL reporting the
+whole app is built on (sums and filters run in the database,
 not in Python). Revisit only if a compliance requirement names a specific
 extra field — then it is a design change, not a config tweak.
 
@@ -139,9 +138,9 @@ the incident runbook §2 says to pause the cron job first.
    account (Manage Users → deactivate). Deactivation bumps
    `token_version`, which revokes every session immediately, and writes
    a `USER_DEACTIVATED` audit row. There is no delete endpoint and no
-   hard delete of the `users` row: journals, POs, invoices, reports and
+   hard delete of the `users` row: reports, documents, notes and
    audit rows all reference the user, and deleting the row would break
-   financial history. (Same rule as `docs/delete-policy.md`: anything
+   report history. (Same rule as `docs/delete-policy.md`: anything
    with history is deactivated, never hard-deleted.)
 2. **Scrub the personal data, keep the financial evidence.** The six
    encrypted columns (R-m1) are overwritten in place through the app
@@ -156,7 +155,7 @@ the incident runbook §2 says to pause the cron job first.
    deactivated account's PII stays encrypted at rest and unreachable —
    the account cannot log in.
 3. **Kept as evidence:** `audit_logs` rows (including `username`) and all
-   financial records the user created/approved. They are business
+   reports the user submitted/approved. They are business
    records, not personal data held for its own sake, and deleting them
    would destroy the audit trail.
 
@@ -176,7 +175,7 @@ already in place: `statement_timeout=15s`, `lock_timeout=5s`,
 **How exhaustion is visible:** there is no dedicated pool-timeout
 counter — pool-timeout 500s surface as `ERROR` lines in the app log,
 and the daily log scan (`src/jobs/log_scan.py`, 09:00 cron) counts
-`ERROR` / `journal failed` / `lockout` lines and notifies the Chairman.
+`ERROR` / `lockout` lines and notifies the Chairman.
 If the daily scan starts reporting sustained `ERROR` lines at busy
 times, suspect pool exhaustion before CPU. No code change for the
 current ~25-user load.
