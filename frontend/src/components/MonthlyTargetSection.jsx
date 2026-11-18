@@ -31,6 +31,7 @@ export default function MonthlyTargetSection({
   showForm,
   headerExtra,
   formNote,
+  formAlert,
   lockNote,
   onCancel,
 }) {
@@ -65,6 +66,7 @@ export default function MonthlyTargetSection({
 
         {showForm ? (
           <form onSubmit={onSubmit} className="space-y-4">
+            {formAlert}
             <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
               {targetFields.map((f) => (
                 <Field key={f.key} label={f.label}>

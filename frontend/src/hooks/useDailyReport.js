@@ -232,7 +232,7 @@ export default function useDailyReport(config) {
     targetForm, targetSaving, targetError, setTargetError,
     noteText, setNoteText, noteSubmitting, noteError,
     load, updateField, updateTargetField, handleAttachmentChange,
-    handleSetTarget, handleSubmit, handleAddNote, serializeForm,
+    handleSetTarget, handleSubmit, handleAddNote, serializeForm, reloadAfterSave,
   };
 }
 
