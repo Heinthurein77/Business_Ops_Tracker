@@ -4,3 +4,8 @@
 # with a green suite because no linter ran) and unused imports. Pinned to
 # 3.4.0, the version the local suite is clean against.
 pyflakes==3.4.0
+# pytest-xdist (T-m5): runs the suite in parallel — CI runs
+# `pytest tests/ -q -n auto`. Pinned to 3.8.0, the version the local
+# suite passes against. (pytest itself is installed explicitly in CI;
+# see the CI-1 comment in .github/workflows/tests.yml.)
+pytest-xdist==3.8.0

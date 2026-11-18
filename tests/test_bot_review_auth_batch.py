@@ -306,7 +306,18 @@ class TestPasswordPolicy:
         assert policy("S3cure-Horse-99!") is None
         assert policy("correct horse battery", username="ceo_bu5") is None
 
-    def test_password_reuse_is_blocked_by_history(self, db):
+    def test_password_reuse_is_blocked_by_history(self, db, monkeypatch):
+        # T-m5: ~14 s of bcrypt cost-12 hashing (one hash + up to 5
+        # history verifies per rotation). The password-history logic is
+        # what's under test, not the hash cost — run it at cost 4.
+        from passlib.context import CryptContext
+
+        import src.auth as auth_module
+
+        monkeypatch.setattr(
+            auth_module, "pwd_context",
+            CryptContext(schemes=["bcrypt"], deprecated="auto",
+                         bcrypt__default_rounds=4))
         from src.routers.auth import force_password_change
 
         user = _add_user(db, "alice", "CEO", password="S3cure-Horse-99!")

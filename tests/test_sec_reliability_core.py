@@ -179,11 +179,19 @@ class TestStartupRetry:
         assert "database unreachable" not in caplog.text
 
     def test_lifespan_retries_migrations(self, monkeypatch, caplog):
-        import time
+        import functools
 
+        from src.main import _run_startup_step as _orig_step
         from src.main import lifespan
 
-        monkeypatch.setattr(time, "sleep", lambda s: None)
+        # T-m5: _run_startup_step binds sleep=time.sleep as a default arg
+        # at def time, so patching time.sleep cannot stub it — the test
+        # really slept 5 s + 10 s across its two retries. Stub sleep
+        # through the wrapper instead; the retry counting itself is
+        # still exercised.
+        monkeypatch.setattr(
+            "src.main._run_startup_step",
+            functools.partial(_orig_step, sleep=lambda s: None))
         caplog.set_level(logging.WARNING, logger="business_ops_tracker.seed")
         calls = {"migrations": 0, "seed_bus": 0, "seed_users": 0}
 

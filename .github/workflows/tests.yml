@@ -75,8 +75,12 @@ jobs:
       - name: Pyflakes lint (src + tests)
         run: python -m pyflakes src/ tests/
 
+      # T-m5: run the suite in parallel across workers (pytest-xdist,
+      # in requirements-dev.txt). Each worker is its own process, so
+      # the process-global state tests poke at (rate limiters,
+      # dependency overrides) stays per-worker.
       - name: Pytest suite
-        run: python -m pytest tests/ -q
+        run: python -m pytest tests/ -q -n auto
 
   # T-M1 (senior review 2026-11-18): the Playwright smoke suite is the
   # only frontend test layer, and it was dead since the ERP removal and
