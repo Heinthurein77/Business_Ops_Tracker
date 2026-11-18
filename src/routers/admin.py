@@ -57,7 +57,7 @@ from src.utils import (
     bu_lookup_maps,
     log_audit,
     notify,
-    parse_month_or_default,
+    parse_month_or_today,
     utcnow,
     parse_monthly_target_amounts,
     parse_resubmit_changes,
@@ -1195,7 +1195,7 @@ def ceo_activity_calendar(
         raise HTTPException(status_code=404, detail="Business unit not found")
 
     today = today_local()
-    calendar_year, calendar_month = parse_month_or_default(month, today)
+    calendar_year, calendar_month = parse_month_or_today(month, today)
 
     calendar_weeks = build_ceo_activity_calendar(db, business_unit.id, calendar_year, calendar_month, today, None)
     prev_year, prev_month = shift_month(calendar_year, calendar_month, -1)
@@ -1467,7 +1467,7 @@ def ceo_monthly_summary(
         raise HTTPException(status_code=404, detail="Business unit not found")
 
     today = today_local()
-    year, month_num = parse_month_or_default(month, today)
+    year, month_num = parse_month_or_today(month, today)
     month_start = date(year, month_num, 1)
     days_in_month = _cal.monthrange(year, month_num)[1]
     month_end = date(year, month_num, days_in_month)

@@ -49,7 +49,7 @@ from src.utils import (
     notify,
     parse_bool,
     parse_bounded_decimal,
-    parse_month_or_default,
+    parse_month_or_today,
     parse_monthly_target_amounts,
     report_date_window_error,
     serialize_ceo_profile,
@@ -91,7 +91,7 @@ def ceo_dashboard(
 ):
     report_date = today_local()
 
-    calendar_year, calendar_month = parse_month_or_default(month, report_date)
+    calendar_year, calendar_month = parse_month_or_today(month, report_date)
 
     # Activity / health / social rows are the submitting CEO's own personal
     # data: every read of them below is scoped to `submitted_by == user.id`
@@ -558,7 +558,7 @@ def get_monthly_target(
     month) so the "Set Monthly Target" form can pre-fill with existing values
     instead of always starting blank."""
     today = today_local()
-    year, month_num = parse_month_or_default(month, today)
+    year, month_num = parse_month_or_today(month, today)
     target_month = date(year, month_num, 1)
 
     target = (

@@ -114,20 +114,6 @@ def is_weekend(d: date) -> bool:
 _PERIOD_FORMAT = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
-def validate_period(period: Optional[str]) -> Optional[str]:
-    """Validates a YYYY-MM `period`/`month` query value and returns it
-    unchanged. Report endpoints used to feed the raw string into
-    split('-') / int() and answer garbage like ?period=garbage with a 500
-    (audit finding L3); now anything that isn't a real year-month is a
-    422, like any other malformed parameter. None and "" pass through —
-    callers treat them as "no period given"."""
-    if period is None or period == "":
-        return period
-    if not _PERIOD_FORMAT.match(period):
-        raise HTTPException(status_code=422, detail="period must be in YYYY-MM format")
-    return period
-
-
 def parse_bool(raw: Optional[str]) -> bool:
     """M-12: the one boolean form parser, shared by the CEO and HO
     submit-report handlers (was `_parse_bool`, verbatim-identical in
@@ -135,15 +121,16 @@ def parse_bool(raw: Optional[str]) -> bool:
     return (raw or "").strip().lower() in ("true", "1", "yes", "on")
 
 
-def parse_month_or_default(month: str, today: Optional[date] = None) -> tuple[int, int]:
+def parse_month_or_today(month: str, today: Optional[date] = None) -> tuple[int, int]:
     """M-12: the one YYYY-MM month parser for the dashboard-style
     endpoints (CEO/HO dashboards, monthly-target lookups, the admin
     activity calendar, the CEO monthly summary) — previously five
     hand-rolled copies. Garbage, an impossible month, or a year outside
     2000–2100 falls back to today's year/month (the documented behaviour
     of all five sites, pinned by test_ceo_pack.py's month="garbage" case)
-    instead of raising — that is why this is not validate_period(), whose
-    422 is for report endpoints that already use it. The 2000–2100 clamp
+    instead of raising — that is why this is not parse_month_or_422()
+    (src/routers/month_params.py), whose 422 is for report endpoints.
+    The 2000–2100 clamp
     matters because the calendar grid pads to whole weeks and a month at
     the edge of the date range (e.g. 9999-12) would overflow date
     arithmetic and 500."""

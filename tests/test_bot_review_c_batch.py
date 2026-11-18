@@ -25,18 +25,18 @@ class TestSharedHelpers:
         for raw in (None, "", "false", "0", "no", "off", "maybe"):
             assert parse_bool(raw) is False, raw
 
-    def test_parse_month_or_default(self):
+    def test_parse_month_or_today(self):
         from datetime import date
 
-        from src.utils import parse_month_or_default
+        from src.utils import parse_month_or_today
 
         today = date(2026, 11, 17)
-        assert parse_month_or_default("2026-03", today) == (2026, 3)
-        assert parse_month_or_default("", today) == (2026, 11)
-        assert parse_month_or_default("garbage", today) == (2026, 11)
-        assert parse_month_or_default("2026-13", today) == (2026, 11)
-        assert parse_month_or_default("9999-12", today) == (2026, 11)
-        assert parse_month_or_default("1999-01", today) == (2026, 11)
+        assert parse_month_or_today("2026-03", today) == (2026, 3)
+        assert parse_month_or_today("", today) == (2026, 11)
+        assert parse_month_or_today("garbage", today) == (2026, 11)
+        assert parse_month_or_today("2026-13", today) == (2026, 11)
+        assert parse_month_or_today("9999-12", today) == (2026, 11)
+        assert parse_month_or_today("1999-01", today) == (2026, 11)
 
     def test_notify_adds_one_row(self, db):
         from src.models import Notification

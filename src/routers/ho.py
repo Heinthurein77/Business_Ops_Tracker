@@ -47,7 +47,7 @@ from src.utils import (
     log_audit,
     monthly_target_window_error,
     parse_bool,
-    parse_month_or_default,
+    parse_month_or_today,
     parse_monthly_target_amounts,
     SubmitRateLimiter,
     today_local,
@@ -224,7 +224,7 @@ def get_monthly_target(month: str = "", user: User = Depends(require_roles(Role.
     month) — mirrors /api/ceo/monthly-target so the "Set Monthly Target" form
     can pre-fill the same way."""
     today = today_local()
-    year, month_num = parse_month_or_default(month, today)
+    year, month_num = parse_month_or_today(month, today)
     target_month = date(year, month_num, 1)
 
     target = db.query(HeadOfficeMonthlyTarget).filter(HeadOfficeMonthlyTarget.target_month == target_month).first()

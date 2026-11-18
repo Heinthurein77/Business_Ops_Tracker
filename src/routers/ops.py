@@ -28,7 +28,8 @@ from src.services.ops_alerts import (  # noqa: F401 - re-exported for callers/te
     run_remind_missing_reports,
 )
 from src.database import get_db
-from src.utils import _sanitize_excel_cell, clamp_days, clamp_limit, clamp_offset, log_audit, notify, today_local, utcnow, validate_period
+from src.routers.month_params import parse_month_or_422
+from src.utils import _sanitize_excel_cell, clamp_days, clamp_limit, clamp_offset, log_audit, notify, today_local, utcnow
 from src.models import (
     ActionItem,
     ActivityLog,
@@ -720,13 +721,9 @@ def monthly_report(month: Optional[str] = None, user: User = Depends(require_adm
     from fastapi.responses import StreamingResponse
     from sqlalchemy import func
 
+    y, m = parse_month_or_422(month)
     today = today_local()
-    month = validate_period(month)
-    if month:
-        y, m = (int(x) for x in month.split("-"))
-        month_start = date(y, m, 1)
-    else:
-        month_start = date(today.year, today.month, 1)
+    month_start = date(y, m, 1)
     import calendar as _cal
     month_end = date(month_start.year, month_start.month, _cal.monthrange(month_start.year, month_start.month)[1])
     days_in_month = (month_end - month_start).days + 1

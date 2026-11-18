@@ -326,15 +326,20 @@ CHAIRMAN_NS = SimpleNamespace(id=1, role="Chairman", business_unit_id=None)
 
 class TestPeriodValidation:
     def test_helper(self):
-        from src.utils import validate_period
+        # B-m4: the raising month parser lives in the router layer now
+        # (src/routers/month_params.py); None/"" means "current month".
+        from datetime import date as _date
 
-        assert validate_period(None) is None
-        assert validate_period("") == ""
-        assert validate_period("2026-10") == "2026-10"
-        assert validate_period("1999-01") == "1999-01"
+        from src.routers.month_params import parse_month_or_422
+
+        today = _date(2026, 11, 17)
+        assert parse_month_or_422(None, today) == (2026, 11)
+        assert parse_month_or_422("", today) == (2026, 11)
+        assert parse_month_or_422("2026-10", today) == (2026, 10)
+        assert parse_month_or_422("1999-01", today) == (1999, 1)
         for bad in ("garbage", "2026-13", "2026-00", "2026-1", "26-10", "2026/10", "2026-10-01"):
             with pytest.raises(HTTPException) as exc:
-                validate_period(bad)
+                parse_month_or_422(bad, today)
             assert exc.value.status_code == 422
 
     def test_monthly_report_rejects_bad_month(self, db):
