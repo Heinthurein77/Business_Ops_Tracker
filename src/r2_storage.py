@@ -248,10 +248,10 @@ def upload_attachment_or_503(
     file_obj: BinaryIO, original_filename: str, folder: str = "activity-attachments"
 ) -> str:
     """D-4: one upload policy for every attachment that is evidence — daily
-    reports, expense receipts. When an attachment was provided but the
-    upload fails, the request fails loud with 503 instead of saving the
-    record as if the evidence were attached. (Profile photos keep their
-    existing warn-the-user behaviour and do NOT use this helper.)"""
+    report attachments. When an attachment was provided but the upload
+    fails, the request fails loud with 503 instead of saving the record
+    as if the evidence were attached. (Profile photos keep their existing
+    warn-the-user behaviour and do NOT use this helper.)"""
     url = upload_fileobj(file_obj, original_filename, folder=folder)
     if not url:
         raise HTTPException(
