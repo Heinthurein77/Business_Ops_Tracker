@@ -45,6 +45,9 @@ export default function BusinessUnitDetailPage() {
   // F-12: when the detail was last refreshed (LastUpdated, header).
   const [updatedAt, setUpdatedAt] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
+  // PM-6: revenue-anomaly review state (one pending review at a time).
+  const [reviewingDate, setReviewingDate] = useState(null);
+  const [reviewError, setReviewError] = useState('');
 
   const load = useCallback(async () => {
     setData(null);
@@ -67,6 +70,23 @@ export default function BusinessUnitDetailPage() {
 
   function updateTargetField(key, value) {
     setTargetForm((f) => ({ ...f, [key]: value }));
+  }
+
+  // PM-6: mark one anomaly day reviewed, then reload so the flag and
+  // its review state come back from the server (never optimistically
+  // cleared — a failed review must not look reviewed).
+  async function handleReviewAnomaly(reportDate) {
+    setReviewError('');
+    setReviewingDate(reportDate);
+    try {
+      await api.reviewAnomaly(id, reportDate);
+      setData(await api.businessUnitDetail(id));
+      setUpdatedAt(new Date());
+    } catch (err) {
+      setReviewError(err instanceof ApiError ? err.message : 'Failed to mark the anomaly reviewed');
+    } finally {
+      setReviewingDate(null);
+    }
   }
 
   function handleBackToDashboard() {
@@ -562,6 +582,47 @@ export default function BusinessUnitDetailPage() {
           emptyText="No submissions recorded yet for this business unit."
         />
 
+
+        {/* PM-6: REVENUE ANOMALIES — the destination of the anomaly
+            notification link. A resubmit never clears an unreviewed flag
+            (backend keeps it until this review action), so an anomaly
+            stays visible here until someone explicitly reviews it. */}
+        <section className={`${GLASS} overflow-hidden`}>
+          <div className="p-6 border-b border-slate-100 dark:border-slate-800">
+            <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">Needs Review</p>
+            <h2 className="font-bold text-slate-900 dark:text-white tracking-tight text-lg">Revenue Anomalies</h2>
+            <p className="text-xs text-slate-500 mt-0.5">Days where reported revenue deviated &gt;50% from the trailing 14-day average</p>
+          </div>
+          <div className="p-6">
+            {reviewError && <p className="text-sm text-red-700 dark:text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-2.5 mb-4">{reviewError}</p>}
+            {(data.revenue_anomalies || []).length > 0 ? (
+              <ul className="space-y-2.5">
+                {(data.revenue_anomalies || []).map((a) => (
+                  <li key={a.report_date} className="rounded-lg border border-amber-300/60 dark:border-amber-500/40 bg-amber-500/5 px-4 py-3 flex items-center justify-between gap-3 flex-wrap">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">{a.report_date} &middot; {money(a.revenue)}</p>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        {a.reviewed ? `Reviewed${a.reviewed_at ? ` ${a.reviewed_at}` : ''}` : 'Unreviewed — revenue deviated sharply from the recent average'}
+                      </p>
+                    </div>
+                    {!a.reviewed && (
+                      <button
+                        type="button"
+                        disabled={reviewingDate === a.report_date}
+                        onClick={() => handleReviewAnomaly(a.report_date)}
+                        className="text-xs font-semibold bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white px-3.5 py-2 rounded-lg transition-colors"
+                      >
+                        {reviewingDate === a.report_date ? 'Marking…' : 'Mark reviewed'}
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-xs text-slate-500 italic">No revenue anomalies recorded for this business unit.</p>
+            )}
+          </div>
+        </section>
 
         <section className={`${GLASS} overflow-hidden`}>
           <div className="p-6 border-b border-slate-100 dark:border-slate-800">

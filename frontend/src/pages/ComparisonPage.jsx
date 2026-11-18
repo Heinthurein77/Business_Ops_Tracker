@@ -257,6 +257,11 @@ export default function ComparisonPage() {
                         </td>
                         <td className="px-4 py-3">
                           <p className="font-semibold text-slate-800 dark:text-slate-200">{d.name}</p>
+                          {d.revenue_anomaly && (
+                            <p className="text-[10px] font-bold text-amber-600 dark:text-amber-400 mt-0.5">
+                              ⚠ Revenue anomaly {d.revenue_anomaly_date}{d.revenue_anomaly_reviewed ? ' · reviewed' : ' · unreviewed'}
+                            </p>
+                          )}
                         </td>
                         <td className="px-4 py-3 text-right font-semibold tabular-nums text-slate-700 dark:text-slate-300">{money(d[metric])}</td>
                         <td className={`px-4 py-3 text-right text-xs font-semibold tabular-nums ${delta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>

@@ -33,6 +33,10 @@ from src.utils import format_local_datetime, log_audit, utcnow
 # both objects as-is, so both families of paths hang off /api/admin.
 router = APIRouter(prefix="/api/admin", tags=["users"])
 require_chairman = require_roles(Role.CHAIRMAN)
+# PM-1 fix-up: the Daily Ops assignee picker (Chairman + HO surface)
+# needs the user roster, so the read-only list is Chairman + HO. Every
+# write on this router (create/deactivate/reset) stays Chairman-only.
+require_admin = require_roles(Role.CHAIRMAN, Role.HO)
 
 
 def _new_temporary_password() -> str:
@@ -69,7 +73,7 @@ def _no_store(response: Response) -> None:
 
 
 @router.get("/users")
-def list_users(user: User = Depends(require_chairman), db: Session = Depends(get_db)):
+def list_users(user: User = Depends(require_admin), db: Session = Depends(get_db)):
     users = db.query(User).filter(User.role.in_([Role.CEO, Role.HO])).order_by(User.role.desc(), User.business_unit_id).all()
     business_units = {bu.id: bu for bu in db.query(BusinessUnit).all()}
 

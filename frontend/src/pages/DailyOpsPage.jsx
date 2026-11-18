@@ -35,8 +35,8 @@ export default function DailyOpsPage() {
   const [newTitle, setNewTitle] = useState('');
   const [newDue, setNewDue] = useState('');
   // PM-1: users of the selected BU, for the assignee picker. listUsers
-  // is Chairman-only (src/routers/users.py), so an HO user gets no
-  // picker options — see the report note.
+  // is Chairman + HO (read-only roster), so both Daily Ops roles get
+  // picker options.
   const [users, setUsers] = useState([]);
   const [newAssignee, setNewAssignee] = useState('');
   // PM-2: how many CEOs the manual missing-report button would ping.

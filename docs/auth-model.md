@@ -48,7 +48,8 @@ oversight staff — with these exceptions:
 |---|---|
 | `POST /api/admin/head-office/monthly-target` (the override) | Would let HO bypass its own monthly-target once-a-month lock. |
 | `GET /api/admin/security-log` | Security/throttle log is owner-only. |
-| User management: `GET/POST /api/admin/users`, `PATCH /api/admin/users/{id}`, `POST …/reset-password`, `POST …/active` | Only the Chairman creates/deactivates accounts and issues passwords. |
+| User management: `POST /api/admin/users`, `PATCH /api/admin/users/{id}`, `POST …/reset-password`, `POST …/active` | Only the Chairman creates/deactivates accounts and issues passwords. |
+| User list: `GET /api/admin/users` | Read-only roster — Chairman + HO (the Daily Ops assignee picker needs it, PM-1). |
 | Password resets: `GET /api/admin/password-resets`, `POST …/approve`, `POST …/reject` | Only the Chairman approves a reset (and the flow excludes the Chairman's own account — see `src/scripts/reset_chairman.py`). |
 
 Everything else under `/api/admin/*` is Chairman + HO (`require_admin`).
@@ -64,7 +65,7 @@ User unlock (`POST /api/admin/users/{id}/unlock-login`) is Chairman + HO.
 | HO | `/api/ho/*` (dashboard, monthly-target, submit-report) | HO only |
 | Admin — shared | `/api/admin/*` except the Chairman-only list above (overview, comparison, operations, business units, report logs, CEO profiles, health/activity dashboards, exports) | Chairman, HO |
 | Admin — Chairman-only | See table above | Chairman only |
-| Users (`src/routers/users.py`) | `/api/admin/users/*` (create/list/deactivate/reset — Chairman; unlock-login — Chairman, HO; totp-disable — Chairman) | Chairman (unlock: + HO) |
+| Users (`src/routers/users.py`) | `/api/admin/users/*` (create/deactivate/reset — Chairman; list — Chairman, HO; unlock-login — Chairman, HO; totp-disable — Chairman) | Chairman (list/unlock: + HO) |
 | Password resets (`src/routers/password_resets.py`, PM-m13) | `/api/admin/password-resets/*` (list/approve/reject) | Chairman only |
 | Ops — everything else | Action items, notifications, staff, customers, documents, forecast | Any authenticated user — **BU scoping is enforced inside the handler** (`bu_scope`), not by a role gate. A CEO naming another BU gets 403; Chairman/HO pass a BU explicitly. |
 | TOTP second factor | `POST /api/auth/totp/enroll`, `POST /api/auth/totp/confirm` (live session **or** short-lived setup token), `POST /api/auth/totp/disable` (session + current code), `POST /api/admin/users/{id}/totp-disable` (Chairman) | See below |

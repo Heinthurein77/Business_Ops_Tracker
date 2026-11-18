@@ -76,3 +76,13 @@ test("failed dashboard load shows an error, not a permanent spinner", async ({ p
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
   await expect(page.locator(".animate-spin")).toHaveCount(0);
 });
+
+test("notifications page loads for any logged-in role (PM-21 route)", async ({ page }) => {
+  // The bell links to /notifications, but the route was never registered
+  // in App.jsx — the page must render instead of bouncing to the role home.
+  await loginAs(page, accounts.chairman);
+  await expect(page).toHaveURL(/\/admin(\?.*)?$/);
+  await page.goto("/notifications");
+  await expect(page).toHaveURL(/\/notifications$/);
+  await expect(page.getByRole("heading", { name: "Notifications" })).toBeVisible();
+});

@@ -29,6 +29,7 @@ const BusinessUnitDetailPage = lazy(() => import('./pages/BusinessUnitDetailPage
 const HeadOfficePage = lazy(() => import('./pages/HeadOfficePage'));
 const ManageUsersPage = lazy(() => import('./pages/ManageUsersPage'));
 const BusinessUnitsPage = lazy(() => import('./pages/BusinessUnitsPage'));
+const NotificationsPage = lazy(() => import('./pages/NotificationsPage'));
 
 function RouteLoading() {
   return (
@@ -222,6 +223,14 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <TotpSetupPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/notifications"
+            element={
+              <ProtectedRoute>
+                <NotificationsPage />
               </ProtectedRoute>
             }
           />

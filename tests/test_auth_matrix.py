@@ -53,7 +53,7 @@ MATRIX = {
     # management, password-reset approval.
     ("POST", "/api/admin/head-office/monthly-target"): {"Chairman"},
     ("GET", "/api/admin/security-log"): {"Chairman"},
-    ("GET", "/api/admin/users"): {"Chairman"},
+    ("GET", "/api/admin/users"): {"Chairman", "HO"},
     ("POST", "/api/admin/users"): {"Chairman"},
     ("POST", "/api/admin/users/{user_id}/reset-password"): {"Chairman"},
     ("POST", "/api/admin/users/{user_id}/active"): {"Chairman"},
