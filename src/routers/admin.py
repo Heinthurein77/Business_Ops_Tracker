@@ -1853,7 +1853,7 @@ def export_excel(
         .scalar()
     )
     if merged_count > 10000:
-        raise HTTPException(400, "Export too large (over 10,000 rows) — narrow the date range")
+        raise HTTPException(status_code=400, detail="Export too large (over 10,000 rows) — narrow the date range")
 
     financials = financial_query.all()
     activities = activity_query.all()
@@ -1927,7 +1927,7 @@ def export_excel(
     # (BU, day) rows must be narrowed instead of building a huge workbook
     # in memory on a 768 MB container.
     if len(sorted_keys) > 10000:
-        raise HTTPException(400, "Export too large (over 10,000 rows) — narrow the date range")
+        raise HTTPException(status_code=400, detail="Export too large (over 10,000 rows) — narrow the date range")
 
     for bu_id, report_date in sorted_keys:
         bu = business_units.get(bu_id)
@@ -2033,9 +2033,9 @@ def create_business_unit(payload: BUCreateIn, user: User = Depends(require_admin
     """Create a business unit."""
     name = payload.name.strip()
     if not name:
-        raise HTTPException(400, "Name is required")
+        raise HTTPException(status_code=400, detail="Name is required")
     if db.query(BusinessUnit).filter(func.lower(BusinessUnit.name) == name.lower()).first():
-        raise HTTPException(400, f"A business unit named '{name}' already exists")
+        raise HTTPException(status_code=400, detail=f"A business unit named '{name}' already exists")
     bu = BusinessUnit(code=_next_bu_code(db), name=name)
     db.add(bu)
     db.commit()
@@ -2051,16 +2051,16 @@ def update_business_unit(bu_id: int, payload: BUUpdateIn, user: User = Depends(r
     """Rename a business unit."""
     bu = db.query(BusinessUnit).filter(BusinessUnit.id == bu_id).first()
     if not bu:
-        raise HTTPException(404, "Business unit not found")
+        raise HTTPException(status_code=404, detail="Business unit not found")
     note = None
     if payload.name is not None:
         name = payload.name.strip()
         if not name:
-            raise HTTPException(400, "Name cannot be empty")
+            raise HTTPException(status_code=400, detail="Name cannot be empty")
         dup = db.query(BusinessUnit).filter(func.lower(BusinessUnit.name) == name.lower(),
                                             BusinessUnit.id != bu_id).first()
         if dup:
-            raise HTTPException(400, f"A business unit named '{name}' already exists")
+            raise HTTPException(status_code=400, detail=f"A business unit named '{name}' already exists")
         bu.name = name
     db.commit()
     db.refresh(bu)

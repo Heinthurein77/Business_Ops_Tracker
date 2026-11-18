@@ -160,12 +160,19 @@ def login(payload: LoginRequest, request: Request, response: Response, db: Sessi
             status_code=403,
             content={
                 "detail": "TOTP_ENROLLMENT_REQUIRED",
+                "code": "TOTP_ENROLLMENT_REQUIRED",
                 "totp_setup_token": issue_totp_setup_token(user.username),
             },
         )
     if user.totp_enabled:
         if not payload.totp_code:
-            raise HTTPException(status_code=401, detail="TOTP_REQUIRED")
+            # B-m6: a plain HTTPException can only carry `detail`, so the
+            # machine code rides in a JSONResponse body instead — same
+            # status, same `detail` value, plus a stable `code` field.
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "TOTP_REQUIRED", "code": "TOTP_REQUIRED"},
+            )
         if not verify_totp_code(user.totp_secret, payload.totp_code):
             log_audit(db, user, "LOGIN_FAILED", f"username={username}", request, username=username)
             raise HTTPException(status_code=401, detail=_LOGIN_FAILED_DETAIL)

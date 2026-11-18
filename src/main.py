@@ -522,7 +522,9 @@ async def handle_insufficient_role(request: Request, exc: InsufficientRoleExcept
 async def handle_password_change_required(request: Request, exc: PasswordChangeRequiredException):
     return JSONResponse(
         status_code=403,
-        content={"detail": "PASSWORD_CHANGE_REQUIRED", "redirect_to": "/force-password-change"},
+        # B-m6: `detail` stays the human/machine string the frontend used
+        # to match on; `code` is the stable machine signal going forward.
+        content={"detail": "PASSWORD_CHANGE_REQUIRED", "code": "PASSWORD_CHANGE_REQUIRED", "redirect_to": "/force-password-change"},
     )
 
 
@@ -530,7 +532,7 @@ async def handle_password_change_required(request: Request, exc: PasswordChangeR
 async def handle_profile_setup_required(request: Request, exc: ProfileSetupRequiredException):
     return JSONResponse(
         status_code=403,
-        content={"detail": "PROFILE_SETUP_REQUIRED", "redirect_to": "/profile-setup"},
+        content={"detail": "PROFILE_SETUP_REQUIRED", "code": "PROFILE_SETUP_REQUIRED", "redirect_to": "/profile-setup"},
     )
 
 

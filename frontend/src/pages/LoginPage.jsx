@@ -46,12 +46,15 @@ export default function LoginPage() {
       const data = await login(username, password, totpCode || undefined);
       navigate(data.user.require_password_change ? '/force-password-change' : roleHomePath(data.user.role));
     } catch (err) {
-      if (err instanceof ApiError && err.message === 'TOTP_REQUIRED') {
+      // B-m6: branch on the stable `code` when the backend sent one;
+      // fall back to the `detail` string (err.message) for older responses.
+      const code = err instanceof ApiError ? (err.code || err.message) : null;
+      if (err instanceof ApiError && code === 'TOTP_REQUIRED') {
         // The password was right — the account has TOTP enabled, so ask
         // for its code and retry with it.
         setNeedsTotp(true);
         setError('Enter the 6-digit code from your authenticator app.');
-      } else if (err instanceof ApiError && err.message === 'TOTP_ENROLLMENT_REQUIRED') {
+      } else if (err instanceof ApiError && code === 'TOTP_ENROLLMENT_REQUIRED') {
         // Chairman with no enrolled TOTP: start setup with the token the
         // login attempt returned (no session exists yet).
         await startEnrollment(err.data?.totp_setup_token);

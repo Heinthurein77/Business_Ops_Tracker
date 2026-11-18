@@ -121,7 +121,7 @@ def _idempotency_key(request: Optional[Request]) -> Optional[str]:
     if not key:
         return None
     if len(key) > MAX_IDEMPOTENCY_KEY_LEN:
-        raise HTTPException(400, "Idempotency-Key must be at most 128 characters")
+        raise HTTPException(status_code=400, detail="Idempotency-Key must be at most 128 characters")
     return key
 
 
@@ -166,7 +166,7 @@ def bu_scope(user: User, bu_id: Optional[int]) -> Optional[int]:
     Chairman/HO may name any BU (or none, for all)."""
     if user.role == Role.CEO:
         if bu_id is not None and bu_id != user.business_unit_id:
-            raise HTTPException(403, "CEOs can only access their own business unit")
+            raise HTTPException(status_code=403, detail="CEOs can only access their own business unit")
         return user.business_unit_id
     return bu_id
 
@@ -226,11 +226,11 @@ def _validate_assignee(db: Session, user: User, assigned_to_id: Optional[int]) -
         return None
     assignee = db.query(User).filter(User.id == assigned_to_id).first()
     if assignee is None:
-        raise HTTPException(400, "Assigned user does not exist")
+        raise HTTPException(status_code=400, detail="Assigned user does not exist")
     if not assignee.is_active:
-        raise HTTPException(400, "Assigned user is not active")
+        raise HTTPException(status_code=400, detail="Assigned user is not active")
     if user.role == Role.CEO and assignee.business_unit_id != user.business_unit_id:
-        raise HTTPException(400, "Assignee must be in your business unit")
+        raise HTTPException(status_code=400, detail="Assignee must be in your business unit")
     return assignee
 
 
@@ -246,7 +246,7 @@ def create_action_item(payload: ActionItemIn, request: Request = None, user: Use
             return replay
     bu_id = bu_scope(user, payload.business_unit_id)
     if bu_id is None:
-        raise HTTPException(400, "business_unit_id is required")
+        raise HTTPException(status_code=400, detail="business_unit_id is required")
     assignee = _validate_assignee(db, user, payload.assigned_to_id)
     item = ActionItem(
         business_unit_id=bu_id,
@@ -277,11 +277,11 @@ def create_action_item(payload: ActionItemIn, request: Request = None, user: Use
 def update_action_item(item_id: int, payload: ActionItemUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = db.query(ActionItem).filter(ActionItem.id == item_id).first()
     if not item:
-        raise HTTPException(404, "Action item not found")
+        raise HTTPException(status_code=404, detail="Action item not found")
     bu_scope(user, item.business_unit_id)
     if payload.status is not None:
         if payload.status not in ACTION_ITEM_STATUSES:
-            raise HTTPException(400, "Invalid status")
+            raise HTTPException(status_code=400, detail="Invalid status")
         item.status = payload.status
         item.completed_at = utcnow() if payload.status == "done" else None
     if payload.title is not None:
@@ -303,7 +303,7 @@ def update_action_item(item_id: int, payload: ActionItemUpdate, user: User = Dep
 def delete_action_item(item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = db.query(ActionItem).filter(ActionItem.id == item_id).first()
     if not item:
-        raise HTTPException(404, "Action item not found")
+        raise HTTPException(status_code=404, detail="Action item not found")
     bu_scope(user, item.business_unit_id)
     db.delete(item)
     db.commit()
@@ -337,7 +337,7 @@ def list_notifications(unread_only: bool = False, user: User = Depends(get_curre
 def mark_notification_read(notification_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     n = db.query(Notification).filter(Notification.id == notification_id, Notification.user_id == user.id).first()
     if not n:
-        raise HTTPException(404, "Notification not found")
+        raise HTTPException(status_code=404, detail="Notification not found")
     n.is_read = True
     db.commit()
     return {"ok": True}
@@ -383,7 +383,7 @@ def view_upload(key: str = Query(...), user: User = Depends(get_current_user),
     from src.r2_storage import presigned_url_for_key
 
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", key or "") or ".." in key or "/" not in key:
-        raise HTTPException(400, "Invalid attachment key")
+        raise HTTPException(status_code=400, detail="Invalid attachment key")
     owner_bu_id = None
     is_profile_photo = key.startswith("profile-photos/")
     # m-26: ownership is matched on EXACT key equality, not LIKE. Stored
@@ -409,9 +409,9 @@ def view_upload(key: str = Query(...), user: User = Depends(get_current_user),
                 profile_owner_id = user_id
                 break
         if profile_owner_id is None:
-            raise HTTPException(404, "Attachment not found")
+            raise HTTPException(status_code=404, detail="Attachment not found")
         if user.role not in (Role.CHAIRMAN, Role.HO) and profile_owner_id != user.id:
-            raise HTTPException(403, "Not your profile photo")
+            raise HTTPException(status_code=403, detail="Not your profile photo")
     else:
         for bu_id, stored_url in db.query(
                 ActivityLog.business_unit_id, ActivityLog.document_url).filter(
@@ -427,15 +427,15 @@ def view_upload(key: str = Query(...), user: User = Depends(get_current_user),
             )
             if ho_found:
                 if user.role not in (Role.CHAIRMAN, Role.HO):
-                    raise HTTPException(403, "Only Chairman/HO can view head-office attachments")
+                    raise HTTPException(status_code=403, detail="Only Chairman/HO can view head-office attachments")
             else:
-                raise HTTPException(404, "Attachment not found")
+                raise HTTPException(status_code=404, detail="Attachment not found")
         # m-26: fail closed — the old `and user.business_unit_id`
         # condition skipped the 403 entirely for a NULL-BU CEO. A CEO
         # whose BU is unset now matches nothing, instead of everything.
         if owner_bu_id is not None and user.role == Role.CEO:
             if owner_bu_id != user.business_unit_id:
-                raise HTTPException(403, "Attachment belongs to another business unit")
+                raise HTTPException(status_code=403, detail="Attachment belongs to another business unit")
     # M-04: record who viewed which attachment (key only, never contents).
     _log_audit(db, user, "VIEW_UPLOAD", f"key={key}")
     # Sm-9: the 302 target is a 15-minute bearer URL — Cache-Control:
@@ -447,7 +447,7 @@ def view_upload(key: str = Query(...), user: User = Depends(get_current_user),
         return RedirectResponse(url=f"/uploads/{key}", status_code=302, headers=no_store)
     url = presigned_url_for_key(key)
     if not url:
-        raise HTTPException(503, "File storage is not available")
+        raise HTTPException(status_code=503, detail="File storage is not available")
     return RedirectResponse(url=url, status_code=302, headers=no_store)
 
 
@@ -457,7 +457,7 @@ def view_upload(key: str = Query(...), user: User = Depends(get_current_user),
 def submit_staff(payload: StaffIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     bu_id = bu_scope(user, payload.business_unit_id)
     if bu_id is None:
-        raise HTTPException(400, "business_unit_id is required")
+        raise HTTPException(status_code=400, detail="business_unit_id is required")
     row = db.query(StaffRecord).filter(StaffRecord.business_unit_id == bu_id, StaffRecord.report_date == payload.report_date).first()
     if row is None:
         row = StaffRecord(business_unit_id=bu_id, report_date=payload.report_date)
@@ -500,9 +500,9 @@ def list_staff(business_unit_id: Optional[int] = None, days: int = 30,
 def submit_customers(payload: CustomerIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     bu_id = bu_scope(user, payload.business_unit_id)
     if bu_id is None:
-        raise HTTPException(400, "business_unit_id is required")
+        raise HTTPException(status_code=400, detail="business_unit_id is required")
     if payload.satisfaction_score is not None and not (1.0 <= payload.satisfaction_score <= 5.0):
-        raise HTTPException(400, "satisfaction_score must be between 1.0 and 5.0")
+        raise HTTPException(status_code=400, detail="satisfaction_score must be between 1.0 and 5.0")
     row = db.query(CustomerMetric).filter(CustomerMetric.business_unit_id == bu_id, CustomerMetric.report_date == payload.report_date).first()
     if row is None:
         row = CustomerMetric(business_unit_id=bu_id, report_date=payload.report_date)
@@ -628,7 +628,7 @@ def create_document(payload: DocumentIn, request: Request = None, user: User = D
             return replay
     bu_id = bu_scope(user, payload.business_unit_id)
     if bu_id is None:
-        raise HTTPException(400, "business_unit_id is required")
+        raise HTTPException(status_code=400, detail="business_unit_id is required")
     d = LicenseDocument(
         business_unit_id=bu_id, title=payload.title,
         document_type=payload.document_type or "license",
@@ -651,7 +651,7 @@ def create_document(payload: DocumentIn, request: Request = None, user: User = D
 def delete_document(document_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     d = db.query(LicenseDocument).filter(LicenseDocument.id == document_id).first()
     if not d:
-        raise HTTPException(404, "Document not found")
+        raise HTTPException(status_code=404, detail="Document not found")
     bu_scope(user, d.business_unit_id)
     db.delete(d)
     db.commit()
@@ -938,6 +938,6 @@ def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
                        c.footfall, c.transactions, c.complaints,
                        float(c.satisfaction_score) if c.satisfaction_score is not None else ""] for c in rows])
 
-    raise HTTPException(400, "tab must be actions/documents/staff/customers")
+    raise HTTPException(status_code=400, detail="tab must be actions/documents/staff/customers")
 
 
