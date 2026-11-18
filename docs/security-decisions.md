@@ -12,12 +12,13 @@ sessions, logout revokes all devices), `docs/auth-model.md` (R-1),
 `docs/backup-recovery.md` (R-4), `docs/single-instance-risk.md` (D-11),
 `docs/delete-policy.md` (D-m4 — deactivate vs hard delete per entity).
 
-## R-m1 — Field-encryption scope: 6 columns only
+## R-m1 — Field-encryption scope: 7 columns only
 
-**What is encrypted in the app:** exactly the six columns in
+**What is encrypted in the app:** exactly the seven columns in
 `src/crypto.py` (`ENCRYPTED_COLUMNS`) — `ceo_profiles.phone_number`,
 `ceo_profiles.email`, `ceo_profiles.address`, `ceo_profiles.date_of_birth`,
-and `health_statuses.other_notes` / `ho_health_statuses.other_notes`.
+`health_statuses.other_notes` / `ho_health_statuses.other_notes`, and
+`users.totp_secret` (the TOTP secret, M-01).
 They are Fernet-encrypted under `DATA_ENCRYPTION_KEY` (`enc:v1:` prefix,
 newest-key-first rotation via `src/scripts/rotate_data_key.py`).
 
@@ -28,7 +29,7 @@ other piece of PII — sits in plaintext in the database. It relies on provider 
 stolen credential.
 
 **If `DATABASE_URL` leaks:** whoever holds it can read the full database
-in plaintext — every table, every figure — **except** the six encrypted
+in plaintext — every table, every figure — **except** the seven encrypted
 columns, which still need `DATA_ENCRYPTION_KEY` to decrypt. (If the whole
 environment leaks, the encryption key goes with it — the key lives in the
 same env plane as `DATABASE_URL` and `JWT_SECRET_KEY`. See D-6 in the
@@ -38,7 +39,7 @@ un-read.) Backups (Neon PITR, `pg_dump` dumps) contain the same plaintext
 plus the same ciphertext, so they need the same protection as the live
 database.
 
-**Decision:** the 6-column scope is deliberate and stays as-is. Widening
+**Decision:** the 7-column scope is deliberate and stays as-is. Widening
 in-app encryption to figures would break the SQL reporting the
 whole app is built on (sums and filters run in the database,
 not in Python). Revisit only if a compliance requirement names a specific
@@ -99,7 +100,7 @@ fix does not restructure it.
   operator, the password is single-use, and the window is bounded by
   the retention above.
 - The first-boot random Chairman password is **not** printed to logs:
-  since the D-13 fix it goes to `/app/uploads/.bootstrap_chairman_password`
+  since the D-13 fix it goes to `/app/.bootstrap_chairman_password`
   (0600) and only a first-4-characters hint appears in the log. Delete
   that file after first login (runbook §2B).
 
@@ -142,7 +143,7 @@ the incident runbook §2 says to pause the cron job first.
    audit rows all reference the user, and deleting the row would break
    report history. (Same rule as `docs/delete-policy.md`: anything
    with history is deactivated, never hard-deleted.)
-2. **Scrub the personal data, keep the financial evidence.** The six
+2. **Scrub the personal data, keep the financial evidence.** The seven
    encrypted columns (R-m1) are overwritten in place through the app
    layer (so the values stay valid ciphertext): text fields
    (`phone_number`, `email`, `address`, `other_notes`) become

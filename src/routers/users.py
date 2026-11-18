@@ -1,7 +1,10 @@
 """
 Chairman-only user management: list every account, reset a password, toggle
-active/inactive, onboard a new CEO/HO account, and work the queue of
-password-reset requests people file from the sign-in page.
+active/inactive, onboard a new CEO/HO account.
+
+The password-reset approval queue (filed anonymously from the sign-in
+page) lives in its own router, src/routers/password_resets.py (PM-m13) —
+same /api/admin/password-resets/* paths, separate file.
 
 Every temporary password issued here is random (never a shared constant),
 expires (TEMP_PASSWORD_TTL_HOURS_*), forces a change at first sign-in, and is
@@ -15,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from src.auth import RESET_REQUEST_TTL_HOURS, bump_token_version, hash_password, record_password_history, require_roles
+from src.auth import bump_token_version, hash_password, record_password_history, require_roles
 from src.constants import Role
 from src.client_ip import get_client_ip
 from src.config import settings
@@ -25,8 +28,9 @@ from src.schemas import CreateUserRequest, SetUserActiveRequest, UpdateUserReque
 from src.throttle import LOGIN_UNLOCK, login_lockout_remaining
 from src.utils import format_local_datetime, log_audit, utcnow
 
-# One router for /api/admin/users/* and /api/admin/password-resets/* — main.py
-# includes this object as-is, so both families of paths hang off /api/admin.
+# One router for /api/admin/users/* only — the /api/admin/password-resets/*
+# queue lives in routers/password_resets.py (PM-m13). main.py includes
+# both objects as-is, so both families of paths hang off /api/admin.
 router = APIRouter(prefix="/api/admin", tags=["users"])
 require_chairman = require_roles(Role.CHAIRMAN)
 
@@ -58,10 +62,6 @@ def _resolve_pending_requests(db: Session, user_id: int, status: str, resolved_b
             synchronize_session=False,
         )
     )
-
-
-def _is_stale(reset_request: PasswordResetRequest) -> bool:
-    return utcnow() - reset_request.requested_at > timedelta(hours=RESET_REQUEST_TTL_HOURS)
 
 
 def _no_store(response: Response) -> None:
@@ -421,11 +421,6 @@ def unlock_user_login(
     return {"ok": True, "was_locked": was_locked}
 
 
-# --- Password-reset requests (filed anonymously from the sign-in page; see
-# forgot_password in routers/auth.py). Nothing happens to an account until the
-# Chairman approves here. ---
-
-
 @router.post("/users/{user_id}/totp-disable")
 def disable_user_totp(
     user_id: int,
@@ -448,116 +443,3 @@ def disable_user_totp(
     bump_token_version(db, target)
     log_audit(db, user, "TOTP_DISABLED_BY_ADMIN", f"target_username={target.username}", request)
     return {"ok": True, "was_enabled": was_enabled}
-
-
-@router.get("/password-resets")
-def list_password_resets(user: User = Depends(require_chairman), db: Session = Depends(get_db)):
-    rows = (
-        db.query(PasswordResetRequest)
-        .order_by(PasswordResetRequest.requested_at.desc(), PasswordResetRequest.id.desc())
-        .limit(50)
-        .all()
-    )
-    users_by_id = {u.id: u for u in db.query(User).filter(User.id.in_({r.user_id for r in rows})).all()} if rows else {}
-    business_units = {bu.id: bu for bu in db.query(BusinessUnit).all()}
-
-    entries = []
-    for r in rows:
-        requester = users_by_id.get(r.user_id)
-        bu = business_units.get(requester.business_unit_id) if requester else None
-        entries.append(
-            {
-                "id": r.id,
-                "username": r.username,
-                "full_name": requester.full_name if requester else None,
-                "business_unit_name": bu.name if bu else None,
-                "requested_display": format_local_datetime(r.requested_at),
-                "status": r.status,
-                # A Pending request older than the approval window can no
-                # longer be approved (the user must ask again).
-                "expired": r.status == "Pending" and _is_stale(r),
-            }
-        )
-
-    fresh_since = utcnow() - timedelta(hours=RESET_REQUEST_TTL_HOURS)
-    pending_count = (
-        db.query(PasswordResetRequest)
-        .filter(PasswordResetRequest.status == "Pending", PasswordResetRequest.requested_at >= fresh_since)
-        .count()
-    )
-    return {"requests": entries, "pending_count": pending_count}
-
-
-def _load_pending_request(db: Session, request_id: int) -> PasswordResetRequest:
-    reset_request = db.query(PasswordResetRequest).filter(PasswordResetRequest.id == request_id).with_for_update().first()
-    if not reset_request:
-        raise HTTPException(status_code=404, detail="Reset request not found")
-    if reset_request.status != "Pending":
-        raise HTTPException(status_code=409, detail=f"This request was already {reset_request.status.lower()}.")
-    return reset_request
-
-
-@router.post("/password-resets/{request_id}/approve")
-def approve_password_reset(
-    request_id: int,
-    request: Request,
-    response: Response,
-    user: User = Depends(require_chairman),
-    db: Session = Depends(get_db),
-):
-    reset_request = _load_pending_request(db, request_id)
-    if _is_stale(reset_request):
-        raise HTTPException(
-            status_code=409,
-            detail=f"This request is more than {RESET_REQUEST_TTL_HOURS} hours old and has expired — ask the user to submit a new one.",
-        )
-
-    target = db.query(User).filter(User.id == reset_request.user_id).with_for_update().first()
-    if not target:
-        raise HTTPException(status_code=404, detail="User not found")
-    if target.role == Role.CHAIRMAN:
-        raise HTTPException(status_code=400, detail="The Chairman account cannot be reset from the app")
-    if not target.is_active:
-        raise HTTPException(status_code=400, detail="This account is deactivated — reactivate it before issuing a password")
-
-    old_hash = target.hashed_password
-    temporary_password = _apply_temporary_password(target, settings.TEMP_PASSWORD_TTL_HOURS_RESET)
-    # m-27: record both the outgoing hash and the new temporary one, so
-    # the owner cannot rotate straight back to the password that was
-    # just reset away.
-    record_password_history(db, target, old_hash)
-    record_password_history(db, target)
-    reset_request.status = "Approved"
-    reset_request.resolved_at = utcnow()
-    reset_request.resolved_by = user.id
-    # Commits the password, the request's new status and the version bump
-    # together, so a crash can't leave a working temporary password behind a
-    # request that still reads Pending.
-    bump_token_version(db, target)
-
-    log_audit(db, user, "PASSWORD_RESET_APPROVED", f"target_username={target.username}", request)
-
-    _no_store(response)
-    return {
-        "ok": True,
-        "username": target.username,
-        "temporary_password": temporary_password,
-        "expires_in_hours": settings.TEMP_PASSWORD_TTL_HOURS_RESET,
-    }
-
-
-@router.post("/password-resets/{request_id}/reject")
-def reject_password_reset(
-    request_id: int,
-    request: Request,
-    user: User = Depends(require_chairman),
-    db: Session = Depends(get_db),
-):
-    reset_request = _load_pending_request(db, request_id)
-    reset_request.status = "Rejected"
-    reset_request.resolved_at = utcnow()
-    reset_request.resolved_by = user.id
-    db.commit()
-
-    log_audit(db, user, "PASSWORD_RESET_REJECTED", f"target_username={reset_request.username}", request)
-    return {"ok": True}

@@ -32,7 +32,7 @@ from src.config import settings
 from src.database import SessionLocal, engine, probe_engine, verify_pooler_timeouts
 from src.edge import EdgeMiddleware
 from src.models import User
-from src.routers import admin, auth, ceo, ho, ops, users
+from src.routers import admin, auth, ceo, ho, ops, password_resets, users
 # PM-m12: seeding lives in src/seed.py; main.py is assembly only. These
 # names are re-exported (same objects) so existing importers — tests and
 # src/routers/auth.py (`_delete_bootstrap_password_file`) — keep working.
@@ -226,6 +226,7 @@ app.include_router(ceo.router)
 app.include_router(ho.router)
 app.include_router(admin.router)
 app.include_router(users.router)
+app.include_router(password_resets.router)
 app.include_router(ops.router)
 
 
