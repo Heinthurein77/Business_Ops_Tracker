@@ -444,6 +444,12 @@ def gather_admin_overview(db: Session, parts=None) -> dict:
                     "receivable": round(float(fin.receivable), 2) if fin and fin.receivable is not None else 0,
                     "payable": round(float(fin.payable), 2) if fin and fin.payable is not None else 0,
                     "report_date": fin.report_date.isoformat() if fin else None,
+                    # PM-6: the revenue-anomaly flag, surfaced where a
+                    # reviewer actually looks (was written, HO-notified
+                    # only, and displayed nowhere).
+                    "revenue_anomaly": bool(fin.revenue_anomaly) if fin else False,
+                    "revenue_anomaly_reviewed": bool(fin.revenue_anomaly_reviewed_at) if fin else False,
+                    "revenue_anomaly_date": fin.report_date.isoformat() if fin and fin.revenue_anomaly else None,
                     **budget_by_bu[bu.id],
                 }
             )
@@ -732,6 +738,19 @@ def business_unit_detail(bu_id: int, user: User = Depends(require_admin), db: Se
         "health_status": health_status,
         "health_reason": health_reason,
         "financial_rows": build_financial_rows(financial_history, targets_by_month),
+        # PM-6: unreviewed + recently reviewed anomalies for this BU, so
+        # the BU detail page — the destination of the anomaly
+        # notification link — actually shows the flag and its review state.
+        "revenue_anomalies": [
+            {
+                "report_date": f.report_date.isoformat(),
+                "revenue": float(f.revenue),
+                "reviewed": bool(f.revenue_anomaly_reviewed_at),
+                "reviewed_at": format_local_datetime(f.revenue_anomaly_reviewed_at) if f.revenue_anomaly_reviewed_at else None,
+                "reviewed_by_id": f.revenue_anomaly_reviewed_by,
+            }
+            for f in financial_history if f.revenue_anomaly
+        ],
         "activity_rows": build_activity_rows(activity_history),
         "health_rows": build_health_rows(health_history),
         "social_rows": build_social_rows(social_history),
@@ -749,6 +768,35 @@ def business_unit_detail(bu_id: int, user: User = Depends(require_admin), db: Se
             {"note_date": n.note_date.isoformat(), "note_text": n.note_text, "created_at": format_local_datetime(n.created_at)}
             for n in financial_notes
         ],
+    }
+
+
+@router.post("/business-unit/{bu_id}/anomaly/review")
+def review_revenue_anomaly(bu_id: int, report_date: str, request: Request,
+                           user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """PM-6: explicit review/acknowledge action for a revenue anomaly.
+    Stamps reviewed_at/reviewed_by on that day's DailyFinancial row; a
+    later resubmit may then recompute the flag (an unreviewed flag is
+    sticky and survives resubmits — see ceo.py submit_report)."""
+    try:
+        day = date.fromisoformat(report_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="report_date must be a valid ISO date")
+    fin = (db.query(DailyFinancial)
+           .filter(DailyFinancial.business_unit_id == bu_id, DailyFinancial.report_date == day)
+           .first())
+    if not fin or not fin.revenue_anomaly:
+        raise HTTPException(status_code=404, detail="No revenue anomaly for this business unit and date")
+    fin.revenue_anomaly_reviewed_at = utcnow()
+    fin.revenue_anomaly_reviewed_by = user.id
+    db.commit()
+    log_audit(db, user, "REVENUE_ANOMALY_REVIEWED", f"bu_id={bu_id} report_date={day.isoformat()}", request)
+    return {
+        "ok": True,
+        "business_unit_id": bu_id,
+        "report_date": day.isoformat(),
+        "reviewed": True,
+        "reviewed_by_id": user.id,
     }
 
 
@@ -861,7 +909,7 @@ def override_ho_monthly_target(
     user: User = Depends(require_chairman),
     db: Session = Depends(get_db),
 ):
-    """Chairman/HO override for Head Office's monthly target — unlike HO's own
+    """Chairman-only override for Head Office's monthly target — unlike HO's own
     /api/ho/monthly-target (which locks after the first save this month), this
     always upserts, mirroring the business-unit override endpoint above."""
     try:
@@ -1776,6 +1824,31 @@ def health_dashboard(user: User = Depends(require_admin), db: Session = Depends(
         for h in history_rows
     ]
 
+    # PM-m2: the dashboard is named for health, but HO staff health was
+    # excluded (CEO-only HealthStatus). HO submits health daily; surface
+    # the latest HO row + today's row as their own section.
+    ho_latest = (
+        db.query(HeadOfficeHealthStatus).order_by(HeadOfficeHealthStatus.report_date.desc()).first()
+    )
+    ho_today = (
+        db.query(HeadOfficeHealthStatus).filter(HeadOfficeHealthStatus.report_date == today).first()
+    )
+    ho_health = None
+    if ho_latest is not None:
+        ho_health = {
+            "bu_name": "Head Office",
+            "report_date": ho_latest.report_date.isoformat(),
+            "submitted_today": ho_today is not None,
+            "daily_steps": ho_latest.daily_steps,
+            "step_status": step_status(ho_latest.daily_steps),
+            "heart_rate": ho_latest.heart_rate,
+            "sleep_hours": float(ho_latest.sleep_hours) if ho_latest.sleep_hours is not None else None,
+            "bp_systolic": ho_latest.bp_systolic,
+            "bp_diastolic": ho_latest.bp_diastolic,
+            "risk": compute_health_risk(ho_latest),
+            "reported_display": format_local_datetime(ho_latest.updated_at),
+        }
+
     return {
         "today_display": today.strftime("%A, %d %B %Y"),
         "today_briefing": today_briefing,
@@ -1784,6 +1857,7 @@ def health_dashboard(user: User = Depends(require_admin), db: Session = Depends(
         "health_history": health_history,
         "submitted_count": len(today_briefing),
         "total_business_units": len(business_units),
+        "ho_health": ho_health,
     }
 
 
