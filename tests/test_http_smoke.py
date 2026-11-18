@@ -13,20 +13,16 @@ transport without a production database, so they are checked in a
 subprocess that builds a production Settings and calls the cookie issuer
 directly — see test_prod_cookie_attributes_in_subprocess.
 """
-import asyncio
 import os
 import subprocess
 import sys
 from pathlib import Path
 
-import httpx
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from src.auth import hash_password
-from src.database import get_db
-from src.main import app
 from src.models import Base, User
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -68,36 +64,9 @@ def http_db(tmp_path):
     engine.dispose()
 
 
-@pytest.fixture()
-def client(http_db):
-    """httpx client bound to the app with get_db overridden to http_db."""
-    def _override():
-        try:
-            yield http_db
-        finally:
-            pass
-
-    app.dependency_overrides[get_db] = _override
-    try:
-        class SyncClient:
-            def request(self, method, url, **kw):
-                async def _go():
-                    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
-                                                 base_url="http://testserver") as ac:
-                        return await ac.request(method, url, **kw)
-                return asyncio.run(_go())
-
-            def get(self, url, **kw):
-                return self.request("GET", url, **kw)
-
-            def post(self, url, **kw):
-                return self.request("POST", url, **kw)
-
-        yield SyncClient()
-    finally:
-        app.dependency_overrides.pop(get_db, None)
-
-
+# T-m1: the local SyncClient harness is deleted — tests use the shared
+# `client` fixture from root conftest.py, which resolves `http_db` to
+# this file's TOTP-enrolled-chairman fixture above.
 def _set_cookie_header(response):
     return response.headers.get("set-cookie", "")
 
