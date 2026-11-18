@@ -980,6 +980,11 @@ def submit_report(
                 ("revenue", "revenue"), ("cash_flow", "cash_flow"),
                 ("receivable", "receivable"), ("payable", "payable"),
                 ("other_amount", "other_amount"), ("other_notes", "financial_other_notes"),
+                # PM-6: the sticky-anomaly check below reads the previous
+                # row's flag/review state from this snapshot (previous is
+                # a dict, not the ORM row).
+                ("revenue_anomaly", "revenue_anomaly"),
+                ("revenue_anomaly_reviewed_at", "revenue_anomaly_reviewed_at"),
             ),
         ),
         DailyReportRowSpec(
@@ -1120,12 +1125,11 @@ def submit_report(
     # and nobody has reviewed it yet, the flag stays set whatever today
     # recomputes; only a reviewed flag is replaced by the new computation.
     # A reviewed flag clears its review stamp when a NEW anomaly is set,
-    # so the new flag waits for its own review.
-    previously_flagged_unreviewed = bool(
-        previous_financial is not None
-        and getattr(previous_financial, "revenue_anomaly", False)
-        and getattr(previous_financial, "revenue_anomaly_reviewed_at", None) is None
-    )
+    # so the new flag waits for its own review. (previous_financial is
+    # the upsert snapshot dict — see snapshot_fields above.)
+    _prev_anomaly = (previous_financial or {}).get("revenue_anomaly", False)
+    _prev_reviewed_at = (previous_financial or {}).get("revenue_anomaly_reviewed_at")
+    previously_flagged_unreviewed = bool(_prev_anomaly) and _prev_reviewed_at is None
     if previously_flagged_unreviewed:
         revenue_anomaly = True
     financial.revenue_anomaly = revenue_anomaly

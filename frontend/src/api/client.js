@@ -142,7 +142,7 @@ export const api = {
     }),
 
   hoDashboard: (date) => getJson(`/api/ho/dashboard${date ? `?date=${date}` : ''}`),
-  submitHoReport: (formData) => postForm('/api/ho/submit-report', formData),
+  submitHoReport: (formData, date) => postForm(`/api/ho/submit-report${date ? `?date=${date}` : ''}`, formData),
   setHoMonthlyTarget: (payload) => postJson('/api/ho/monthly-target', payload),
 
   ceoDashboard: (month, date) => {

@@ -363,10 +363,25 @@ def _apply_ho_report(form: HoReportForm, user: User):
 @router.post("/submit-report")
 def submit_report(
     request: Request,
+    date: str = "",
     form: HoReportForm = Depends(_parse_report_form),
     user: User = Depends(require_roles(Role.HO)),
     db: Session = Depends(get_db),
 ):
+    # PM-m22: backfill — the HO form parser (src/report_forms.py) has no
+    # report_date field (unlike the CEO one), so the date rides as a
+    # ?date= query parameter and overrides the form's today here. Same
+    # 7-day window as CEOs; outside it, 400 with the shared window error.
+    report_date = form.report_date
+    if date:
+        try:
+            report_date = _DATE.fromisoformat(date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date must be a valid ISO date")
+        window_error = report_date_window_error(report_date, today_local(), settings.REPORT_EDIT_WINDOW_DAYS)
+        if window_error:
+            raise HTTPException(status_code=400, detail=window_error)
+        form.report_date = report_date
     # Deliberately a plain `def`, not `async def`: everything below is blocking
     # (SQLAlchemy queries with row locks, a synchronous boto3 upload of up to
     # 10 MB), so FastAPI must run it in its threadpool instead of on the event
@@ -468,12 +483,17 @@ def submit_report(
         # Health vitals and free-text values are recorded as "(hidden)" by
         # compute_field_changes (only THAT they changed is audited); money
         # keeps real values as the tamper trail for financial edits.
-        changes = (
-            compute_field_changes(previous_financial, current_financial)
-            + compute_field_changes(previous_activity, current_activity)
-            + compute_field_changes(previous_health, current_health)
-            + compute_field_changes(previous_social, current_social)
-        )
+        # PM-m1 fix: each area is diffed only when its previous row
+        # exists — a day can hold a financial row without activity/health/
+        # social rows (e.g. a partially backfilled day), and diffing
+        # against None 500d. The CEO submit already guards this way.
+        changes = compute_field_changes(previous_financial, current_financial)
+        if previous_activity is not None:
+            changes += compute_field_changes(previous_activity, current_activity)
+        if previous_health is not None:
+            changes += compute_field_changes(previous_health, current_health)
+        if previous_social is not None:
+            changes += compute_field_changes(previous_social, current_social)
 
     # PM-m1: HO submit was silent — share the CEO post-submit alert
     # block. (a) >50% revenue deviation vs the trailing 14-day HO

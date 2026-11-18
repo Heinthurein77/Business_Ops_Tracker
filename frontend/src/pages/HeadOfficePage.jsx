@@ -143,14 +143,9 @@ export default function HeadOfficePage() {
     draftDate: (payload) => payload.form_date || localTodayISO(),
     isFormEmpty: (f) => f.revenue === '' && f.cash_flow === '',
     fieldMap: FIELD_MAP,
-    submitReport: (fd) => api.submitHoReport(fd),
+    submitReport: (fd) => api.submitHoReport(fd, editDate || undefined),
     setTargetApi: (payload) => api.setHoMonthlyTarget(payload),
     targetMonth: (d) => (isHo ? d.report_date : d.today).slice(0, 7) + '-01',
-    extraSubmitFields: (fd, d) => {
-      // PM-m22: editing a specific day (via ?date=): file the report
-      // against that date. Today-flow sends nothing, as before.
-      if (d && !d.form_is_today) fd.append('report_date', d.form_date);
-    },
     onLoadExtra: () => {
       setTargetForm(emptyTargetForm);
       setTargetEditing(false);
