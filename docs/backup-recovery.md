@@ -24,7 +24,7 @@ uploads go to R2, so the volume holds nothing.
   a scratch DB + re-pointing the app; 1 working day if the restore has
   to be rebuilt from the weekly dump (manual steps, see below).
 
-These are recorded in the go-live runbook (§2A) as go-live gates: the
+These are recorded in the go-live runbook ([BOT_GoLive_Runbook_2026-10-21.md](BOT_GoLive_Runbook_2026-10-21.md) §2A) as go-live gates: the
 first successful restore drill must be recorded before real business
 data goes in.
 
@@ -42,21 +42,21 @@ data goes in.
 3. Start the app against the scratch DB (test env) and spot-check: a
    CEO can log in, the CEO dashboard loads, and one
    attachment URL resolves from R2.
-4. Record the drill (date, restorer, time taken, result) in the runbook.
+4. Record the drill (date, restorer, time taken, result) in the go-live runbook ([BOT_GoLive_Runbook_2026-10-21.md](BOT_GoLive_Runbook_2026-10-21.md)).
    A drill that is not recorded did not happen.
 
 ## Restoring for real (database destroyed or corrupted)
 
 1. **Stop the app** so nothing writes during the restore:
    `docker compose -f docker-compose.prod.yml down` (keeps volumes).
-2. **Preserve evidence first** (incident runbook): export `audit_logs`
+2. **Preserve evidence first** (incident runbook — [BOT_Incident_Runbook_2026-11-09.md](BOT_Incident_Runbook_2026-11-09.md)): export `audit_logs`
    before any retention run touches them — if the DB is still readable,
    `pg_dump` the live DB to a separate file even if it is corrupt.
 3. Restore via Neon PITR to a new database at the last known-good time.
 4. Run the migration-chain check above against the restored DB.
 5. Update `DATABASE_URL` (and `MIGRATION_DATABASE_URL`, if the roles
    are in use) to the restored database and `up -d --build`.
-6. Verify §2D of the runbook (login, CEO dashboard, one attachment
+6. Verify §2D of the incident runbook ([BOT_Incident_Runbook_2026-11-09.md](BOT_Incident_Runbook_2026-11-09.md)) (login, CEO dashboard, one attachment
    resolves).
 7. If Neon PITR is unavailable, restore the latest weekly dump instead:
    ```bash
@@ -95,5 +95,5 @@ data goes in.
 - [ ] Choose the off-server home for weekly dumps (`BACKUP_DIR`) and
       copy the first dump there.
 - [ ] Verify the off-platform `DATA_ENCRYPTION_KEY` copy by decrypting
-      a canary value with it (see incident runbook).
+      a canary value with it (see incident runbook [BOT_Incident_Runbook_2026-11-09.md](BOT_Incident_Runbook_2026-11-09.md)).
 - [ ] Run and record the first restore drill (go-live gate).
