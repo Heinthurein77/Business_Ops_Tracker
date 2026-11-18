@@ -15,7 +15,10 @@ import { accounts, completeCeoProfile, loginAs } from "./helpers.js";
 
 test("chairman login lands on the admin dashboard", async ({ page }) => {
   await loginAs(page, accounts.chairman);
-  await expect(page).toHaveURL(/\/admin$/);
+  // The dashboard appends ?bu=<first BU> once the overview loads, so
+  // the URL assertion allows an optional query string (an earlier run
+  // failed on /admin?bu=1 — the assertion raced the overview load).
+  await expect(page).toHaveURL(/\/admin(\?.*)?$/);
   // Inside the app shell: the admin sidebar is visible and the login
   // form is gone.
   await expect(page.getByText("Business Units", { exact: true }).first()).toBeVisible();
@@ -55,16 +58,16 @@ test("CEO cannot reach Chairman-only pages", async ({ page }) => {
 
 test("HO user cannot reach Chairman-only pages", async ({ page }) => {
   await loginAs(page, accounts.ho);
-  await expect(page).toHaveURL(/\/admin$/);
+  await expect(page).toHaveURL(/\/admin(\?.*)?$/);
   await page.goto("/admin/users");
   // HO's role home is /admin, so the bounce lands back on the dashboard.
-  await expect(page).toHaveURL(/\/admin$/);
+  await expect(page).toHaveURL(/\/admin(\?.*)?$/);
   await expect(page.getByText("Manage Users")).toHaveCount(0);
 });
 
 test("failed dashboard load shows an error, not a permanent spinner", async ({ page }) => {
   await loginAs(page, accounts.chairman);
-  await expect(page).toHaveURL(/\/admin$/);
+  await expect(page).toHaveURL(/\/admin(\?.*)?$/);
   // Kill the overview call, then reload: the page must surface the
   // failure instead of spinning forever.
   await page.route("**/api/admin/overview", (route) => route.abort());
