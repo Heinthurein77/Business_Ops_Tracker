@@ -479,20 +479,27 @@ def test_m26_boolean_server_default_style_noted_not_changed():
 # ------------------------------------------------------- m23: bare alembic CLI
 
 def test_bare_alembic_cli_requires_env_vars(tmp_path):
-    # m23: a plain `alembic heads` with no ENVIRONMENT/DATABASE_URL crashes
-    # (d3e7f1a5c9b4 imports src.crypto at module load -> config raises).
-    # There is no README / ops doc in this repo to write the requirement
-    # into, so the requirement is pinned here and documented in the
-    # workstream report: always run alembic with
-    # ENVIRONMENT=test DATABASE_URL=... MIGRATION_DATABASE_URL=... set.
+    # m23, as fixed by C-1 (PM review 2026-11-18): a plain `alembic heads`
+    # with no ENVIRONMENT/DATABASE_URL used to crash (d3e7f1a5c9b4 imports
+    # src.crypto at module load -> config raises). That coupling is gone:
+    # `heads` is a static graph query that needs no database at all, so it
+    # now succeeds bare. What still needs env is a command that touches a
+    # database - `upgrade head` without DATABASE_URL must still fail loud
+    # naming DATABASE_URL (the migrate job's only required var).
     bare_env = {k: v for k, v in os.environ.items()
                 if k not in ("ENVIRONMENT", "DATABASE_URL", "MIGRATION_DATABASE_URL")}
-    bare = subprocess.run(
+    bare_heads = subprocess.run(
         [sys.executable, "-m", "alembic", "heads"],
         cwd=ROOT, env=bare_env, capture_output=True, text=True, timeout=120,
     )
-    assert bare.returncode != 0
-    assert "DATABASE_URL" in bare.stderr or "ENVIRONMENT" in bare.stderr
+    assert bare_heads.returncode == 0, bare_heads.stderr
+    assert CURRENT_HEAD in bare_heads.stdout
+    bare_upgrade = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=ROOT, env=bare_env, capture_output=True, text=True, timeout=120,
+    )
+    assert bare_upgrade.returncode != 0
+    assert "DATABASE_URL" in bare_upgrade.stderr
     url = f"sqlite:///{tmp_path / 'heads.db'}"
     with_vars = _run_alembic(url, "heads")
     assert with_vars.returncode == 0

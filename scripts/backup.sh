@@ -16,6 +16,12 @@
 # - Exits non-zero (and prints to stderr, which cron mails/logs) if the
 #   dump fails or the output file is empty — a silent empty backup is
 #   worse than no backup.
+# - PM-13: verifies the dump is restorable/parseable (`pg_restore -l`
+#   lists its table of contents without restoring anything) before
+#   calling it a backup — a dump that does not list is not a backup.
+#   The off-server copy needs its own `pg_restore -l` check after every
+#   copy; see docs/backup-recovery.md (the check here only proves the
+#   on-server file).
 # - On success upserts a `job_heartbeats` row for "backup" (G-4), so the
 #   log-scan dead-man check notices if the Sunday cron silently dies
 #   (weekly job, 8-day grace — see src/jobs/log_scan.py).
@@ -52,6 +58,28 @@ if [ ! -s "$OUT" ]; then
     echo "backup.sh: dump failed or empty: $OUT" >&2
     exit 1
 fi
+
+# PM-13: verify the dump is parseable/restorable before calling it a
+# backup. `pg_restore -l` lists the dump's table of contents without
+# restoring anything, so a truncated or corrupt dump fails here instead
+# of being discovered during a real incident. Same tool selection as the
+# dump step above: a local pg_restore, else the pinned Postgres image.
+if command -v pg_restore >/dev/null 2>&1; then
+    if ! pg_restore -l "$OUT" >/dev/null; then
+        echo "backup.sh: dump failed verification (pg_restore -l): $OUT" >&2
+        exit 1
+    fi
+elif command -v docker >/dev/null 2>&1; then
+    if ! docker run --rm -v "$BACKUP_DIR:/backup" \
+        postgres:16-alpine pg_restore -l "/backup/bot-$STAMP.dump" >/dev/null; then
+        echo "backup.sh: dump failed verification (pg_restore -l via docker): $OUT" >&2
+        exit 1
+    fi
+else
+    echo "backup.sh: warning: no pg_restore or docker to verify the dump; skipping verification" >&2
+fi
+
+echo "backup.sh: dump verified (pg_restore -l lists $OUT)"
 
 # Retention: prune dumps older than RETENTION_DAYS (default 28).
 find "$BACKUP_DIR" -maxdepth 1 -name 'bot-*.dump' -type f -mtime +"$RETENTION_DAYS" -delete

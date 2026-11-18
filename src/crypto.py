@@ -32,7 +32,11 @@ from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 from sqlalchemy import Text
 from sqlalchemy.types import TypeDecorator
 
-from src.config import settings
+# NB: import the module, not `settings` — `from src.config import settings`
+# would construct the (lazy) singleton at import time and raise the
+# production config refusal in a migrate-only environment (C-1, see
+# _build() below). `_config.settings` is read inside _build()'s try.
+from src import config as _config
 
 PREFIX = "enc:v1:"
 
@@ -54,7 +58,21 @@ ENCRYPTED_COLUMNS = [
 
 
 def _build() -> tuple[Optional[MultiFernet], Optional[Fernet]]:
-    keys = [k.strip() for k in settings.DATA_ENCRYPTION_KEY.split(",") if k.strip()]
+    try:
+        keys = [k.strip() for k in _config.settings.DATA_ENCRYPTION_KEY.split(",") if k.strip()]
+    except RuntimeError:
+        # C-1 (PM review 2026-11-18): this module is imported by the
+        # d3e7f1a5c9b4 migration, which Alembic loads for every command —
+        # including `alembic upgrade head` in the migrate-only service/job,
+        # which deliberately carries no JWT / allowlist secrets. Reading
+        # `settings` there raises the production config refusal (missing
+        # JWT_SECRET_KEY etc.). That refusal is about the *app* config, not
+        # the encryption key, and the migration treats "no key" as "skip
+        # the backfill" — so a config refusal here means "no encryption
+        # available", not a crash. An invalid Fernet key still raises below
+        # (ValueError from Fernet), in a full environment, at import — the
+        # fail-fast for a bad key is unchanged.
+        return None, None
     if not keys:
         return None, None
     # An invalid key raises here, at import, i.e. at startup — never later on

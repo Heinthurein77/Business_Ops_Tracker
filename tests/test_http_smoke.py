@@ -75,7 +75,12 @@ class TestHealthAndRouting:
     def test_healthz_200(self, client):
         r = client.get("/healthz")
         assert r.status_code == 200
-        assert r.json() == {"status": "ok"}
+        # PM-11: /healthz also reports the release identity (version +
+        # build commit) so §2D verification can confirm which commit is
+        # live; only "status" is contractual here.
+        assert r.json()["status"] == "ok"
+        assert isinstance(r.json()["version"], str)
+        assert isinstance(r.json()["commit"], str)
 
     def test_unknown_api_path_returns_json_404_not_index(self, client):
         r = client.get("/api/does-not-exist")

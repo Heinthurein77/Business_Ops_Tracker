@@ -14,26 +14,85 @@
 --                 UPDATE or DELETE audit_logs — so the audit trail is
 --                 append-only even for an attacker who owns the app process.
 --
--- HOW: run this ONCE as the provider's admin user (DigitalOcean: doadmin,
--- Neon: the project owner), connected to the application database, after
--- replacing the two passwords and the database name below. Then:
+-- HOW (PM-m27): run this as the provider's admin user (DigitalOcean: doadmin,
+-- Neon: the project owner), connected to the application database, passing the
+-- database name and both passwords as psql variables — do NOT edit them into
+-- this file:
+--
+--   psql -v ON_ERROR_STOP=1 \
+--        -v db_name='botdb' \
+--        -v migrator_password="$(openssl rand -hex 24)" \
+--        -v app_password="$(openssl rand -hex 24)" \
+--        -U <owner> -d <admin-db> -f deploy/db_roles.sql
+--
+-- Then:
 --   1. set MIGRATION_DATABASE_URL to the bot_migrator URL,
 --   2. set DATABASE_URL to the bot_app URL,
 --   3. set RUN_MIGRATIONS_ON_STARTUP=false on the web service,
 --   4. deploy (the PRE_DEPLOY job runs `alembic upgrade head` as bot_migrator).
--- Re-running the GRANT section after a migration that adds tables is harmless
--- (ALTER DEFAULT PRIVILEGES below also covers new tables automatically).
+-- Re-running this file is safe (idempotent): existing roles are kept (their
+-- passwords are NOT reset — rotate with ALTER ROLE ... PASSWORD separately),
+-- and every GRANT / ALTER DEFAULT PRIVILEGES / ALTER ROLE ... SET below is
+-- itself a no-op on re-run. Re-run it after a migration that adds tables.
 --
 -- Use URL-safe passwords (openssl rand -hex 24) so they need no percent-encoding.
+-- Running this against a real database is USER-SIDE (needs the Neon/DO database
+-- from the deploy-target decision); it has never been run anywhere.
 
-CREATE ROLE bot_migrator LOGIN PASSWORD 'CHANGE_ME_MIGRATOR' NOSUPERUSER NOCREATEDB NOCREATEROLE;
-CREATE ROLE bot_app      LOGIN PASSWORD 'CHANGE_ME_APP'      NOSUPERUSER NOCREATEDB NOCREATEROLE;
+\set ON_ERROR_STOP on
+
+-- Defaults when a variable was not passed with -v. The CHANGE_ME_* values
+-- are refused loudly below — a run that reaches CREATE ROLE with them
+-- would seed production roles with passwords printed in this repo.
+-- db_name has NO default: the old hard-coded `defaultdb` is gone (PM-m27),
+-- so forgetting -v db_name fails here instead of granting on the wrong DB.
+\if :{?db_name}
+\else
+  \echo 'ERROR: pass the application database name with -v db_name=... — there is no default.'
+  SELECT 'db_name is required (-v db_name=...)'::int;
+\endif
+\if :{?migrator_password}
+\else
+  \set migrator_password 'CHANGE_ME_MIGRATOR'
+\endif
+\if :{?app_password}
+\else
+  \set app_password 'CHANGE_ME_APP'
+\endif
+
+-- Fail-loud guard: the SELECT below raises (invalid integer cast) on a
+-- placeholder password, and ON_ERROR_STOP aborts the script before any
+-- role is created. The \echo first says what to do instead.
+\if :'migrator_password' = 'CHANGE_ME_MIGRATOR'
+  \echo 'ERROR: pass a generated password with -v migrator_password="$(openssl rand -hex 24)" — the CHANGE_ME_MIGRATOR default must never be used.'
+  SELECT 'refusing CHANGE_ME_MIGRATOR as a real password'::int;
+\endif
+\if :'app_password' = 'CHANGE_ME_APP'
+  \echo 'ERROR: pass a generated password with -v app_password="$(openssl rand -hex 24)" — the CHANGE_ME_APP default must never be used.'
+  SELECT 'refusing CHANGE_ME_APP as a real password'::int;
+\endif
+
+-- Postgres has no CREATE ROLE IF NOT EXISTS, so each role is created only
+-- when pg_roles says it does not exist yet (\gset reads the EXISTS result
+-- into :migrator_exists / :app_exists; \if treats 't' as true).
+SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = 'bot_migrator') AS migrator_exists \gset
+\if :migrator_exists
+  \echo 'bot_migrator already exists — keeping its current password (rotate separately with ALTER ROLE bot_migrator PASSWORD ...).'
+\else
+  CREATE ROLE bot_migrator LOGIN PASSWORD :'migrator_password' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+\endif
+SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = 'bot_app') AS app_exists \gset
+\if :app_exists
+  \echo 'bot_app already exists — keeping its current password (rotate separately with ALTER ROLE bot_app PASSWORD ...).'
+\else
+  CREATE ROLE bot_app LOGIN PASSWORD :'app_password' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+\endif
 
 -- Some managed providers require the admin user to be a member of a role before
 -- it can hand objects to it:
 --   GRANT bot_migrator TO doadmin;
 
-GRANT CONNECT ON DATABASE defaultdb TO bot_app, bot_migrator;          -- <- your database name
+GRANT CONNECT ON DATABASE :"db_name" TO bot_app, bot_migrator;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT USAGE, CREATE ON SCHEMA public TO bot_migrator;
 GRANT USAGE          ON SCHEMA public TO bot_app;

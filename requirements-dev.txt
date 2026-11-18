@@ -4,8 +4,16 @@
 # with a green suite because no linter ran) and unused imports. Pinned to
 # 3.4.0, the version the local suite is clean against.
 pyflakes==3.4.0
+# pytest (PM-m26, was CI-1): the test runner itself belongs here, not as an
+# explicit `pip install pytest==9.1.1` duplicated in tests.yml and
+# postgres-check.yml — the duplication is how the gate once shipped with
+# pytest never installed at all. Pinned to 9.1.1, the version the local
+# suite passes against.
+pytest==9.1.1
 # pytest-xdist (T-m5): runs the suite in parallel — CI runs
 # `pytest tests/ -q -n auto`. Pinned to 3.8.0, the version the local
-# suite passes against. (pytest itself is installed explicitly in CI;
-# see the CI-1 comment in .github/workflows/tests.yml.)
+# suite passes against.
 pytest-xdist==3.8.0
+# PyYAML (PM-m26): the CI deploy-artifacts job parses .do/app.yaml with
+# it. Pinned to 6.0.3. Dev-only: no application code imports yaml.
+PyYAML==6.0.3

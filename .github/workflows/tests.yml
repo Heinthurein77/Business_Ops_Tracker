@@ -2,9 +2,12 @@ name: tests
 
 # Test gate on deploys (A-m2, BOT security review 2026-11-09): the full
 # pytest suite (+ the frontend production build) runs on every push/PR,
-# so a bad change cannot reach main — and, via deploy_on_push, DigitalOcean
-# — untested. The DO PRE_DEPLOY migration job only catches schema errors;
-# this is the gate that catches everything else.
+# so a bad change cannot reach main — and, from main, either deploy path
+# — untested. (No deploy path is assumed here: the canonical target is
+# still undecided, VPS+Neon vs DigitalOcean — see README "Deploy paths".
+# The old comment named DigitalOcean's deploy_on_push as the path; that is
+# now off by default, PM-12.) The DO PRE_DEPLOY migration job only catches
+# schema errors; this is the gate that catches everything else.
 on:
   push:
     branches: [main]
@@ -29,13 +32,14 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      # CI-1 (2026-11-17 review): requirements.txt carries no pytest
-      # (dev-only dependency), so install it explicitly — without this
-      # step `python -m pytest` fails with "No module named pytest" and
-      # the gate has never executed a single test. Pinned to 9.1.1, the
-      # version the local suite passes against.
-      - name: Install pytest
-        run: pip install pytest==9.1.1
+      # PM-m26 (was CI-1, 2026-11-17 review): pytest lives in
+      # requirements-dev.txt now — the old explicit `pip install
+      # pytest==9.1.1` here (and in postgres-check.yml) was duplicated,
+      # and the duplication is how the gate once shipped with pytest
+      # never installed at all. One install covers pytest, pytest-xdist
+      # and pyflakes; the later lint step reuses it.
+      - name: Install dev dependencies (pytest, xdist, pyflakes)
+        run: pip install -r requirements-dev.txt
 
       # Diagnostic step (CI red on e612511, 2026-11-17): the tests run
       # failed in ~3s with exit 2 and the postgres-check run in ~0s with
@@ -69,9 +73,7 @@ jobs:
       # Decimal crash shipped with a green suite because no linter ran)
       # and unused imports. Runs before the suite so a lint failure is
       # reported as its own step, not buried in test output.
-      - name: Install lint dependencies
-        run: pip install -r requirements-dev.txt
-
+      # (requirements-dev.txt is already installed above.)
       - name: Pyflakes lint (src + tests)
         run: python -m pyflakes src/ tests/
 
@@ -81,6 +83,48 @@ jobs:
       # dependency overrides) stays per-worker.
       - name: Pytest suite
         run: python -m pytest tests/ -q -n auto
+
+  # PM-m26: the deploy artifacts were never validated by CI — a broken
+  # compose file or DO spec was found only at deploy time. This job
+  # validates both on every push/PR, without starting anything (the env
+  # below is dummy values that satisfy the compose `:?` required-var
+  # checks; nothing connects to a database).
+  deploy-artifacts:
+    runs-on: ubuntu-latest
+    env:
+      ENVIRONMENT: test
+DATABASE_URL: <redacted>
+      DATABASE_SSLMODE: require
+      JWT_SECRET_KEY: ci-only-dummy-jwt-secret-that-is-long-enough-0123
+      DATA_ENCRYPTION_KEY: ci-only-dummy-key
+      DOMAIN: ci.example.com
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dev dependencies (PyYAML for the spec parse)
+        run: pip install -r requirements-dev.txt
+
+      - name: Validate docker-compose.prod.yml
+        run: docker compose -f docker-compose.prod.yml config -q
+
+      - name: Parse .do/app.yaml and pin release behaviour
+        run: |
+          python - <<'PY'
+          import yaml
+          spec = yaml.safe_load(open(".do/app.yaml"))
+          assert spec["services"][0]["github"]["deploy_on_push"] is False, \
+              "deploy_on_push must stay false (PM-12: tag-triggered releases)"
+          envs = {e["key"]: e["value"] for e in spec["services"][0]["envs"]}
+          assert envs["ALLOWED_HOSTS"] and envs["ALLOWED_ORIGINS"], \
+              "ALLOWED_HOSTS/ALLOWED_ORIGINS must be set (C-1)"
+          assert spec["databases"][0]["production"] is False, \
+              "DO database is dev-tier until flipped to production (C-1)"
+          print("app.yaml parses; deploy_on_push=false; ALLOWED_* set; DB dev-tier flagged")
+          PY
 
   # T-M1 (senior review 2026-11-18): the Playwright smoke suite is the
   # only frontend test layer, and it was dead since the ERP removal and

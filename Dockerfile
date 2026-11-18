@@ -38,6 +38,14 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# PM-11: bake the built commit into the image so /healthz can report
+# which commit is actually live (runbook §2D "push != live" check).
+# Compose passes it via `args:` (deploy.sh exports GIT_SHA from
+# `git rev-parse`); the DO build has no equivalent, so it stays "dev"
+# there. Default "dev" = local build with no SHA supplied.
+ARG GIT_SHA=dev
+ENV GIT_SHA=${GIT_SHA}
+
 COPY src ./src
 COPY alembic ./alembic
 COPY alembic.ini .

@@ -2,6 +2,13 @@
 # Deploy/update with: doctl apps create --spec .do/app.yaml
 #                  or: doctl apps update <APP_ID> --spec .do/app.yaml
 #
+# STATUS (PM review 2026-11-18, C-1): this is one of TWO candidate deploy
+# targets — VPS + Neon (docker-compose.prod.yml + scripts/deploy.sh) is the
+# other. NEITHER is canonical yet: the user has not picked one (open
+# question 1; see README "Deploy paths"). Both paths can now boot (the
+# migrate job needs only DATABASE_URL since the C-1 fix), but do not deploy
+# from this spec until the target is chosen — and then archive/delete the
+# losing spec.
 # Before deploying:
 #   1. github.repo is set to Heinthurein77/Business_Ops_Tracker below (web
 #      service AND migrate job) — only the branch would need changing.
@@ -75,7 +82,15 @@ services:
     github:
       repo: Heinthurein77/Business_Ops_Tracker
       branch: main
-      deploy_on_push: true
+      # PM-12: tag-triggered releases, not deploy-on-push. `deploy_on_push`
+      # used to be true, so any merged PR went straight to production with
+      # CI as the only gate and nowhere to smoke-test a release candidate.
+      # With it false, a merge deploys nothing: cut a release tag, then
+      # deploy that tag explicitly (`doctl apps create-deployment <APP_ID>`
+      # after updating the spec/branch to the tag, or from the DO dashboard).
+      # The `v1.0.0` tag itself belongs on the go-live commit (PM-11) —
+      # do not tag before then.
+      deploy_on_push: false
     http_port: 8000
     instance_size_slug: apps-s-1vcpu-1gb
     # Sign-in and password-reset throttling is stored in the database, so it is
@@ -112,10 +127,22 @@ services:
         value: "do-connecting-ip"
         scope: RUN_TIME
       # CSRF/Host hardening. The app already rejects cross-site state-changing
-      # requests by comparing Origin with Host. If you serve it under several
-      # hostnames, or want to pin them, also set:
-      #   ALLOWED_HOSTS    your-domain.com,your-app.ondigitalocean.app
-      #   ALLOWED_ORIGINS  https://your-domain.com
+      # requests by comparing Origin with Host. ALLOWED_HOSTS / ALLOWED_ORIGINS
+      # are REQUIRED in production (src/config.py refuses to start without
+      # them) — they used to be commented-only suggestions here, so a DO
+      # deploy booted with the Host check disabled (C-1, PM review
+      # 2026-11-18). Replace `replace-with-your-domain` with the real domain
+      # (plus the app's `<app>.ondigitalocean.app` domain if it is also
+      # served) BEFORE the first deploy: the placeholder values let the app
+      # boot, but the Host check will reject requests to the real domain.
+      # localhost / 127.0.0.1 stay because the container health check hits
+      # 127.0.0.1 (same as the compose path).
+      - key: ALLOWED_HOSTS
+        value: "replace-with-your-domain,localhost,127.0.0.1"
+        scope: RUN_TIME
+      - key: ALLOWED_ORIGINS
+        value: "https://replace-with-your-domain"
+        scope: RUN_TIME
       # Content-Security-Policy: `enforce` (default), `report-only` to trial it
       # while watching the browser console, or `off`.
       - key: CSP_MODE
@@ -162,6 +189,10 @@ jobs:
     instance_size_slug: apps-s-1vcpu-0.5gb
     run_command: alembic upgrade head
     envs:
+      # C-1: migrations need ONLY the database URL now (alembic/env.py no
+      # longer imports the full app Settings, so no JWT / encryption /
+      # allowlist secrets are needed here). The shared envs above still
+      # apply to this job, but the migration itself does not read them.
       - key: DATABASE_URL
         value: ${db.DATABASE_URL}
         scope: RUN_TIME
@@ -180,5 +211,8 @@ databases:
     # started, but it's a single shared node with no standby or point-in-time
     # recovery, and DO doesn't recommend it for production data. Flip to
     # `true` (a managed cluster — extra cost) before real business data goes in.
+    # GO-LIVE GATE: as committed this is `false` — a dev-tier DB with no
+    # standby/PITR. Do not put real business data in until it is `true`
+    # (and Neon PITR is the equivalent gate on the VPS path).
     production: false
     cluster_name: business-ops-tracker-db

@@ -37,7 +37,8 @@ data goes in.
    ```bash
    DATABASE_URL='<scratch connection string>' alembic heads
    DATABASE_URL='<scratch connection string>' alembic upgrade head
-   # expect: single head a720b6b7c616, upgrade is a no-op
+   # expect: exactly one head (matching `git log` — never trust a hash
+   # printed in a doc), upgrade is a no-op
    ```
 3. Start the app against the scratch DB (test env) and spot-check: a
    CEO can log in, the CEO dashboard loads, and one
@@ -56,7 +57,7 @@ data goes in.
 4. Run the migration-chain check above against the restored DB.
 5. Update `DATABASE_URL` (and `MIGRATION_DATABASE_URL`, if the roles
    are in use) to the restored database and `up -d --build`.
-6. Verify §2D of the incident runbook ([BOT_Incident_Runbook_2026-11-09.md](BOT_Incident_Runbook_2026-11-09.md)) (login, CEO dashboard, one attachment
+6. Verify §2D of the go-live runbook ([BOT_GoLive_Runbook_2026-10-21.md](BOT_GoLive_Runbook_2026-10-21.md)) (login, CEO dashboard, one attachment
    resolves).
 7. If Neon PITR is unavailable, restore the latest weekly dump instead:
    ```bash
@@ -93,7 +94,13 @@ data goes in.
       dashboard, and record the window here.
 - [ ] Enable R2 bucket versioning in the Cloudflare dashboard.
 - [ ] Choose the off-server home for weekly dumps (`BACKUP_DIR`) and
-      copy the first dump there.
+      copy the first dump there — then verify the COPY, not just the
+      original: `pg_restore -l <off-server copy>` must list the dump's
+      contents (a copy that does not list is not a backup). Record the
+      check (date + who) here. `scripts/backup.sh` already verifies
+      each dump it writes (`pg_restore -l`, PM-13), but that only
+      proves the on-server file — the off-server copy needs its own
+      check after every copy, not just the first one.
 - [ ] Verify the off-platform `DATA_ENCRYPTION_KEY` copy by decrypting
       a canary value with it (see incident runbook [BOT_Incident_Runbook_2026-11-09.md](BOT_Incident_Runbook_2026-11-09.md)).
 - [ ] Run and record the first restore drill (go-live gate).

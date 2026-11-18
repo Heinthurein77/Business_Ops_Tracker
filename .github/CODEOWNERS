@@ -1,0 +1,25 @@
+# Business Ops Tracker — code owners.
+#
+# PM-16 (PM review 2026-11-18): no CODEOWNERS existed, so nothing in the
+# repo required a review before merging to main — and with DO
+# deploy_on_push (now off, PM-12) a merge went straight to production.
+# This file makes the Chairman the required reviewer for the deploy and
+# security surfaces. It is only half the gate: branch protection itself
+# (require PR + green CI on main) is a USER-SIDE GitHub setting
+# (repo Settings > Branches, ~5 min) — set it, and record it in the
+# go-live runbook.
+#
+# The owner below is the repo owner (Heinthurein77); adjust the handle if
+# review should route to someone else.
+
+# Deploy, release and CI surfaces — every change here is a production risk.
+.dockerignore .do/ docker-compose*.yml Dockerfile Caddyfile CHANGELOG.md @Heinthurein77
+.github/ @Heinthurein77
+deploy/ scripts/ @Heinthurein77
+
+# App config, auth and data protection — the production guards live here.
+src/config.py src/crypto.py src/auth.py src/edge.py src/client_ip.py @Heinthurein77
+alembic/ @Heinthurein77
+
+# Everything else.
+* @Heinthurein77
