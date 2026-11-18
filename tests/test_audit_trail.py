@@ -19,6 +19,7 @@ from src.auth import hash_password
 from src.models import (
     BusinessUnit, DailyFinancial, Notification, User,
 )
+from src.report_forms import build_ceo_report_form
 from src.routers.ceo import submit_report as ceo_submit_report
 from src.utils import today_local
 
@@ -62,7 +63,9 @@ def _ceo_submit(db, user, **overrides):
     )
     payload.update(overrides)
     request = Request({"type": "http", "headers": [], "client": ("8.8.8.8", 5555)})
-    return ceo_submit_report(request=request, user=user, db=db, **payload)
+    form = build_ceo_report_form(request=request, user=user, db=db,
+                                 rate_limiter=ceo_router._rate_limiter, **payload)
+    return ceo_submit_report(request=request, form=form, user=user, db=db)
 
 
 def _seed_history(db, revenue, days=14):

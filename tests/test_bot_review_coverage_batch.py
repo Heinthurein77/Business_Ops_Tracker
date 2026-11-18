@@ -36,6 +36,7 @@ from src.models import (
 from src.routers.auth import (
     forgot_password, force_password_change, login, logout,
 )
+from src.report_forms import build_ho_report_form
 from src.routers.ho import ho_dashboard, set_monthly_target, submit_report
 from src.schemas import (
     ForgotPasswordRequest, ForcePasswordChangeRequest, LoginRequest,
@@ -418,9 +419,10 @@ def ho_db(db):
 
 
 def _submit(db, ho_user, **overrides):
-    # Every form field must be passed explicitly: called directly (not
-    # through FastAPI), an omitted field keeps its Form(...) default object
-    # instead of "".
+    # B-M1: the handler takes a parsed form now — build it explicitly
+    # (every field passed, so nothing falls back to a Form(...) default).
+    import src.routers.ho as ho_router
+    ho_router._rate_limiter.reset()
     payload = {
         "revenue": "100000", "cash_flow": "20000", "receivable": "5000",
         "payable": "3000", "other_amount": "1000", "financial_other_notes": "",
@@ -433,7 +435,10 @@ def _submit(db, ho_user, **overrides):
         "social_other_notes": "", "attachment": None,
     }
     payload.update(overrides)
-    return submit_report(make_request(), user=ho_user, db=db, **payload)
+    request = make_request()
+    form = build_ho_report_form(request=request, user=ho_user, db=db,
+                                rate_limiter=ho_router._rate_limiter, **payload)
+    return submit_report(request, form=form, user=ho_user, db=db)
 
 
 def test_ho_dashboard_empty(ho_db):

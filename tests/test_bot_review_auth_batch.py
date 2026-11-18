@@ -531,8 +531,8 @@ class TestBootstrapPasswordFile:
 
 class TestMacroAttachmentsRejected:
     def test_allowlist_has_no_macro_capable_extensions(self):
-        from src.routers.ceo import ALLOWED_ATTACHMENT_EXTENSIONS as ceo_exts
-        from src.routers.ho import ALLOWED_ATTACHMENT_EXTENSIONS as ho_exts
+        from src.services.daily_report import ALLOWED_ATTACHMENT_EXTENSIONS as ceo_exts
+        from src.services.daily_report import ALLOWED_ATTACHMENT_EXTENSIONS as ho_exts
 
         for exts in (ceo_exts, ho_exts):
             assert "doc" not in exts
@@ -543,6 +543,7 @@ class TestMacroAttachmentsRejected:
     def test_ho_submit_rejects_doc_and_xls(self, db):
         import io as _io
 
+        from src.report_forms import build_ho_report_form
         from src.routers.ho import submit_report
         from src.upload_validation import _OLE_MAGIC
 
@@ -560,7 +561,12 @@ class TestMacroAttachmentsRejected:
                 "event_flag": "true", "meeting_flag": "false", "golf_flag": "false",
                 "social_other_notes": "", "attachment": attachment,
             }
-            return submit_report(make_request(), user=ho_user, db=db, **payload)
+            import src.routers.ho as ho_router
+            ho_router._rate_limiter.reset()
+            request = make_request()
+            form = build_ho_report_form(request=request, user=ho_user, db=db,
+                                        rate_limiter=ho_router._rate_limiter, **payload)
+            return submit_report(request, form=form, user=ho_user, db=db)
 
         ole = _OLE_MAGIC + b"\x00" * 10
         for filename in ("report.doc", "sheet.xls"):

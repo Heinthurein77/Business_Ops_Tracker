@@ -172,14 +172,39 @@ class TestUploadPathCoverage:
 
         from src.routers import ceo, ho, ops
 
+        def _takes_upload(call):
+            try:
+                params = inspect.signature(call).parameters.values()
+            except (TypeError, ValueError):
+                return False
+            return any("UploadFile" in str(p.annotation) for p in params)
+
+        def _scan_dependant(dep, seen):
+            # B-M1: submit-report's UploadFile lives on its form dependency
+            # (src/report_forms.py), not on the handler — walk the
+            # dependency tree too, or the edge upload list silently loses
+            # the two routes that need the higher body cap most.
+            call = getattr(dep, "call", None)
+            if call is None or id(call) in seen:
+                return False
+            seen.add(id(call))
+            if _takes_upload(call):
+                return True
+            return any(_scan_dependant(d, seen) for d in getattr(dep, "dependencies", []))
+
         found = set()
         for router_module in (ceo, ho, ops):
             for route in router_module.router.routes:
                 endpoint = getattr(route, "endpoint", None)
                 if endpoint is None:
                     continue
-                params = inspect.signature(endpoint).parameters.values()
-                if any("UploadFile" in str(p.annotation) for p in params):
+                if _takes_upload(endpoint):
+                    found.add(route.path)
+                    continue
+                dependant = getattr(route, "dependant", None)
+                if dependant is not None and any(
+                    _scan_dependant(d, set()) for d in dependant.dependencies
+                ):
                     found.add(route.path)
         return found, _re
 

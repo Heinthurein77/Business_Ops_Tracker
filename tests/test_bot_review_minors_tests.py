@@ -30,6 +30,7 @@ from src import r2_storage as r2_mod
 from src.auth import hash_password, verify_password
 from src.config import settings
 from src.models import AuditLog, Base, BusinessUnit, DailyFinancial, User
+from src.report_forms import build_ceo_report_form, build_ho_report_form
 from src.routers.ceo import submit_report as ceo_submit_report
 from src.routers.ho import submit_report as ho_submit_report
 from src.utils import today_local
@@ -139,7 +140,9 @@ def _ceo_submit(db, user, **overrides):
     )
     payload.update(overrides)
     request = Request({"type": "http", "headers": [], "client": ("8.8.8.8", 5555)})
-    return ceo_submit_report(request=request, user=user, db=db, **payload)
+    form = build_ceo_report_form(request=request, user=user, db=db,
+                                 rate_limiter=ceo_router._rate_limiter, **payload)
+    return ceo_submit_report(request=request, form=form, user=user, db=db)
 
 
 def _ho_submit(db, user, **overrides):
@@ -157,7 +160,9 @@ def _ho_submit(db, user, **overrides):
     )
     payload.update(overrides)
     request = Request({"type": "http", "headers": [], "client": ("8.8.8.8", 5555)})
-    return ho_submit_report(request, user=user, db=db, **payload)
+    form = build_ho_report_form(request=request, user=user, db=db,
+                                rate_limiter=ho_router._rate_limiter, **payload)
+    return ho_submit_report(request, form=form, user=user, db=db)
 
 
 # ------------------------------------------------------- T-m1 (complement)

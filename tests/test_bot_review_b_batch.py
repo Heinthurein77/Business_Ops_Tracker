@@ -15,9 +15,7 @@ from sqlalchemy.orm import sessionmaker
 
 from src.models import AuditLog, Base, BusinessUnit, Notification, User
 from src.routers.ceo import set_monthly_target as ceo_set_monthly_target
-from src.routers.ceo import submit_report as ceo_submit_report
 from src.routers.ho import set_monthly_target as ho_set_monthly_target
-from src.routers.ho import submit_report as ho_submit_report
 from src.schemas import MonthlyTargetRequest
 from src.utils import today_local
 
@@ -25,10 +23,16 @@ REQUEST = SimpleNamespace(headers={}, client=SimpleNamespace(host="127.0.0.1"))
 
 
 @pytest.fixture()
-def db():
-    engine = create_engine("sqlite://")
+def db(tmp_path):
+    # B-M1: file-backed SQLite (not :memory:) so the submit handler,
+    # which FastAPI runs on a threadpool thread, sees the same rows as
+    # the test thread. expire_on_commit=False so the test user objects
+    # keep their loaded attributes when the HTTP layer reads them
+    # from the worker thread (no lazy refresh on the fixture session).
+    engine = create_engine(f"sqlite:///{tmp_path}/b.db",
+                           connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
     session.add_all([
         BusinessUnit(id=1, code="BU1", name="Shop One"),
         BusinessUnit(id=2, code="BU2", name="Shop Two"),
@@ -73,11 +77,63 @@ _SUBMIT_DEFAULTS = dict(
 )
 
 
+# B-M1: submit-report tests go through HTTP (real routing, Form parsing
+# and middleware) instead of calling the handler as a plain function with
+# a fake request. The app's auth/db dependencies are overridden per call:
+# get_current_user returns the test user, get_db yields a fresh session on
+# the same file-backed engine. Error responses are translated back into
+# HTTPException so the existing status/detail assertions read unchanged.
+def _post_submit(db, user, path, payload):
+    import asyncio
+
+    import httpx
+
+    from src.auth import get_current_user
+    from src.database import get_db
+    from src.main import app
+
+    def _override_db():
+        session = sessionmaker(bind=db.test_engine)()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    def _override_user():
+        return user
+
+    app.dependency_overrides[get_db] = _override_db
+    app.dependency_overrides[get_current_user] = _override_user
+    try:
+        async def _go():
+            async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app),
+                    base_url="http://testserver") as ac:
+                return await ac.post(path, data={
+                    k: v for k, v in payload.items() if v is not None
+                })
+
+        response = asyncio.run(_go())
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(get_current_user, None)
+    if response.status_code == 200:
+        return response.json()
+    try:
+        detail = response.json().get("detail", "")
+    except Exception:
+        detail = ""
+    if isinstance(detail, list):
+        detail = "; ".join(str(item.get("msg", item)) for item in detail)
+    raise HTTPException(status_code=response.status_code,
+                        detail=detail or f"Request failed ({response.status_code})")
+
+
 def _ceo_submit(db, user, **overrides):
     import src.routers.ceo as ceo_router
     ceo_router._rate_limiter.reset()
     kwargs = {**_SUBMIT_DEFAULTS, **overrides}
-    return ceo_submit_report(request=REQUEST, user=user, db=db, **kwargs)
+    return _post_submit(db, user, "/api/ceo/submit-report", kwargs)
 
 
 def _ho_submit(db, user, **overrides):
@@ -94,7 +150,7 @@ def _ho_submit(db, user, **overrides):
         attachment=None,
     )
     payload.update(overrides)
-    return ho_submit_report(REQUEST, user=user, db=db, **payload)
+    return _post_submit(db, user, "/api/ho/submit-report", payload)
 
 
 def _target(month_iso):
