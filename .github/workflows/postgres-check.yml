@@ -58,12 +58,11 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      # CI-1 (2026-11-17 review): see tests.yml — requirements.txt
-      # carries no pytest, so install it explicitly (9.1.1, the version
-      # the local suite passes against) or the proof-test step below
-      # fails with "No module named pytest".
-      - name: Install pytest
-        run: pip install pytest==9.1.1
+      # PM-m26 (was CI-1, 2026-11-17 review): pytest lives in
+      # requirements-dev.txt now — see tests.yml. One install, no
+      # duplicated explicit version here.
+      - name: Install dev dependencies (pytest)
+        run: pip install -r requirements-dev.txt
 
       # Diagnostic step (CI red on e612511, 2026-11-17): see tests.yml —
       # same step here. The postgres-check run failed in ~0s with exit 1,

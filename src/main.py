@@ -230,11 +230,11 @@ app.include_router(ops.router)
 
 
 def _assert_unique_routes(fastapi_app) -> None:
-    """m-25: two routers share the /api/admin prefix (admin.py and
-    users.py), so a future route defined twice would silently shadow the
-    first with no warning. Fail fast at startup on any (path, method)
-    collision. Same path with different methods (GET + POST /api/ops/...)
-    is legitimate and is not a collision."""
+    """m-25: three routers share the /api/admin prefix (admin.py,
+    users.py and password_resets.py), so a future route defined twice
+    would silently shadow the first with no warning. Fail fast at startup
+    on any (path, method) collision. Same path with different methods
+    (GET + POST /api/ops/...) is legitimate and is not a collision."""
     from fastapi.routing import APIRoute
 
     seen: dict[tuple[str, str], str] = {}

@@ -132,7 +132,8 @@ commit ("push ≠ live").
 - `frontend/src/` — pages, `api/client.js`, `context/AuthContext.jsx`.
 - `tests/` — pytest suite (HTTP tests go through the shared `client`
   fixture in root `conftest.py`).
-- `docs/` — `auth-model.md`, `delete-policy.md`,
+- `docs/` — `README.md` (index), `flows.md` (the five flows + five
+  lifecycles), `auth-model.md`, `delete-policy.md`,
   `backup-recovery.md`, `session-policy.md`,
   `single-instance-risk.md`, `security-decisions.md`, plus the
   incident runbook (`BOT_Incident_Runbook_2026-11-09.md`) and the
