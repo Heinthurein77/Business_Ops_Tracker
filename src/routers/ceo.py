@@ -9,23 +9,21 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from src.auth import assert_token_current, require_roles, resolve_redirect_path
+from src.auth import require_roles, resolve_redirect_path
+from src.constants import NotificationType, Role
 from src.config import settings
 from src.database import get_db
 from src.models import ActivityLog, BusinessUnit, CeoProfile, DailyFinancial, FinancialNote, HealthStatus, MonthlyTarget, SocialLog, User
 from src.r2_storage import delete_object, extract_r2_key
 from src.r2_storage import is_configured as r2_is_configured
-from src.r2_storage import upload_attachment_or_503, upload_fileobj
+from src.r2_storage import upload_fileobj
+from src.report_forms import CeoReportForm, ceo_report_form
 from src.schemas import CeoProfileRequest, FinancialNoteRequest, MonthlyTargetRequest
+from src.services.daily_report import DailyReportRowSpec, upsert_daily_report
 from src.upload_validation import content_matches_extension
 from src.utils import (
-    BP_DIASTOLIC_RANGE,
-    BP_SYSTOLIC_RANGE,
-    HEART_RATE_RANGE,
     MAX_NARRATIVE_TEXT_LEN,
     MAX_SHORT_TEXT_LEN,
-    SLEEP_HOURS_RANGE,
-    STEPS_RANGE,
     build_activity_rows,
     build_ceo_activity_calendar,
     build_financial_rows,
@@ -37,26 +35,18 @@ from src.utils import (
     compute_field_changes,
     compute_monthly_social_counts,
     evaluate_cumulative_health,
-    form_decimal,
-    form_int,
-    form_money,
-    form_percent,
     form_text,
     format_local_datetime,
     log_audit,
     monthly_target_window_error,
     notify,
-    parse_bool,
-    parse_bounded_decimal,
-    parse_month_or_default,
+    parse_month_or_today,
     parse_monthly_target_amounts,
-    report_date_window_error,
     serialize_ceo_profile,
     shift_month,
     SubmitRateLimiter,
     today_local,
     todays_submission_events,
-    validate_blood_pressure,
 )
 
 router = APIRouter(prefix="/api/ceo", tags=["ceo"])
@@ -70,10 +60,6 @@ REPORT_SUBMIT_RATE_WINDOW_SECONDS = 60
 # M-12: the guard itself lives in src/utils.py (SubmitRateLimiter); this
 # router owns one instance so CEO and HO keep separate budgets.
 _rate_limiter = SubmitRateLimiter(REPORT_SUBMIT_RATE_LIMIT, REPORT_SUBMIT_RATE_WINDOW_SECONDS)
-_is_rate_limited = _rate_limiter.is_limited
-
-MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
-ALLOWED_ATTACHMENT_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "gif", "webp", "docx", "xlsx", "csv", "txt"}
 
 logger = logging.getLogger(__name__)
 
@@ -85,12 +71,12 @@ ALLOWED_PROFILE_PHOTO_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
 def ceo_dashboard(
     month: str = "",
     for_date: str = Query("", alias="date"),
-    user: User = Depends(require_roles("CEO")),
+    user: User = Depends(require_roles(Role.CEO)),
     db: Session = Depends(get_db),
 ):
     report_date = today_local()
 
-    calendar_year, calendar_month = parse_month_or_default(month, report_date)
+    calendar_year, calendar_month = parse_month_or_today(month, report_date)
 
     # Activity / health / social rows are the submitting CEO's own personal
     # data: every read of them below is scoped to `submitted_by == user.id`
@@ -550,14 +536,14 @@ def ceo_dashboard(
 @router.get("/monthly-target")
 def get_monthly_target(
     month: str = "",
-    user: User = Depends(require_roles("CEO")),
+    user: User = Depends(require_roles(Role.CEO)),
     db: Session = Depends(get_db),
 ):
     """Fetches the target already set for the given month (default: current
     month) so the "Set Monthly Target" form can pre-fill with existing values
     instead of always starting blank."""
     today = today_local()
-    year, month_num = parse_month_or_default(month, today)
+    year, month_num = parse_month_or_today(month, today)
     target_month = date(year, month_num, 1)
 
     target = (
@@ -583,7 +569,7 @@ def get_monthly_target(
 def set_monthly_target(
     payload: MonthlyTargetRequest,
     request: Request,
-    user: User = Depends(require_roles("CEO")),
+    user: User = Depends(require_roles(Role.CEO)),
     db: Session = Depends(get_db),
 ):
     """Sets this business unit's monthly target for the given month — but only
@@ -639,7 +625,7 @@ def set_monthly_target(
 
 
 @router.get("/profile")
-def get_profile(user: User = Depends(require_roles("CEO")), db: Session = Depends(get_db)):
+def get_profile(user: User = Depends(require_roles(Role.CEO)), db: Session = Depends(get_db)):
     """Fetches the CEO's own mandatory profile — pre-fills the Profile Setup
     form with whatever's already on file (blank fields on first visit)."""
     from sqlalchemy.orm import load_only
@@ -701,7 +687,7 @@ def set_profile(
     address: str = Form(...),
     business_details: Optional[str] = Form(None),
     profile_photo: Optional[UploadFile] = File(None),
-    user: User = Depends(require_roles("CEO")),
+    user: User = Depends(require_roles(Role.CEO)),
     db: Session = Depends(get_db),
 ):
     """Creates or updates the CEO's mandatory profile. Individual Form(...)
@@ -815,7 +801,7 @@ def set_profile(
 
 
 @router.get("/financial-notes")
-def list_financial_notes(user: User = Depends(require_roles("CEO")), db: Session = Depends(get_db)):
+def list_financial_notes(user: User = Depends(require_roles(Role.CEO)), db: Session = Depends(get_db)):
     """This month's Record Notes log for the CEO's own business unit."""
     month_start = date(today_local().year, today_local().month, 1)
     notes = (
@@ -836,7 +822,7 @@ def list_financial_notes(user: User = Depends(require_roles("CEO")), db: Session
 def add_financial_note(
     payload: FinancialNoteRequest,
     request: Request,
-    user: User = Depends(require_roles("CEO")),
+    user: User = Depends(require_roles(Role.CEO)),
     db: Session = Depends(get_db),
 ):
     """Appends one dated entry to this month's Record Notes log — an
@@ -862,96 +848,115 @@ def add_financial_note(
     return {"ok": True}
 
 
-# Legacy HealthStatus chip value sets — the health form collects these
-# again as one-tap chips, and only these exact values may be stored (the
-# dashboards switch on them).
-STRESS_LEVELS = ("Low", "Medium", "High")
-ENERGY_MOODS = ("Energetic", "Normal", "Drained")
+_parse_report_form = ceo_report_form(_rate_limiter)
 
 
-def _form_choice(raw: Optional[str], allowed: tuple, label: str) -> Optional[str]:
-    """Optional chip value: blank -> None; anything outside the allowed
-    set -> 422 (a tampered client must not store free text in a column
-    the dashboards treat as an enum)."""
-    value = (raw or "").strip()
-    if not value:
-        return None
-    if value not in allowed:
-        raise HTTPException(status_code=422, detail=f"{label} must be one of: {', '.join(allowed)}")
-    return value
+def _apply_ceo_report(form: CeoReportForm, user: User):
+    """Returns the `apply` callback for the shared upsert: assigns the
+    parsed CEO form to the four per-day rows. Returns the previous
+    attachment URL (or None) so a replaced attachment can be deleted
+    after the commit. Pre-overwrite values (help request, attachment)
+    are read before any assignment — the resubmit rules below depend on
+    what was there before this submission."""
 
+    def apply(rows, previous):
+        financial = rows["financial"]
+        activity = rows["activity"]
+        health = rows["health"]
+        social = rows["social"]
 
-def _form_health_percent(raw: Optional[str], label: str) -> Optional[int]:
-    """Exercise % sent by the health section (health_*_percent fields).
-    None means the field was absent entirely (an older client) and the
-    caller keeps the pre-move behavior; a present value must be a whole
-    number 0-100, else 422. Blank -> None (not given)."""
-    if raw is None:
-        return None
-    raw = raw.strip()
-    if raw == "":
-        return None
-    try:
-        value = int(raw)
-    except ValueError:
-        raise HTTPException(status_code=422, detail=f"{label} must be a whole number between 0 and 100")
-    if not 0 <= value <= 100:
-        raise HTTPException(status_code=422, detail=f"{label} must be between 0 and 100")
-    return value
+        # expenses/net_profit/cash_in_hand are legacy columns no longer collected
+        # from the form — zeroed out rather than left stale so historical views
+        # (Comparison, Operations, Excel export) show $0 rather than old data.
+        financial.revenue = form.revenue
+        financial.other_amount = form.other_amount
+        financial.expenses = Decimal("0")
+        financial.net_profit = Decimal("0")
+        financial.cash_in_hand = Decimal("0")
+        financial.cash_flow = form.cash_flow
+        financial.receivable = form.receivable
+        financial.payable = form.payable
+        financial.other_notes = form.financial_other_notes or None
+        financial.submitted_by = user.id
 
+        # Captured for the help re-open rule below: if this day's request was
+        # already resolved and the CEO now changes the ask, the resolution is
+        # cleared (the old response no longer matches the request).
+        previous_help_needed = activity.help_needed
+        previous_help_resolved_at = activity.help_resolved_at
+        # SM-7: captured before being overwritten below, so a resubmission that
+        # replaces the attachment can delete the previous R2 object afterwards.
+        previous_document_url = activity.document_url
+        if previous["activity"] is not None and activity.submitted_by != user.id:
+            # Today's row was left by a previous CEO of this unit: every field is
+            # overwritten below, but the attachment link is only replaced when a
+            # new file is sent — never carry their document over as this CEO's.
+            activity.document_url = None
+        activity.meetings_attended = form.meetings_attended
+        activity.meetings_count = form.meetings_count
+        activity.site_visits = form.site_visits
+        activity.key_decisions = form.key_decisions
+        activity.key_achievement = form.key_achievement or None
+        activity.next_day_schedule = form.next_day_schedule
+        activity.problems_today = form.problems_today or None
+        activity.help_needed = form.help_needed or None
+        if previous_help_resolved_at is not None and activity.help_needed != previous_help_needed:
+            # Re-open: the ask changed after HO/Chairman answered it, so the
+            # recorded response no longer applies. An unchanged resubmission
+            # (e.g. fixing the day's revenue) keeps the resolution intact.
+            activity.help_resolved_at = None
+            activity.help_resolved_by = None
+            activity.help_response = None
+        if form.document_url:
+            activity.document_url = form.document_url
+        if not form.health_exercise_present:
+            # Pre-move clients still send exercise % as activity fields. The
+            # current form sends health_*_percent instead, and then the
+            # activity row's legacy percents are left exactly as stored —
+            # overwriting them with blanks would erase the fallback data
+            # older days rely on for display.
+            activity.gym_percent = form.gym_percent
+            activity.swimming_percent = form.swimming_percent
+            activity.cycle_percent = form.cycle_percent
+        activity.other_notes = form.activity_other_notes or None
+        activity.submitted_by = user.id
 
-def _form_weight(raw: Optional[str]) -> Optional[Decimal]:
-    """Optional body weight in kg: blank -> None; non-numeric or outside
-    the sane 20-400 kg range -> 422."""
-    if raw is None or raw.strip() == "":
-        return None
-    value = parse_bounded_decimal(raw, places=1, limit=Decimal(10) ** 6)
-    if value is None or not (Decimal("20") <= value <= Decimal("400")):
-        raise HTTPException(status_code=422, detail="Weight must be a number between 20 and 400 kg")
-    return value
+        # physical_health/sleep_quality remain legacy fields no longer
+        # collected — left null. stress_level/energy_mood are collected again
+        # (one-tap chips), alongside weight, the sick toggle, and the exercise
+        # percents that moved here from the activity section.
+        health.daily_steps = form.daily_steps
+        health.heart_rate = form.heart_rate
+        health.sleep_hours = form.sleep_hours
+        health.bp_systolic = form.bp_systolic
+        health.bp_diastolic = form.bp_diastolic
+        health.stress_level = form.stress_level
+        health.energy_mood = form.energy_mood
+        health.weight_kg = form.weight_kg
+        health.is_sick = form.is_sick
+        if form.health_exercise_present:
+            health.gym_percent = form.health_gym_percent
+            health.swimming_percent = form.health_swimming_percent
+            health.cycle_percent = form.health_cycle_percent
+        health.other_notes = form.health_other_notes or None
+        health.submitted_by = user.id
+
+        social.event_flag = form.event_flag
+        social.meeting_flag = form.meeting_flag
+        social.golf_flag = form.golf_flag
+        social.other_notes = form.social_other_notes or None
+        social.submitted_by = user.id
+
+        return previous_document_url
+
+    return apply
 
 
 @router.post("/submit-report")
 def submit_report(
     request: Request,
-    report_date: str = Form(""),
-    revenue: str = Form(""),
-    cash_flow: str = Form(""),
-    receivable: str = Form(""),
-    payable: str = Form(""),
-    other_amount: str = Form(""),
-    financial_other_notes: str = Form(""),
-    meetings_attended: str = Form(""),
-    meetings_count: str = Form(""),
-    site_visits: str = Form(""),
-    key_decisions: str = Form(""),
-    key_achievement: str = Form(""),
-    next_day_schedule: str = Form(""),
-    problems_today: str = Form(""),
-    help_needed: str = Form(""),
-    gym_percent: str = Form(""),
-    swimming_percent: str = Form(""),
-    cycle_percent: str = Form(""),
-    activity_other_notes: str = Form(""),
-    daily_steps: str = Form(""),
-    heart_rate: str = Form(""),
-    sleep_hours: str = Form(""),
-    bp_systolic: str = Form(""),
-    bp_diastolic: str = Form(""),
-    stress_level: str = Form(""),
-    energy_mood: str = Form(""),
-    weight_kg: str = Form(""),
-    is_sick: str = Form("false"),
-    health_gym_percent: Optional[str] = Form(None),
-    health_swimming_percent: Optional[str] = Form(None),
-    health_cycle_percent: Optional[str] = Form(None),
-    health_other_notes: str = Form(""),
-    event_flag: str = Form("false"),
-    meeting_flag: str = Form("false"),
-    golf_flag: str = Form("false"),
-    social_other_notes: str = Form(""),
-    attachment: Optional[UploadFile] = File(None),
-    user: User = Depends(require_roles("CEO")),
+    form: CeoReportForm = Depends(_parse_report_form),
+    user: User = Depends(require_roles(Role.CEO)),
     db: Session = Depends(get_db),
 ):
     # Deliberately a plain `def`, not `async def`: everything below is blocking
@@ -960,384 +965,80 @@ def submit_report(
     # loop, where it would stall every other request while locks are held.
     # UploadFile.file is a regular SpooledTemporaryFile, safe to use from here.
     #
-    # Direct callers (the test suite invokes this function with keyword
-    # arguments) leave any omitted parameter holding its Form(...)
-    # declaration object instead of the declared default — normalize the
-    # fields added in 2026-10 back to plain values so the validation
-    # below always sees strings / None. Over HTTP FastAPI injects real
-    # strings and this is a no-op.
-    meetings_count = meetings_count if isinstance(meetings_count, str) else ""
-    key_achievement = key_achievement if isinstance(key_achievement, str) else ""
-    stress_level = stress_level if isinstance(stress_level, str) else ""
-    energy_mood = energy_mood if isinstance(energy_mood, str) else ""
-    weight_kg = weight_kg if isinstance(weight_kg, str) else ""
-    is_sick = is_sick if isinstance(is_sick, str) else "false"
-    health_gym_percent = health_gym_percent if isinstance(health_gym_percent, (str, type(None))) else None
-    health_swimming_percent = health_swimming_percent if isinstance(health_swimming_percent, (str, type(None))) else None
-    health_cycle_percent = health_cycle_percent if isinstance(health_cycle_percent, (str, type(None))) else None
-
-    if _is_rate_limited(user.id):
-        log_audit(db, user, "REPORT_SUBMIT_RATE_LIMITED", "", request)
-        raise HTTPException(status_code=429, detail="Too many submissions in a short time. Please wait a moment and try again.")
-
-    # The dashboard form normally files today's report; an explicit
-    # report_date (sent when the dashboard was opened from the History
-    # calendar for a specific day) files that day's report instead. The
-    # business unit always comes from the caller's own assignment, never
-    # from the request, so a CEO can only ever write to their own unit.
-    # M-03: only dates inside the edit window are accepted — today plus
-    # the previous REPORT_EDIT_WINDOW_DAYS days. Older dates (and future
-    # dates) are rejected; correcting them is an admin-approved path.
-    if report_date and report_date.strip():
-        try:
-            report_date = date.fromisoformat(report_date.strip())
-        except ValueError:
-            raise HTTPException(status_code=400, detail="report_date must be a valid date (YYYY-MM-DD)")
-    else:
-        report_date = today_local()
-    window_error = report_date_window_error(report_date, today_local(), settings.REPORT_EDIT_WINDOW_DAYS)
-    if window_error:
-        raise HTTPException(status_code=400, detail=window_error)
-
-    # --- Validate every input up front, before any DB work, row lock or
-    # upload. Invalid values are a clear HTTP 400 — never a 500, and never
-    # stored (NaN/Infinity/huge money would poison the dashboards' SUMs). The
-    # ranges mirror the database CHECK constraints. Blank stays "not given". ---
-    revenue_val = form_money(revenue, "Revenue")
-    cash_flow_val = form_money(cash_flow, "Cash Flow")
-    receivable_val = form_money(receivable, "Receivable")
-    payable_val = form_money(payable, "Payable")
-    # Optional — unlike the four mandatory fields below, Other Amount was
-    # added after CEOs already had an established daily habit around
-    # Revenue/Cash Flow/Receivable/Payable, so it defaults to 0 rather than
-    # blocking submission when left blank.
-    other_amount_val = form_money(other_amount, "Other Amount") or Decimal("0")
-
-    # Financial fields are mandatory every day — no weekday/weekend exception.
-    missing = [
-        label
-        for label, val in [("Revenue", revenue_val), ("Cash Flow", cash_flow_val), ("Receivable", receivable_val), ("Payable", payable_val)]
-        if val is None
+    # B-M1: parsing/validation/upload live in src/report_forms.py (the
+    # `form` dependency) and the 4-table upsert in
+    # src/services/daily_report.py — this handler only wires them together
+    # and does the CEO-only post-submit work (anomaly + backdated alerts).
+    report_date = form.report_date
+    specs = [
+        DailyReportRowSpec(
+            key="financial", cls=DailyFinancial,
+            filters={"business_unit_id": user.business_unit_id, "report_date": report_date},
+            create_kwargs={"business_unit_id": user.business_unit_id, "report_date": report_date},
+            snapshot_fields=(
+                ("revenue", "revenue"), ("cash_flow", "cash_flow"),
+                ("receivable", "receivable"), ("payable", "payable"),
+                ("other_amount", "other_amount"), ("other_notes", "financial_other_notes"),
+            ),
+        ),
+        DailyReportRowSpec(
+            key="activity", cls=ActivityLog,
+            filters={"business_unit_id": user.business_unit_id, "report_date": report_date},
+            create_kwargs={"business_unit_id": user.business_unit_id, "report_date": report_date},
+            snapshot_fields=(
+                ("meetings_attended", "meetings_attended"), ("meetings_count", "meetings_count"),
+                ("site_visits", "site_visits"), ("key_decisions", "key_decisions"),
+                ("key_achievement", "key_achievement"), ("next_day_schedule", "next_day_schedule"),
+                ("problems_today", "problems_today"), ("help_needed", "help_needed"),
+                ("gym_percent", "gym_percent"), ("swimming_percent", "swimming_percent"),
+                ("cycle_percent", "cycle_percent"), ("other_notes", "activity_other_notes"),
+            ),
+        ),
+        DailyReportRowSpec(
+            key="health", cls=HealthStatus,
+            filters={"business_unit_id": user.business_unit_id, "report_date": report_date},
+            create_kwargs={"business_unit_id": user.business_unit_id, "report_date": report_date},
+            snapshot_fields=(
+                ("daily_steps", "daily_steps"), ("heart_rate", "heart_rate"),
+                ("sleep_hours", "sleep_hours"), ("bp_systolic", "bp_systolic"),
+                ("bp_diastolic", "bp_diastolic"), ("stress_level", "stress_level"),
+                ("energy_mood", "energy_mood"), ("weight_kg", "weight_kg"),
+                ("is_sick", "is_sick"), ("gym_percent", "gym_percent"),
+                ("swimming_percent", "swimming_percent"), ("cycle_percent", "cycle_percent"),
+                ("other_notes", "health_other_notes"),
+            ),
+        ),
+        DailyReportRowSpec(
+            key="social", cls=SocialLog,
+            filters={"business_unit_id": user.business_unit_id, "report_date": report_date},
+            create_kwargs={"business_unit_id": user.business_unit_id, "report_date": report_date},
+            snapshot_fields=(
+                ("event_flag", "event_flag"), ("meeting_flag", "meeting_flag"),
+                ("golf_flag", "golf_flag"), ("other_notes", "social_other_notes"),
+            ),
+        ),
     ]
-    if missing:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Financial fields are mandatory. Missing: {', '.join(missing)}",
-        )
-
-    daily_steps_val = form_int(daily_steps, *STEPS_RANGE)
-    heart_rate_val = form_int(heart_rate, *HEART_RATE_RANGE)
-    sleep_hours_val = form_decimal(sleep_hours, *SLEEP_HOURS_RANGE, places=1)
-    bp_systolic_val = form_int(bp_systolic, *BP_SYSTOLIC_RANGE)
-    bp_diastolic_val = form_int(bp_diastolic, *BP_DIASTOLIC_RANGE)
-    validate_blood_pressure(bp_systolic_val, bp_diastolic_val)
-
-    gym_percent_val = form_percent(gym_percent, "Gym %")
-    swimming_percent_val = form_percent(swimming_percent, "Swimming %")
-    cycle_percent_val = form_percent(cycle_percent, "Cycle %")
-
-    meetings_count_val = form_int(meetings_count, "Meetings count", 0, 99)
-
-    # Health-section additions (2026-10-22): the chips, weight and sick
-    # toggle validate to 422 — they are new fields, so they follow the
-    # JSON-API convention rather than the legacy form 400s above. The
-    # health_*_percent fields' mere presence switches exercise storage
-    # from the activity row to the health row (see the writes below).
-    stress_level_val = _form_choice(stress_level, STRESS_LEVELS, "Stress level")
-    energy_mood_val = _form_choice(energy_mood, ENERGY_MOODS, "Energy mood")
-    weight_kg_val = _form_weight(weight_kg)
-    is_sick_val = parse_bool(is_sick)
-    health_exercise_present = (
-        health_gym_percent is not None or health_swimming_percent is not None or health_cycle_percent is not None
+    result = upsert_daily_report(
+        db=db, request=request, user=user, report_date=report_date, specs=specs,
+        document_url=form.document_url, apply=_apply_ceo_report(form, user),
+        conflict_audit_action="REPORT_SUBMIT_CONFLICT",
     )
-    health_gym_percent_val = _form_health_percent(health_gym_percent, "Gym %")
-    health_swimming_percent_val = _form_health_percent(health_swimming_percent, "Swimming %")
-    health_cycle_percent_val = _form_health_percent(health_cycle_percent, "Cycle %")
-
-    financial_other_notes = form_text(financial_other_notes, "Financial notes", MAX_NARRATIVE_TEXT_LEN)
-    meetings_attended = form_text(meetings_attended, "Meetings attended", MAX_NARRATIVE_TEXT_LEN)
-    site_visits = form_text(site_visits, "Site visits", MAX_NARRATIVE_TEXT_LEN)
-    key_decisions = form_text(key_decisions, "Key decisions", MAX_NARRATIVE_TEXT_LEN)
-    key_achievement = form_text(key_achievement, "Key achievement", MAX_NARRATIVE_TEXT_LEN)
-    next_day_schedule = form_text(next_day_schedule, "Next day schedule", MAX_NARRATIVE_TEXT_LEN)
-    problems_today = form_text(problems_today, "Problems today", MAX_NARRATIVE_TEXT_LEN)
-    help_needed = form_text(help_needed, "Help needed", MAX_NARRATIVE_TEXT_LEN)
-    activity_other_notes = form_text(activity_other_notes, "Activity notes", MAX_NARRATIVE_TEXT_LEN)
-    health_other_notes = form_text(health_other_notes, "Health notes", MAX_NARRATIVE_TEXT_LEN)
-    social_other_notes = form_text(social_other_notes, "Social notes", MAX_NARRATIVE_TEXT_LEN)
-
-    # m-13: the attachment is validated and uploaded BEFORE any row is
-    # locked or written, and with NO database session held. get_db checks
-    # a pooled connection out (SELECT 1) before the handler runs, and the
-    # old code then took this day's row locks before the R2 upload — so a
-    # slow upload (up to ~90 s) held a pooled connection AND row locks.
-    # The pre-upload locks are not needed for orphan-safety: the write
-    # phase below re-takes the same row locks, a first-submission race
-    # still surfaces as the 409 at commit time (whose handler deletes
-    # the loser's upload), and a resubmission's post-commit cleanup
-    # deletes the previous attachment in every interleaving. So the
-    # upload now runs between validation and the writes, after
-    # db.close() releases the pooled connection; the write phase re-uses
-    # the same session object, which checks a fresh connection out on
-    # its next query (a new SessionLocal() here would hit a different
-    # database in tests that pass their own session).
-    document_url = None
-    if attachment is not None and attachment.filename:
-        extension = attachment.filename.rsplit(".", 1)[-1].lower() if "." in attachment.filename else ""
-        if extension not in ALLOWED_ATTACHMENT_EXTENSIONS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported attachment type. Allowed: {', '.join(sorted(ALLOWED_ATTACHMENT_EXTENSIONS))}",
-            )
-        attachment.file.seek(0, 2)
-        attachment_size = attachment.file.tell()
-        attachment.file.seek(0)
-        if attachment_size > MAX_ATTACHMENT_SIZE_BYTES:
-            raise HTTPException(status_code=400, detail="Attachment must be 10 MB or smaller")
-        if not content_matches_extension(extension, attachment.file):
-            raise HTTPException(status_code=400, detail="File content does not match its file type")
-
-        # Release the pooled connection checked out by get_db before the
-        # (potentially slow) R2 upload; the session is reused below.
-        db.close()
-        # D-4: an attachment that cannot be stored fails the submit (503)
-        # instead of saving the report as if the evidence were attached.
-        document_url = upload_attachment_or_503(attachment.file, attachment.filename)
-
-    # M-14: no_autoflush for the four lookup-or-create blocks below.
-    # Each block adds a new per-day row and the NEXT block's lookup
-    # would autoflush that pending INSERT — on a concurrent double
-    # submit the flush hits the per-day unique constraint OUTSIDE the
-    # try/except around db.commit() below and 500s instead of 409ing.
-    # With autoflush off, nothing is sent to the DB until the commit,
-    # whose IntegrityError handler is the 409 guard. The lookups only
-    # ever read already-committed rows (each block queries a different
-    # table), so deferring the flush changes no result.
-    with db.no_autoflush:
-        financial = (
-            db.query(DailyFinancial)
-            .filter(DailyFinancial.business_unit_id == user.business_unit_id, DailyFinancial.report_date == report_date)
-            .with_for_update()
-            .first()
-        )
-        # Captured before being overwritten below, so a same-day resubmission's
-        # audit log entry can show exactly what changed rather than just that a
-        # submission happened — the only tamper-evidence for financial corrections.
-        previous_financial = (
-            {
-                "revenue": financial.revenue,
-                "cash_flow": financial.cash_flow,
-                "receivable": financial.receivable,
-                "payable": financial.payable,
-                "other_amount": financial.other_amount,
-                "financial_other_notes": financial.other_notes,
-            }
-            if financial is not None
-            else None
-        )
-        if financial is None:
-            financial = DailyFinancial(business_unit_id=user.business_unit_id, report_date=report_date)
-            db.add(financial)
-
-        # expenses/net_profit/cash_in_hand are legacy columns no longer collected
-        # from the form — zeroed out rather than left stale so historical views
-        # (Comparison, Operations, Excel export) show $0 rather than old data.
-        financial.revenue = revenue_val
-        financial.other_amount = other_amount_val
-        financial.expenses = Decimal("0")
-        financial.net_profit = Decimal("0")
-        financial.cash_in_hand = Decimal("0")
-        financial.cash_flow = cash_flow_val
-        financial.receivable = receivable_val
-        financial.payable = payable_val
-        financial.other_notes = financial_other_notes or None
-        financial.submitted_by = user.id
-
-        activity = (
-            db.query(ActivityLog)
-            .filter(ActivityLog.business_unit_id == user.business_unit_id, ActivityLog.report_date == report_date)
-            .with_for_update()
-            .first()
-        )
-        previous_activity = (
-            {
-                "meetings_attended": activity.meetings_attended,
-                "meetings_count": activity.meetings_count,
-                "site_visits": activity.site_visits,
-                "key_decisions": activity.key_decisions,
-                "key_achievement": activity.key_achievement,
-                "next_day_schedule": activity.next_day_schedule,
-                "problems_today": activity.problems_today,
-                "help_needed": activity.help_needed,
-                "gym_percent": activity.gym_percent,
-                "swimming_percent": activity.swimming_percent,
-                "cycle_percent": activity.cycle_percent,
-                "activity_other_notes": activity.other_notes,
-            }
-            if activity is not None
-            else None
-        )
-        # Captured for the help re-open rule below: if this day's request was
-        # already resolved and the CEO now changes the ask, the resolution is
-        # cleared (the old response no longer matches the request).
-        previous_help_needed = activity.help_needed if activity is not None else None
-        previous_help_resolved_at = activity.help_resolved_at if activity is not None else None
-        # SM-7: captured before being overwritten below, so a resubmission that
-        # replaces the attachment can delete the previous R2 object afterwards.
-        previous_document_url = activity.document_url if activity is not None else None
-        if activity is None:
-            activity = ActivityLog(business_unit_id=user.business_unit_id, report_date=report_date)
-            db.add(activity)
-        elif activity.submitted_by != user.id:
-            # Today's row was left by a previous CEO of this unit: every field is
-            # overwritten below, but the attachment link is only replaced when a
-            # new file is sent — never carry their document over as this CEO's.
-            activity.document_url = None
-        activity.meetings_attended = meetings_attended
-        activity.meetings_count = meetings_count_val
-        activity.site_visits = site_visits
-        activity.key_decisions = key_decisions
-        activity.key_achievement = key_achievement or None
-        activity.next_day_schedule = next_day_schedule
-        activity.problems_today = problems_today or None
-        activity.help_needed = help_needed or None
-        if previous_help_resolved_at is not None and activity.help_needed != previous_help_needed:
-            # Re-open: the ask changed after HO/Chairman answered it, so the
-            # recorded response no longer applies. An unchanged resubmission
-            # (e.g. fixing the day's revenue) keeps the resolution intact.
-            activity.help_resolved_at = None
-            activity.help_resolved_by = None
-            activity.help_response = None
-        if document_url:
-            activity.document_url = document_url
-        if not health_exercise_present:
-            # Pre-move clients still send exercise % as activity fields. The
-            # current form sends health_*_percent instead, and then the
-            # activity row's legacy percents are left exactly as stored —
-            # overwriting them with blanks would erase the fallback data
-            # older days rely on for display.
-            activity.gym_percent = gym_percent_val
-            activity.swimming_percent = swimming_percent_val
-            activity.cycle_percent = cycle_percent_val
-        activity.other_notes = activity_other_notes or None
-        activity.submitted_by = user.id
-
-        health = (
-            db.query(HealthStatus)
-            .filter(HealthStatus.business_unit_id == user.business_unit_id, HealthStatus.report_date == report_date)
-            .with_for_update()
-            .first()
-        )
-        previous_health = (
-            {
-                "daily_steps": health.daily_steps,
-                "heart_rate": health.heart_rate,
-                "sleep_hours": health.sleep_hours,
-                "bp_systolic": health.bp_systolic,
-                "bp_diastolic": health.bp_diastolic,
-                "stress_level": health.stress_level,
-                "energy_mood": health.energy_mood,
-                "weight_kg": health.weight_kg,
-                "is_sick": health.is_sick,
-                "gym_percent": health.gym_percent,
-                "swimming_percent": health.swimming_percent,
-                "cycle_percent": health.cycle_percent,
-                "health_other_notes": health.other_notes,
-            }
-            if health is not None
-            else None
-        )
-        if health is None:
-            health = HealthStatus(business_unit_id=user.business_unit_id, report_date=report_date)
-            db.add(health)
-        # physical_health/sleep_quality remain legacy fields no longer
-        # collected — left null. stress_level/energy_mood are collected again
-        # (one-tap chips), alongside weight, the sick toggle, and the exercise
-        # percents that moved here from the activity section.
-        health.daily_steps = daily_steps_val
-        health.heart_rate = heart_rate_val
-        health.sleep_hours = sleep_hours_val
-        health.bp_systolic = bp_systolic_val
-        health.bp_diastolic = bp_diastolic_val
-        health.stress_level = stress_level_val
-        health.energy_mood = energy_mood_val
-        health.weight_kg = weight_kg_val
-        health.is_sick = is_sick_val
-        if health_exercise_present:
-            health.gym_percent = health_gym_percent_val
-            health.swimming_percent = health_swimming_percent_val
-            health.cycle_percent = health_cycle_percent_val
-        health.other_notes = health_other_notes or None
-        health.submitted_by = user.id
-
-        social = (
-            db.query(SocialLog)
-            .filter(SocialLog.business_unit_id == user.business_unit_id, SocialLog.report_date == report_date)
-            .with_for_update()
-            .first()
-        )
-        previous_social = (
-            {
-                "event_flag": social.event_flag,
-                "meeting_flag": social.meeting_flag,
-                "golf_flag": social.golf_flag,
-                "social_other_notes": social.other_notes,
-            }
-            if social is not None
-            else None
-        )
-        if social is None:
-            social = SocialLog(business_unit_id=user.business_unit_id, report_date=report_date)
-            db.add(social)
-        social.event_flag = parse_bool(event_flag)
-        social.meeting_flag = parse_bool(meeting_flag)
-        social.golf_flag = parse_bool(golf_flag)
-        social.other_notes = social_other_notes or None
-        social.submitted_by = user.id
-
-    # m-05 (SM-1): re-check, immediately before the commit, that the
-    # session that started this (possibly slow, up-to-10 MB) request is
-    # still current — a logout/password change landing mid-request must
-    # not still commit afterwards. No-op for callers with no token
-    # stashed on the user (direct/test callers).
-    # The check itself queries, so it runs under no_autoflush: outside
-    # it, the query would autoflush the loser's pending INSERTs from the
-    # blocks above and 500 instead of 409ing (M-14).
-    with db.no_autoflush:
-        assert_token_current(db, user)
-
-    try:
-        db.commit()
-    except IntegrityError:
-        # Two concurrent submissions (double-click, retried request) can both
-        # miss each other's row on the initial lookup above and then race on
-        # the same per-day unique constraint — surface a clean "try again"
-        # rather than a raw 500, since a genuine resubmit is otherwise allowed.
-        db.rollback()
-        if document_url:
-            # SM-7: the loser's upload is already in R2 with no DB row
-            # pointing at it — delete it instead of orphaning it (and its
-            # upload-budget slot) on every double-click.
-            delete_object(extract_r2_key(document_url))
-        log_audit(db, user, "REPORT_SUBMIT_CONFLICT", f"date={report_date.isoformat()}", request)
-        raise HTTPException(
-            status_code=409,
-            detail="Another submission for today was saved at the same moment — please try again.",
-        )
-
-    if document_url and previous_document_url and previous_document_url != document_url:
-        # SM-7: this resubmission replaced the previous attachment — delete
-        # the orphaned object instead of leaving it in R2 forever.
-        delete_object(extract_r2_key(previous_document_url))
+    financial = result.rows["financial"]
+    activity = result.rows["activity"]
+    health = result.rows["health"]
+    previous_financial = result.previous["financial"]
+    previous_activity = result.previous["activity"]
+    previous_health = result.previous["health"]
+    previous_social = result.previous["social"]
 
     changes = None
     if previous_financial is not None:
         current_financial = {
-            "revenue": revenue_val,
-            "cash_flow": cash_flow_val,
-            "receivable": receivable_val,
-            "payable": payable_val,
-            "other_amount": other_amount_val,
+            "revenue": form.revenue,
+            "cash_flow": form.cash_flow,
+            "receivable": form.receivable,
+            "payable": form.payable,
+            "other_amount": form.other_amount,
             "financial_other_notes": financial.other_notes,
         }
         current_activity = {
@@ -1355,25 +1056,25 @@ def submit_report(
             "activity_other_notes": activity.other_notes,
         }
         current_health = {
-            "daily_steps": daily_steps_val,
-            "heart_rate": heart_rate_val,
-            "sleep_hours": sleep_hours_val,
-            "bp_systolic": bp_systolic_val,
-            "bp_diastolic": bp_diastolic_val,
-            "stress_level": stress_level_val,
-            "energy_mood": energy_mood_val,
-            "weight_kg": weight_kg_val,
-            "is_sick": is_sick_val,
+            "daily_steps": form.daily_steps,
+            "heart_rate": form.heart_rate,
+            "sleep_hours": form.sleep_hours,
+            "bp_systolic": form.bp_systolic,
+            "bp_diastolic": form.bp_diastolic,
+            "stress_level": form.stress_level,
+            "energy_mood": form.energy_mood,
+            "weight_kg": form.weight_kg,
+            "is_sick": form.is_sick,
             "gym_percent": health.gym_percent,
             "swimming_percent": health.swimming_percent,
             "cycle_percent": health.cycle_percent,
             "health_other_notes": health.other_notes,
         }
         current_social = {
-            "event_flag": social.event_flag,
-            "meeting_flag": social.meeting_flag,
-            "golf_flag": social.golf_flag,
-            "social_other_notes": social.other_notes,
+            "event_flag": form.event_flag,
+            "meeting_flag": form.meeting_flag,
+            "golf_flag": form.golf_flag,
+            "social_other_notes": form.social_other_notes,
         }
         # Health vitals and free-text values are recorded as "(hidden)" by
         # compute_field_changes (only THAT they changed is audited); money
@@ -1408,7 +1109,7 @@ def submit_report(
         ]
         if prior_amounts:
             anomaly_avg = sum(prior_amounts) / len(prior_amounts)
-            if anomaly_avg > 0 and abs(float(revenue_val or 0) - anomaly_avg) / anomaly_avg > 0.5:
+            if anomaly_avg > 0 and abs(float(form.revenue or 0) - anomaly_avg) / anomaly_avg > 0.5:
                 revenue_anomaly = True
     except Exception as exc:
         # Never break a submission over the anomaly check itself.
@@ -1417,12 +1118,12 @@ def submit_report(
     if revenue_anomaly:
         bu = db.query(BusinessUnit).filter(BusinessUnit.id == user.business_unit_id).first()
         bu_label = bu.name if bu else f"BU {user.business_unit_id}"
-        deviation = (float(revenue_val or 0) - anomaly_avg) / anomaly_avg * 100
-        for ho_user in db.query(User).filter(User.role == "HO", User.is_active == True).all():  # noqa: E712
+        deviation = (float(form.revenue or 0) - anomaly_avg) / anomaly_avg * 100
+        for ho_user in db.query(User).filter(User.role == Role.HO, User.is_active == True).all():  # noqa: E712
             notify(
-                db, ho_user.id, "alert",
+                db, ho_user.id, NotificationType.ALERT,
                 f"Revenue anomaly: {bu_label}",
-                f"Revenue Ks {float(revenue_val or 0):,.0f} on {report_date.isoformat()} "
+                f"Revenue Ks {float(form.revenue or 0):,.0f} on {report_date.isoformat()} "
                 f"vs 14-day average Ks {anomaly_avg:,.0f} ({deviation:+.0f}%) — please review.",
                 link=f"/admin/business-unit/{user.business_unit_id}",
             )
@@ -1434,9 +1135,9 @@ def submit_report(
         bu = db.query(BusinessUnit).filter(BusinessUnit.id == user.business_unit_id).first()
         bu_label = bu.name if bu else f"BU {user.business_unit_id}"
         for recipient in db.query(User).filter(
-                User.role.in_(["Chairman", "HO"]), User.is_active == True).all():  # noqa: E712
+                User.role.in_([Role.CHAIRMAN, Role.HO]), User.is_active == True).all():  # noqa: E712
             notify(
-                db, recipient.id, "alert",
+                db, recipient.id, NotificationType.ALERT,
                 f"Backdated report edit: {bu_label}",
                 f"{user.username} resubmitted the {report_date.isoformat()} report for "
                 f"{bu_label} — please review the change.",

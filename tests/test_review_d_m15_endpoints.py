@@ -274,6 +274,25 @@ class TestNotificationEndpoints:
 # ---------------------------------------------------------------- ops staff / customers / forecast
 
 class TestOpsStaffCustomersForecast:
+    def test_list_envelope_has_total_limit_offset(self, ceo):
+        # B-m2: every list endpoint returns {"items", "total", "limit",
+        # "offset"} with total = full matching count, not the page length.
+        today = today_local().isoformat()
+        ceo.post("/api/ops/staff", json={
+            "report_date": today, "total_staff": 12, "present": 11,
+            "absent": 1, "new_hires": 0, "resignations": 0})
+        ceo.post("/api/ops/customers", json={
+            "report_date": today, "footfall": 120, "transactions": 80,
+            "complaints": 2})
+        for path in ("/api/ops/staff", "/api/ops/customers",
+                     "/api/ops/action-items", "/api/ops/documents"):
+            body = ceo.get(path).json()
+            assert set(body) >= {"items", "total", "limit", "offset"}, path
+            assert body["total"] == len(body["items"]), path
+            assert body["limit"] == 200 and body["offset"] == 0, path
+        staff = ceo.get("/api/ops/staff?limit=1").json()
+        assert staff["total"] == 1 and len(staff["items"]) == 1 and staff["limit"] == 1
+
     def test_submit_and_list_staff(self, ceo):
         today = today_local().isoformat()
         r = ceo.post("/api/ops/staff", json={
@@ -343,10 +362,10 @@ class TestOpsDocuments:
         assert r.json()["title"] == "Trade licence"
         assert r.json()["days_left"] == 10
         rows = ceo.get("/api/ops/documents").json()
-        assert rows["count"] == 1
+        assert rows["total"] == 1
         assert rows["items"][0]["id"] == doc_id
         assert ceo.delete(f"/api/ops/documents/{doc_id}").json() == {"ok": True}
-        assert ceo.get("/api/ops/documents").json()["count"] == 0
+        assert ceo.get("/api/ops/documents").json()["total"] == 0
 
     def test_document_cross_bu_create_denied(self, ceo):
         payload = self._doc()

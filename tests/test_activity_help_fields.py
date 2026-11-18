@@ -15,6 +15,7 @@ import pytest
 
 from src.models import ActivityLog, BusinessUnit, User
 from src.routers.admin import activity_dashboard
+from src.report_forms import build_ceo_report_form
 from src.routers.ceo import ceo_dashboard, submit_report
 from src.utils import build_ceo_activity_calendar, today_local
 
@@ -70,8 +71,12 @@ _MONEY = dict(revenue="5000", cash_flow="4200", receivable="300", payable="150")
 
 
 def _submit(db, user, **overrides):
+    import src.routers.ceo as ceo_router
+    ceo_router._rate_limiter.reset()
     kwargs = {**_SUBMIT_DEFAULTS, **_MONEY, **overrides}
-    return submit_report(request=REQUEST, user=user, db=db, **kwargs)
+    form = build_ceo_report_form(request=REQUEST, user=user, db=db,
+                                 rate_limiter=ceo_router._rate_limiter, **kwargs)
+    return submit_report(request=REQUEST, form=form, user=user, db=db)
 
 
 def _activity(db, bu_id, on):

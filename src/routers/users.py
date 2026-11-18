@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.auth import RESET_REQUEST_TTL_HOURS, bump_token_version, hash_password, record_password_history, require_roles
+from src.constants import Role
 from src.client_ip import get_client_ip
 from src.config import settings
 from src.database import get_db
@@ -27,7 +28,7 @@ from src.utils import format_local_datetime, log_audit, utcnow
 # One router for /api/admin/users/* and /api/admin/password-resets/* — main.py
 # includes this object as-is, so both families of paths hang off /api/admin.
 router = APIRouter(prefix="/api/admin", tags=["users"])
-require_chairman = require_roles("Chairman")
+require_chairman = require_roles(Role.CHAIRMAN)
 
 
 def _new_temporary_password() -> str:
@@ -69,7 +70,7 @@ def _no_store(response: Response) -> None:
 
 @router.get("/users")
 def list_users(user: User = Depends(require_chairman), db: Session = Depends(get_db)):
-    users = db.query(User).filter(User.role.in_(["CEO", "HO"])).order_by(User.role.desc(), User.business_unit_id).all()
+    users = db.query(User).filter(User.role.in_([Role.CEO, Role.HO])).order_by(User.role.desc(), User.business_unit_id).all()
     business_units = {bu.id: bu for bu in db.query(BusinessUnit).all()}
 
     entries = []
@@ -110,7 +111,7 @@ def create_user(
         raise HTTPException(status_code=400, detail=f'Username "{payload.username}" is already taken')
 
     business_unit_id = None
-    if payload.role == "CEO":
+    if payload.role == Role.CEO:
         # A CEO belongs to exactly one business unit: the CEO runs it.
         if payload.business_unit_id is None:
             raise HTTPException(status_code=400, detail=f"A business unit is required for a {payload.role} account")
@@ -118,14 +119,14 @@ def create_user(
         if not bu:
             raise HTTPException(status_code=404, detail="Business unit not found")
         business_unit_id = bu.id
-    if payload.role in ("Chairman", "HO") and payload.business_unit_id is not None:
+    if payload.role in (Role.CHAIRMAN, Role.HO) and payload.business_unit_id is not None:
         # Chairman/HO are group-level: silently discarding a BU here
         # would leave the creator believing the account was scoped.
         raise HTTPException(
             status_code=400,
             detail=f"{payload.role} accounts are group-level and cannot be assigned to a business unit",
         )
-    if payload.role == "CEO":
+    if payload.role == Role.CEO:
         # Every dashboard query keys its CEO lookup by business_unit_id
         # assuming exactly one CEO per BU (see admin.py's ceo_by_bu, and
         # ceo.py's own "strictly one CEO per business unit" comment) — a
@@ -133,7 +134,7 @@ def create_user(
         # lookups undefined. Deactivating the old account first (rather
         # than deleting it) is the supported way to replace a BU's CEO.
         existing_ceo = (
-            db.query(User).filter(User.role == "CEO", User.business_unit_id == bu.id, User.is_active == True).first()
+            db.query(User).filter(User.role == Role.CEO, User.business_unit_id == bu.id, User.is_active == True).first()
         )
         if existing_ceo:
             raise HTTPException(
@@ -150,7 +151,7 @@ def create_user(
         require_password_change=True,
         # Mirrors _ensure_user's seeding convention in main.py — only a CEO
         # has a mandatory profile to complete.
-        is_profile_completed=(payload.role != "CEO"),
+        is_profile_completed=(payload.role != Role.CEO),
         is_active=True,
     )
     temporary_password = _apply_temporary_password(new_user, settings.TEMP_PASSWORD_TTL_HOURS_NEW_ACCOUNT)
@@ -193,7 +194,7 @@ def reset_user_password(
     target = db.query(User).filter(User.id == user_id).with_for_update().first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
-    if target.role == "Chairman":
+    if target.role == Role.CHAIRMAN:
         raise HTTPException(status_code=400, detail="The Chairman account cannot be reset from the app")
     if not target.is_active:
         raise HTTPException(status_code=400, detail="This account is deactivated — reactivate it before issuing a password")
@@ -245,11 +246,11 @@ def set_user_active(
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
 
-    if payload.is_active and target.role == "CEO" and target.business_unit_id is not None:
+    if payload.is_active and target.role == Role.CEO and target.business_unit_id is not None:
         other_ceo = (
             db.query(User)
             .filter(
-                User.role == "CEO",
+                User.role == Role.CEO,
                 User.business_unit_id == target.business_unit_id,
                 User.is_active == True,
                 User.id != target.id,
@@ -309,12 +310,12 @@ def update_user(
         raise HTTPException(status_code=404, detail="User not found")
 
     new_bu_id = payload.business_unit_id
-    if target.role == "CEO" and new_bu_id is None:
+    if target.role == Role.CEO and new_bu_id is None:
         raise HTTPException(
             status_code=400,
             detail=f"A {target.role} account must be assigned to a business unit",
         )
-    if target.role in ("Chairman", "HO") and new_bu_id is not None:
+    if target.role in (Role.CHAIRMAN, Role.HO) and new_bu_id is not None:
         raise HTTPException(
             status_code=400,
             detail=f"{target.role} accounts are group-level and cannot be assigned to a business unit",
@@ -327,11 +328,11 @@ def update_user(
     if target.business_unit_id == new_bu_id:
         return {"ok": True, "user_id": target.id, "business_unit_id": new_bu_id}
 
-    if target.role == "CEO" and target.is_active:
+    if target.role == Role.CEO and target.is_active:
         other_ceo = (
             db.query(User)
             .filter(
-                User.role == "CEO",
+                User.role == Role.CEO,
                 User.business_unit_id == new_bu_id,
                 User.is_active == True,
                 User.id != target.id,
@@ -370,7 +371,7 @@ def update_user(
 def unlock_user_login(
     user_id: int,
     request: Request,
-    user: User = Depends(require_roles("Chairman", "HO")),
+    user: User = Depends(require_roles(Role.CHAIRMAN, Role.HO)),
     db: Session = Depends(get_db),
 ):
     """Clears an active login lockout for one account (see src/throttle.py).
@@ -393,7 +394,7 @@ def unlock_user_login(
     # against guessing its password — HO staff must not be able to clear it
     # unilaterally (Chairman recovery is the out-of-band reset script), and
     # nobody may clear their own lockout.
-    if target.role == "Chairman":
+    if target.role == Role.CHAIRMAN:
         raise HTTPException(
             status_code=403,
             detail="The Chairman account cannot be unlocked from this endpoint",
@@ -514,7 +515,7 @@ def approve_password_reset(
     target = db.query(User).filter(User.id == reset_request.user_id).with_for_update().first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
-    if target.role == "Chairman":
+    if target.role == Role.CHAIRMAN:
         raise HTTPException(status_code=400, detail="The Chairman account cannot be reset from the app")
     if not target.is_active:
         raise HTTPException(status_code=400, detail="This account is deactivated — reactivate it before issuing a password")

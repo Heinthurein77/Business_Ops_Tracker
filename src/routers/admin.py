@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.auth import require_roles
+from src.constants import NotificationType, Role
 from src.database import get_db
 from src.models import (
     ActivityLog,
@@ -31,7 +32,7 @@ from src.models import (
     SocialLog,
     User,
 )
-from src.schemas import MonthlyTargetRequest, ResolveHelpRequest
+from src.schemas import BUCreateIn, BUUpdateIn, MonthlyTargetRequest, ResolveHelpRequest
 from src.utils import (
     APP_TZ,
     activity_quadrant_status,
@@ -54,9 +55,12 @@ from src.utils import (
     format_local_time,
     health_risk_notes,
     bu_lookup_maps,
+    clamp_limit,
+    clamp_offset,
     log_audit,
     notify,
-    parse_month_or_default,
+    page_response,
+    parse_month_or_today,
     utcnow,
     parse_monthly_target_amounts,
     parse_resubmit_changes,
@@ -70,7 +74,7 @@ from src.utils import (
 )
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
-require_admin = require_roles("Chairman", "HO")
+require_admin = require_roles(Role.CHAIRMAN, Role.HO)
 # Chairman-only: HO Staff is included in require_admin for its own oversight
 # pages, but must not be able to reach the escape-hatch override for its own
 # monthly target — that would let it bypass the once-a-month lock enforced by
@@ -78,7 +82,7 @@ require_admin = require_roles("Chairman", "HO")
 # up for an HO viewer (see HeadOfficePage.jsx's isHo branch), but that's not
 # real enforcement — a direct API call could still hit it, so the lock has to
 # live here too.
-require_chairman = require_roles("Chairman")
+require_chairman = require_roles(Role.CHAIRMAN)
 
 
 def pct_change(current: float, previous: float) -> Optional[float]:
@@ -621,7 +625,7 @@ def business_unit_detail(bu_id: int, user: User = Depends(require_admin), db: Se
     # deactivated predecessor must not shadow the current CEO.
     ceo_user = (
         db.query(User)
-        .filter(User.business_unit_id == bu_id, User.role == "CEO", User.is_active == True)  # noqa: E712
+        .filter(User.business_unit_id == bu_id, User.role == Role.CEO, User.is_active == True)  # noqa: E712
         .order_by(User.id.desc())
         .first()
     )
@@ -790,7 +794,7 @@ def head_office_report(user: User = Depends(require_admin), db: Session = Depend
         for t in db.query(HeadOfficeMonthlyTarget).filter(HeadOfficeMonthlyTarget.target_month.in_(target_months)).all():
             targets_by_month[t.target_month] = t
 
-    ho_staff = db.query(User).filter(User.role == "HO").order_by(User.id).first()
+    ho_staff = db.query(User).filter(User.role == Role.HO).order_by(User.id).first()
 
     return {
         "today": today.isoformat(),
@@ -1002,7 +1006,7 @@ def report_logs(limit: int = 200, offset: int = 0,
                 # AuditLog.username is the name captured at write time - the
                 # fallback once the user row itself is gone.
                 "username": submitter.username if submitter else (audit.username or "(deleted user)"),
-                "bu_code": "HO" if is_ho else (bu.code if bu else "-"),
+                "bu_code": Role.HO.value if is_ho else (bu.code if bu else "-"),
                 "bu_name": "Head Office" if is_ho else (bu.name if bu else "-"),
                 # Absent entirely on a day's first submission (nothing to
                 # diff against yet, see submit_report in ceo.py/ho.py) —
@@ -1014,6 +1018,9 @@ def report_logs(limit: int = 200, offset: int = 0,
             }
         )
 
+    # B-m2: `total_logs` (page length) is kept alongside `total` (full
+    # count) — ReportLogsPage.jsx reads it for its "N of M submissions"
+    # line, so deleting it would break the page. New consumers use `total`.
     return {"logs": logs, "total_logs": len(logs), "total": total,
             "limit": limit, "offset": offset}
 
@@ -1140,7 +1147,8 @@ def security_log(limit: int = 200, offset: int = 0,
 
 
 @router.get("/ceo-profiles")
-def ceo_profiles(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def ceo_profiles(limit: int = 200, offset: int = 0,
+                 user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """All CEOs' mandatory profile info, for Head Office/Chairman to review.
 
     Note: the original spec for this asked for GET /api/v1/admin/ceo-profile
@@ -1151,7 +1159,7 @@ def ceo_profiles(user: User = Depends(require_admin), db: Session = Depends(get_
     Admin Dashboard to look one up at a time."""
     ceos = (
         db.query(User)
-        .filter(User.role == "CEO", User.is_active == True)  # noqa: E712
+        .filter(User.role == Role.CEO, User.is_active == True)  # noqa: E712
         .order_by(User.business_unit_id, User.id)
         .all()
     )
@@ -1173,7 +1181,10 @@ def ceo_profiles(user: User = Depends(require_admin), db: Session = Depends(get_
             }
         )
 
-    return {"ceo_profiles": entries, "total": len(entries)}
+    # B-m2: paginated like every other list endpoint (default returns all —
+    # there is one CEO per BU). `total` is the full count, not the page length.
+    limit, offset = clamp_limit(limit), clamp_offset(offset)
+    return page_response(entries[offset:offset + limit], len(entries), limit, offset, key="ceo_profiles")
 
 
 @router.get("/ceo-activity-calendar")
@@ -1194,7 +1205,7 @@ def ceo_activity_calendar(
         raise HTTPException(status_code=404, detail="Business unit not found")
 
     today = today_local()
-    calendar_year, calendar_month = parse_month_or_default(month, today)
+    calendar_year, calendar_month = parse_month_or_today(month, today)
 
     calendar_weeks = build_ceo_activity_calendar(db, business_unit.id, calendar_year, calendar_month, today, None)
     prev_year, prev_month = shift_month(calendar_year, calendar_month, -1)
@@ -1202,7 +1213,7 @@ def ceo_activity_calendar(
 
     ceo_user = (
         db.query(User)
-        .filter(User.business_unit_id == business_unit.id, User.role == "CEO", User.is_active == True)  # noqa: E712
+        .filter(User.business_unit_id == business_unit.id, User.role == Role.CEO, User.is_active == True)  # noqa: E712
         .first()
     )
     return {
@@ -1427,7 +1438,7 @@ def resolve_help_request(
             f"({log.report_date.strftime('%d %b %Y')})"
         )[:200]
         notify(
-            db, log.submitted_by, "help_resolved", title, response_text,
+            db, log.submitted_by, NotificationType.HELP_RESOLVED, title, response_text,
             link=f"/ceo?date={log.report_date.isoformat()}",
         )
     db.commit()
@@ -1466,7 +1477,7 @@ def ceo_monthly_summary(
         raise HTTPException(status_code=404, detail="Business unit not found")
 
     today = today_local()
-    year, month_num = parse_month_or_default(month, today)
+    year, month_num = parse_month_or_today(month, today)
     month_start = date(year, month_num, 1)
     days_in_month = _cal.monthrange(year, month_num)[1]
     month_end = date(year, month_num, days_in_month)
@@ -1478,7 +1489,7 @@ def ceo_monthly_summary(
 
     ceo_user = (
         db.query(User)
-        .filter(User.business_unit_id == business_unit.id, User.role == "CEO", User.is_active == True)  # noqa: E712
+        .filter(User.business_unit_id == business_unit.id, User.role == Role.CEO, User.is_active == True)  # noqa: E712
         .first()
     )
 
@@ -1842,7 +1853,7 @@ def export_excel(
         .scalar()
     )
     if merged_count > 10000:
-        raise HTTPException(400, "Export too large (over 10,000 rows) — narrow the date range")
+        raise HTTPException(status_code=400, detail="Export too large (over 10,000 rows) — narrow the date range")
 
     financials = financial_query.all()
     activities = activity_query.all()
@@ -1916,7 +1927,7 @@ def export_excel(
     # (BU, day) rows must be narrowed instead of building a huge workbook
     # in memory on a 768 MB container.
     if len(sorted_keys) > 10000:
-        raise HTTPException(400, "Export too large (over 10,000 rows) — narrow the date range")
+        raise HTTPException(status_code=400, detail="Export too large (over 10,000 rows) — narrow the date range")
 
     for bu_id, report_date in sorted_keys:
         bu = business_units.get(bu_id)
@@ -1986,12 +1997,9 @@ def export_excel(
 
 # ------------------------------------------------------------------ business unit management
 
-from pydantic import BaseModel as _BaseModel, Field as _Field  # noqa: E402
-
-
 def _serialize_bu_admin(db: Session, bu: BusinessUnit) -> dict:
     user_count = db.query(User).filter(User.business_unit_id == bu.id).count()
-    ceo = db.query(User).filter(User.business_unit_id == bu.id, User.role == "CEO",
+    ceo = db.query(User).filter(User.business_unit_id == bu.id, User.role == Role.CEO,
                                 User.is_active == True).first()  # noqa: E712
     return {
         "id": bu.id, "code": bu.code, "name": bu.name,
@@ -2009,18 +2017,14 @@ def _next_bu_code(db: Session) -> str:
     return f"BU{(max(nums) + 1) if nums else 1}"
 
 
-class BUCreateIn(_BaseModel):
-    name: str = _Field(min_length=1, max_length=120)
-
-
-class BUUpdateIn(_BaseModel):
-    name: Optional[str] = None
-
-
 @router.get("/business-units")
-def list_business_units(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def list_business_units(limit: int = 200, offset: int = 0,
+                        user: User = Depends(require_admin), db: Session = Depends(get_db)):
     bus = db.query(BusinessUnit).order_by(BusinessUnit.id).all()
-    return {"items": [_serialize_bu_admin(db, bu) for bu in bus]}
+    # B-m2: shared envelope (default returns all — 23 BUs).
+    limit, offset = clamp_limit(limit), clamp_offset(offset)
+    items = [_serialize_bu_admin(db, bu) for bu in bus]
+    return page_response(items[offset:offset + limit], len(items), limit, offset)
 
 
 @router.post("/business-units")
@@ -2029,9 +2033,9 @@ def create_business_unit(payload: BUCreateIn, user: User = Depends(require_admin
     """Create a business unit."""
     name = payload.name.strip()
     if not name:
-        raise HTTPException(400, "Name is required")
+        raise HTTPException(status_code=400, detail="Name is required")
     if db.query(BusinessUnit).filter(func.lower(BusinessUnit.name) == name.lower()).first():
-        raise HTTPException(400, f"A business unit named '{name}' already exists")
+        raise HTTPException(status_code=400, detail=f"A business unit named '{name}' already exists")
     bu = BusinessUnit(code=_next_bu_code(db), name=name)
     db.add(bu)
     db.commit()
@@ -2047,16 +2051,16 @@ def update_business_unit(bu_id: int, payload: BUUpdateIn, user: User = Depends(r
     """Rename a business unit."""
     bu = db.query(BusinessUnit).filter(BusinessUnit.id == bu_id).first()
     if not bu:
-        raise HTTPException(404, "Business unit not found")
+        raise HTTPException(status_code=404, detail="Business unit not found")
     note = None
     if payload.name is not None:
         name = payload.name.strip()
         if not name:
-            raise HTTPException(400, "Name cannot be empty")
+            raise HTTPException(status_code=400, detail="Name cannot be empty")
         dup = db.query(BusinessUnit).filter(func.lower(BusinessUnit.name) == name.lower(),
                                             BusinessUnit.id != bu_id).first()
         if dup:
-            raise HTTPException(400, f"A business unit named '{name}' already exists")
+            raise HTTPException(status_code=400, detail=f"A business unit named '{name}' already exists")
         bu.name = name
     db.commit()
     db.refresh(bu)

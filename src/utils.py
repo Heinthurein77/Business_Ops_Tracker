@@ -23,6 +23,7 @@ from sqlalchemy import case, func
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.config import settings
+from src.constants import Role
 from src.models import ActivityLog, AuditLog, BusinessUnit, CeoProfile, DailyFinancial, HeadOfficeDailyFinancial, HealthStatus, JobHeartbeat, MonthlyTarget, Notification, SocialLog, User
 
 APP_TZ = ZoneInfo(settings.APP_TIMEZONE)
@@ -113,20 +114,6 @@ def is_weekend(d: date) -> bool:
 _PERIOD_FORMAT = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
-def validate_period(period: Optional[str]) -> Optional[str]:
-    """Validates a YYYY-MM `period`/`month` query value and returns it
-    unchanged. Report endpoints used to feed the raw string into
-    split('-') / int() and answer garbage like ?period=garbage with a 500
-    (audit finding L3); now anything that isn't a real year-month is a
-    422, like any other malformed parameter. None and "" pass through —
-    callers treat them as "no period given"."""
-    if period is None or period == "":
-        return period
-    if not _PERIOD_FORMAT.match(period):
-        raise HTTPException(status_code=422, detail="period must be in YYYY-MM format")
-    return period
-
-
 def parse_bool(raw: Optional[str]) -> bool:
     """M-12: the one boolean form parser, shared by the CEO and HO
     submit-report handlers (was `_parse_bool`, verbatim-identical in
@@ -134,15 +121,16 @@ def parse_bool(raw: Optional[str]) -> bool:
     return (raw or "").strip().lower() in ("true", "1", "yes", "on")
 
 
-def parse_month_or_default(month: str, today: Optional[date] = None) -> tuple[int, int]:
+def parse_month_or_today(month: str, today: Optional[date] = None) -> tuple[int, int]:
     """M-12: the one YYYY-MM month parser for the dashboard-style
     endpoints (CEO/HO dashboards, monthly-target lookups, the admin
     activity calendar, the CEO monthly summary) — previously five
     hand-rolled copies. Garbage, an impossible month, or a year outside
     2000–2100 falls back to today's year/month (the documented behaviour
     of all five sites, pinned by test_ceo_pack.py's month="garbage" case)
-    instead of raising — that is why this is not validate_period(), whose
-    422 is for report endpoints that already use it. The 2000–2100 clamp
+    instead of raising — that is why this is not parse_month_or_422()
+    (src/routers/month_params.py), whose 422 is for report endpoints.
+    The 2000–2100 clamp
     matters because the calendar grid pads to whole weeks and a month at
     the edge of the date range (e.g. 9999-12) would overflow date
     arithmetic and 500."""
@@ -168,6 +156,16 @@ def clamp_limit(limit: int) -> int:
 
 def clamp_offset(offset: int) -> int:
     return max(0, offset)
+
+def page_response(items: list, total: int, limit: int, offset: int, key: str = "items") -> dict:
+    """One list envelope for every list endpoint: {<collection>, "total",
+    "limit", "offset"}. `total` is the full matching count (never the page
+    length) and limit/offset are the clamped values actually applied, so a
+    caller can always tell whether more pages exist. The collection key
+    stays "items" except where the frontend already reads another key
+    ("logs", "ceo_profiles") — renaming those would break the pages that
+    read them, so only the shape is unified, not the key."""
+    return {key: items, "total": total, "limit": limit, "offset": offset}
 
 
 def clamp_days(days: int) -> int:
@@ -199,7 +197,7 @@ def bu_lookup_maps(db):
     bu_by_id = {bu.id: bu for bu in business_units}
     ceo_by_bu = {
         u.business_unit_id: u
-        for u in db.query(User).filter(User.role == "CEO", User.is_active == True).order_by(User.id).all()  # noqa: E712
+        for u in db.query(User).filter(User.role == Role.CEO, User.is_active == True).order_by(User.id).all()  # noqa: E712
     }
     return business_units, bu_by_id, ceo_by_bu
 
@@ -1202,31 +1200,27 @@ def evaluate_ho_cumulative_health(db: Session, monthly_target, target_month: dat
     return result
 
 
-def compute_bu_quadrant_summary(
-    latest_financial: Optional[DailyFinancial],
-    today_financial: Optional[DailyFinancial],
-    latest_activity: Optional[ActivityLog],
-    latest_social: Optional[SocialLog],
-    latest_health: Optional[HealthStatus],
-    budget_status: Optional[str] = None,
-) -> dict:
-    """Computes all 4 quadrant statuses + their human-readable reasons for one
-    business unit. Single source of truth shared by the Chairman/HO's Business
-    Unit Detail page and the CEO's own dashboard, so a CEO viewing their own
-    unit always sees exactly the same status/reason an executive would see for
-    that same unit — no separate copy of this logic to drift out of sync.
+def _compute_quadrant_summary(
+    latest_financial,
+    today_financial,
+    latest_activity,
+    latest_social,
+    latest_health,
+    budget_status=None,
+    target_label="",
+):
+    """Shared core behind compute_bu_quadrant_summary / compute_ho_quadrant_summary:
+    all 4 quadrant statuses + their human-readable reasons. The two audiences
+    differ only in how the monthly-target override is worded (a BU meets
+    "this month's CEO-set target", HO meets "this month's target"), so that
+    wording is the one parameter — every status/reason rule lives here once.
 
-    @param budget_status: the actual-vs-CEO-target verdict ("green"/"yellow"/
-        "red"/"grey"/None) for the same day, if a monthly target is set.
-        "green" — the CEO is hitting their own target — overrides the
-        Financial quadrant to green, instead of showing a conflicting
-        Warning/Critical from the generic cash-flow health rules below;
-        hitting the target you were actually judged against is the more
-        meaningful signal. Symmetrically, "red" — badly missing the target
-        (e.g. 0.1% of daily revenue target) — overrides the quadrant to red
-        even if cash flow alone still looks fine on paper, since a target
-        miss that severe should never be hidden behind a milder cash-flow
-        reading. Yellow/grey budget verdicts don't override anything.
+    @param budget_status: the actual-vs-monthly-target verdict ("green"/
+        "yellow"/"red"/"grey"/None). "green" overrides the Financial quadrant
+        to green, "red" overrides it to red; yellow/grey override nothing.
+        See compute_bu_quadrant_summary for the reasoning.
+    @param target_label: adjective inserted before "target" in the
+        budget-override reasons, e.g. "CEO-set" ("" for HO).
     """
     financial_status = resolve_financial_status(latest_financial, today_financial, budget_status)
     social_status = social_quadrant_status(latest_social)
@@ -1234,14 +1228,15 @@ def compute_bu_quadrant_summary(
     health_status_raw = compute_health_risk(latest_health)
     health_status = "grey" if health_status_raw == "unknown" else health_status_raw
 
+    target_phrase = f"{target_label} target" if target_label else "target"
     if today_financial is None:
         financial_reason = "Missing today's mandatory financial submission"
     elif latest_financial is None or latest_financial.cash_flow is None:
         financial_reason = "No financial data submitted yet"
     elif budget_status == "green":
-        financial_reason = "Meeting this month's CEO-set target"
+        financial_reason = f"Meeting this month's {target_phrase}"
     elif budget_status == "red":
-        financial_reason = "Badly missing this month's CEO-set target"
+        financial_reason = f"Badly missing this month's {target_phrase}"
     else:
         _, _, financial_flags = evaluate_financial_health(
             latest_financial.revenue, latest_financial.cash_flow, latest_financial.receivable, latest_financial.payable
@@ -1287,6 +1282,28 @@ def compute_bu_quadrant_summary(
     }
 
 
+def compute_bu_quadrant_summary(
+    latest_financial: Optional[DailyFinancial],
+    today_financial: Optional[DailyFinancial],
+    latest_activity: Optional[ActivityLog],
+    latest_social: Optional[SocialLog],
+    latest_health: Optional[HealthStatus],
+    budget_status: Optional[str] = None,
+) -> dict:
+    """Computes all 4 quadrant statuses + their human-readable reasons for one
+    business unit. Single source of truth shared by the Chairman/HO's Business
+    Unit Detail page and the CEO's own dashboard, so a CEO viewing their own
+    unit always sees exactly the same status/reason an executive would see for
+    that same unit — no separate copy of this logic to drift out of sync.
+    The budget override wording is "CEO-set target" (the target the CEO set);
+    see _compute_quadrant_summary for the shared rules.
+    """
+    return _compute_quadrant_summary(
+        latest_financial, today_financial, latest_activity, latest_social, latest_health,
+        budget_status=budget_status, target_label="CEO-set",
+    )
+
+
 def compute_ho_quadrant_summary(
     latest_financial: Optional[DailyFinancial],
     today_financial: Optional[DailyFinancial],
@@ -1300,65 +1317,11 @@ def compute_ho_quadrant_summary(
     just backed by HeadOfficeMonthlyTarget instead of MonthlyTarget. Shared
     by the HO submission dashboard and the Chairman/HO-facing Head Office
     admin page so both always agree on the same day's status.
-
-    @param budget_status: the Cumulative Net Revenue vs HO's monthly target
-        verdict ("green"/"yellow"/"red"/"grey"/None), same override rules as
-        compute_bu_quadrant_summary — see that docstring for the reasoning.
     """
-    financial_status = resolve_financial_status(latest_financial, today_financial, budget_status)
-    social_status = social_quadrant_status(latest_social)
-    activity_status = activity_quadrant_status(latest_activity)
-    health_status_raw = compute_health_risk(latest_health)
-    health_status = "grey" if health_status_raw == "unknown" else health_status_raw
-
-    activity_reasons = {
-        "red": "Low average fitness engagement (Gym/Swim/Cycle)",
-        "yellow": "Moderate average fitness engagement (Gym/Swim/Cycle)",
-        "green": "Strong average fitness engagement (Gym/Swim/Cycle)",
-        "grey": "No activity percentages submitted yet",
-    }
-    social_reasons = {
-        "green": "Engaged in at least one of Event / Meeting / Golf",
-        "yellow": "Submitted today but no social engagement recorded",
-        "grey": "No social data submitted yet",
-    }
-
-    step_note = f" · {latest_health.daily_steps:,} steps" if latest_health and latest_health.daily_steps is not None else ""
-    if health_status == "red":
-        notes = health_risk_notes(latest_health)
-        health_reason = "Critical: " + (", ".join(notes) if notes else "elevated risk factors")
-    elif health_status == "yellow":
-        notes = health_risk_notes(latest_health)
-        health_reason = "Fatigue watch: " + (", ".join(notes) if notes else "elevated risk factors")
-    elif health_status == "green":
-        health_reason = "Healthy and within normal thresholds" + step_note
-    else:
-        health_reason = "No health data submitted yet"
-
-    if today_financial is None:
-        financial_reason = "Missing today's mandatory financial submission"
-    elif latest_financial is None or latest_financial.cash_flow is None:
-        financial_reason = "No financial data submitted yet"
-    elif budget_status == "green":
-        financial_reason = "Meeting this month's target"
-    elif budget_status == "red":
-        financial_reason = "Badly missing this month's target"
-    else:
-        _, _, financial_flags = evaluate_financial_health(
-            latest_financial.revenue, latest_financial.cash_flow, latest_financial.receivable, latest_financial.payable
-        )
-        financial_reason = "; ".join(financial_flags) if financial_flags else "Healthy cash position on the latest submission"
-
-    return {
-        "financial_status": financial_status,
-        "financial_reason": financial_reason,
-        "social_status": social_status,
-        "social_reason": social_reasons.get(social_status, social_reasons["grey"]),
-        "activity_status": activity_status,
-        "activity_reason": activity_reasons[activity_status],
-        "health_status": health_status,
-        "health_reason": health_reason,
-    }
+    return _compute_quadrant_summary(
+        latest_financial, today_financial, latest_activity, latest_social, latest_health,
+        budget_status=budget_status, target_label="",
+    )
 
 
 def build_financial_rows(financial_history: list, targets_by_month: dict) -> list:

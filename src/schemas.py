@@ -9,6 +9,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from src.constants import Role
+
 # bcrypt only reads the first 72 BYTES of a password and silently ignores the
 # rest, so a longer "password" would be weaker than it looks; the floor is a
 # minimum length rather than a composition rule.
@@ -225,7 +227,7 @@ class CreateUserRequest(BaseModel):
         # Chairman is deliberately not creatable here — there's exactly one,
         # seeded at boot; adding another is a code change, not a self-service
         # admin action.
-        if value not in ("CEO", "HO"):
+        if value not in (Role.CEO, Role.HO):
             raise ValueError('role must be "CEO" or "HO"')
         return value
 
@@ -299,3 +301,63 @@ class CeoProfileRequest(BaseModel):
         if age_years > 100:
             raise ValueError("Date of birth is implausibly old — please check it")
         return value
+
+
+# ---------------------------------------------------------------- ops + admin
+# Request bodies that used to live in their routers (B-m5): one home for
+# every incoming shape, so a maintainer greps schemas.py and finds them.
+
+class ActionItemIn(BaseModel):
+    business_unit_id: Optional[int] = None
+    title: str = Field(min_length=1, max_length=200)
+    description: Optional[str] = None
+    assigned_to_id: Optional[int] = None
+    due_date: Optional[date] = None
+
+
+class ActionItemUpdate(BaseModel):
+    # Status values are ACTION_ITEM_STATUSES (src/constants.py); validated
+    # in the router so the error stays a readable 400, not a 422 list.
+    status: Optional[str] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    assigned_to_id: Optional[int] = None
+    due_date: Optional[date] = None
+
+
+class StaffIn(BaseModel):
+    business_unit_id: Optional[int] = None
+    report_date: date
+    total_staff: int = Field(default=0, ge=0, le=1000000)
+    present: int = Field(default=0, ge=0, le=1000000)
+    absent: int = Field(default=0, ge=0, le=1000000)
+    new_hires: int = Field(default=0, ge=0, le=1000000)
+    resignations: int = Field(default=0, ge=0, le=1000000)
+    notes: Optional[str] = None
+
+
+class CustomerIn(BaseModel):
+    business_unit_id: Optional[int] = None
+    report_date: date
+    footfall: Optional[int] = Field(default=None, ge=0, le=10**9)
+    transactions: Optional[int] = Field(default=None, ge=0, le=10**9)
+    complaints: int = Field(default=0, ge=0, le=10**9)
+    satisfaction_score: Optional[float] = None
+    notes: Optional[str] = None
+
+
+class DocumentIn(BaseModel):
+    business_unit_id: Optional[int] = None
+    title: str = Field(min_length=1, max_length=255)
+    document_type: str = "license"
+    issue_date: Optional[date] = None
+    expiry_date: date
+    notes: Optional[str] = None
+
+
+class BUCreateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class BUUpdateIn(BaseModel):
+    name: Optional[str] = None

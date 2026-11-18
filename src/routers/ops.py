@@ -15,11 +15,11 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.auth import get_current_user, require_roles
+from src.constants import ACTION_ITEM_STATUSES, NotificationType, Role
 from src.services.ops_alerts import (  # noqa: F401 - re-exported for callers/tests
     _action_item_link,
     run_check_document_expiry,
@@ -27,7 +27,9 @@ from src.services.ops_alerts import (  # noqa: F401 - re-exported for callers/te
     run_remind_missing_reports,
 )
 from src.database import get_db
-from src.utils import _sanitize_excel_cell, clamp_days, clamp_limit, clamp_offset, log_audit, notify, today_local, utcnow, validate_period
+from src.schemas import ActionItemIn, ActionItemUpdate, CustomerIn, DocumentIn, StaffIn
+from src.routers.month_params import parse_month_or_422
+from src.utils import _sanitize_excel_cell, clamp_days, clamp_limit, clamp_offset, log_audit, notify, page_response, today_local, utcnow
 from src.models import (
     ActionItem,
     ActivityLog,
@@ -45,7 +47,7 @@ from src.models import (
 )
 
 router = APIRouter(prefix="/api/ops", tags=["ops"])
-require_admin = require_roles("Chairman", "HO")
+require_admin = require_roles(Role.CHAIRMAN, Role.HO)
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +121,7 @@ def _idempotency_key(request: Optional[Request]) -> Optional[str]:
     if not key:
         return None
     if len(key) > MAX_IDEMPOTENCY_KEY_LEN:
-        raise HTTPException(400, "Idempotency-Key must be at most 128 characters")
+        raise HTTPException(status_code=400, detail="Idempotency-Key must be at most 128 characters")
     return key
 
 
@@ -162,9 +164,9 @@ def bu_scope(user: User, bu_id: Optional[int]) -> Optional[int]:
     """Resolve which BU the caller may touch. CEOs are pinned to their own:
     naming another BU is a 403, naming none means their own BU.
     Chairman/HO may name any BU (or none, for all)."""
-    if user.role == "CEO":
+    if user.role == Role.CEO:
         if bu_id is not None and bu_id != user.business_unit_id:
-            raise HTTPException(403, "CEOs can only access their own business unit")
+            raise HTTPException(status_code=403, detail="CEOs can only access their own business unit")
         return user.business_unit_id
     return bu_id
 
@@ -188,14 +190,6 @@ def serialize_action_item(db: Session, item: ActionItem) -> dict:
 
 # ---------------------------------------------------------------- action items
 
-class ActionItemIn(BaseModel):
-    business_unit_id: Optional[int] = None
-    title: str = Field(min_length=1, max_length=200)
-    description: Optional[str] = None
-    assigned_to_id: Optional[int] = None
-    due_date: Optional[date] = None
-
-
 @router.get("/action-items")
 def list_action_items(
     business_unit_id: Optional[int] = None,
@@ -214,8 +208,10 @@ def list_action_items(
         q = q.filter(ActionItem.status == status)
     if mine:
         q = q.filter(ActionItem.assigned_to_id == user.id)
-    items = q.order_by(ActionItem.due_date.is_(None), ActionItem.due_date, ActionItem.created_at.desc()).offset(clamp_offset(offset)).limit(clamp_limit(limit)).all()
-    return {"items": [serialize_action_item(db, i) for i in items]}
+    total = q.count()
+    limit, offset = clamp_limit(limit), clamp_offset(offset)
+    items = q.order_by(ActionItem.due_date.is_(None), ActionItem.due_date, ActionItem.created_at.desc()).offset(offset).limit(limit).all()
+    return page_response([serialize_action_item(db, i) for i in items], total, limit, offset)
 
 
 def _validate_assignee(db: Session, user: User, assigned_to_id: Optional[int]) -> Optional[User]:
@@ -230,11 +226,11 @@ def _validate_assignee(db: Session, user: User, assigned_to_id: Optional[int]) -
         return None
     assignee = db.query(User).filter(User.id == assigned_to_id).first()
     if assignee is None:
-        raise HTTPException(400, "Assigned user does not exist")
+        raise HTTPException(status_code=400, detail="Assigned user does not exist")
     if not assignee.is_active:
-        raise HTTPException(400, "Assigned user is not active")
-    if user.role == "CEO" and assignee.business_unit_id != user.business_unit_id:
-        raise HTTPException(400, "Assignee must be in your business unit")
+        raise HTTPException(status_code=400, detail="Assigned user is not active")
+    if user.role == Role.CEO and assignee.business_unit_id != user.business_unit_id:
+        raise HTTPException(status_code=400, detail="Assignee must be in your business unit")
     return assignee
 
 
@@ -250,7 +246,7 @@ def create_action_item(payload: ActionItemIn, request: Request = None, user: Use
             return replay
     bu_id = bu_scope(user, payload.business_unit_id)
     if bu_id is None:
-        raise HTTPException(400, "business_unit_id is required")
+        raise HTTPException(status_code=400, detail="business_unit_id is required")
     assignee = _validate_assignee(db, user, payload.assigned_to_id)
     item = ActionItem(
         business_unit_id=bu_id,
@@ -265,7 +261,7 @@ def create_action_item(payload: ActionItemIn, request: Request = None, user: Use
     db.commit()
     db.refresh(item)
     if item.assigned_to_id and item.assigned_to_id != user.id:
-        notify(db, item.assigned_to_id, "action_assigned",
+        notify(db, item.assigned_to_id, NotificationType.ACTION_ASSIGNED,
                "New action item assigned", item.title, link=_action_item_link(assignee))
         db.commit()
     _log_audit(db, user, "CREATE_ACTION_ITEM", f"id={item.id}")
@@ -277,23 +273,15 @@ def create_action_item(payload: ActionItemIn, request: Request = None, user: Use
     return body
 
 
-class ActionItemUpdate(BaseModel):
-    status: Optional[str] = None
-    title: Optional[str] = None
-    description: Optional[str] = None
-    assigned_to_id: Optional[int] = None
-    due_date: Optional[date] = None
-
-
 @router.patch("/action-items/{item_id}")
 def update_action_item(item_id: int, payload: ActionItemUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = db.query(ActionItem).filter(ActionItem.id == item_id).first()
     if not item:
-        raise HTTPException(404, "Action item not found")
+        raise HTTPException(status_code=404, detail="Action item not found")
     bu_scope(user, item.business_unit_id)
     if payload.status is not None:
-        if payload.status not in ("pending", "in_progress", "done"):
-            raise HTTPException(400, "Invalid status")
+        if payload.status not in ACTION_ITEM_STATUSES:
+            raise HTTPException(status_code=400, detail="Invalid status")
         item.status = payload.status
         item.completed_at = utcnow() if payload.status == "done" else None
     if payload.title is not None:
@@ -315,7 +303,7 @@ def update_action_item(item_id: int, payload: ActionItemUpdate, user: User = Dep
 def delete_action_item(item_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = db.query(ActionItem).filter(ActionItem.id == item_id).first()
     if not item:
-        raise HTTPException(404, "Action item not found")
+        raise HTTPException(status_code=404, detail="Action item not found")
     bu_scope(user, item.business_unit_id)
     db.delete(item)
     db.commit()
@@ -349,7 +337,7 @@ def list_notifications(unread_only: bool = False, user: User = Depends(get_curre
 def mark_notification_read(notification_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     n = db.query(Notification).filter(Notification.id == notification_id, Notification.user_id == user.id).first()
     if not n:
-        raise HTTPException(404, "Notification not found")
+        raise HTTPException(status_code=404, detail="Notification not found")
     n.is_read = True
     db.commit()
     return {"ok": True}
@@ -395,7 +383,7 @@ def view_upload(key: str = Query(...), user: User = Depends(get_current_user),
     from src.r2_storage import presigned_url_for_key
 
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", key or "") or ".." in key or "/" not in key:
-        raise HTTPException(400, "Invalid attachment key")
+        raise HTTPException(status_code=400, detail="Invalid attachment key")
     owner_bu_id = None
     is_profile_photo = key.startswith("profile-photos/")
     # m-26: ownership is matched on EXACT key equality, not LIKE. Stored
@@ -421,9 +409,9 @@ def view_upload(key: str = Query(...), user: User = Depends(get_current_user),
                 profile_owner_id = user_id
                 break
         if profile_owner_id is None:
-            raise HTTPException(404, "Attachment not found")
-        if user.role not in ("Chairman", "HO") and profile_owner_id != user.id:
-            raise HTTPException(403, "Not your profile photo")
+            raise HTTPException(status_code=404, detail="Attachment not found")
+        if user.role not in (Role.CHAIRMAN, Role.HO) and profile_owner_id != user.id:
+            raise HTTPException(status_code=403, detail="Not your profile photo")
     else:
         for bu_id, stored_url in db.query(
                 ActivityLog.business_unit_id, ActivityLog.document_url).filter(
@@ -438,16 +426,16 @@ def view_upload(key: str = Query(...), user: User = Depends(get_current_user),
                     HeadOfficeActivityLog.document_url.isnot(None)).all()
             )
             if ho_found:
-                if user.role not in ("Chairman", "HO"):
-                    raise HTTPException(403, "Only Chairman/HO can view head-office attachments")
+                if user.role not in (Role.CHAIRMAN, Role.HO):
+                    raise HTTPException(status_code=403, detail="Only Chairman/HO can view head-office attachments")
             else:
-                raise HTTPException(404, "Attachment not found")
+                raise HTTPException(status_code=404, detail="Attachment not found")
         # m-26: fail closed — the old `and user.business_unit_id`
         # condition skipped the 403 entirely for a NULL-BU CEO. A CEO
         # whose BU is unset now matches nothing, instead of everything.
-        if owner_bu_id is not None and user.role == "CEO":
+        if owner_bu_id is not None and user.role == Role.CEO:
             if owner_bu_id != user.business_unit_id:
-                raise HTTPException(403, "Attachment belongs to another business unit")
+                raise HTTPException(status_code=403, detail="Attachment belongs to another business unit")
     # M-04: record who viewed which attachment (key only, never contents).
     _log_audit(db, user, "VIEW_UPLOAD", f"key={key}")
     # Sm-9: the 302 target is a 15-minute bearer URL — Cache-Control:
@@ -459,28 +447,17 @@ def view_upload(key: str = Query(...), user: User = Depends(get_current_user),
         return RedirectResponse(url=f"/uploads/{key}", status_code=302, headers=no_store)
     url = presigned_url_for_key(key)
     if not url:
-        raise HTTPException(503, "File storage is not available")
+        raise HTTPException(status_code=503, detail="File storage is not available")
     return RedirectResponse(url=url, status_code=302, headers=no_store)
 
 
 # ---------------------------------------------------------------- staff
 
-class StaffIn(BaseModel):
-    business_unit_id: Optional[int] = None
-    report_date: date
-    total_staff: int = Field(default=0, ge=0, le=1000000)
-    present: int = Field(default=0, ge=0, le=1000000)
-    absent: int = Field(default=0, ge=0, le=1000000)
-    new_hires: int = Field(default=0, ge=0, le=1000000)
-    resignations: int = Field(default=0, ge=0, le=1000000)
-    notes: Optional[str] = None
-
-
 @router.post("/staff")
 def submit_staff(payload: StaffIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     bu_id = bu_scope(user, payload.business_unit_id)
     if bu_id is None:
-        raise HTTPException(400, "business_unit_id is required")
+        raise HTTPException(status_code=400, detail="business_unit_id is required")
     row = db.query(StaffRecord).filter(StaffRecord.business_unit_id == bu_id, StaffRecord.report_date == payload.report_date).first()
     if row is None:
         row = StaffRecord(business_unit_id=bu_id, report_date=payload.report_date)
@@ -506,34 +483,26 @@ def list_staff(business_unit_id: Optional[int] = None, days: int = 30,
     q = db.query(StaffRecord).filter(StaffRecord.report_date >= since)
     if bu_id is not None:
         q = q.filter(StaffRecord.business_unit_id == bu_id)
-    rows = q.order_by(StaffRecord.report_date.desc()).offset(clamp_offset(offset)).limit(clamp_limit(limit)).all()
-    return {"items": [
+    total = q.count()
+    limit, offset = clamp_limit(limit), clamp_offset(offset)
+    rows = q.order_by(StaffRecord.report_date.desc()).offset(offset).limit(limit).all()
+    return page_response([
         {"id": r.id, "business_unit_id": r.business_unit_id, "report_date": r.report_date.isoformat(),
          "total_staff": r.total_staff, "present": r.present, "absent": r.absent,
          "new_hires": r.new_hires, "resignations": r.resignations, "notes": r.notes}
         for r in rows
-    ]}
+    ], total, limit, offset)
 
 
 # ---------------------------------------------------------------- customers
-
-class CustomerIn(BaseModel):
-    business_unit_id: Optional[int] = None
-    report_date: date
-    footfall: Optional[int] = Field(default=None, ge=0, le=10**9)
-    transactions: Optional[int] = Field(default=None, ge=0, le=10**9)
-    complaints: int = Field(default=0, ge=0, le=10**9)
-    satisfaction_score: Optional[float] = None
-    notes: Optional[str] = None
-
 
 @router.post("/customers")
 def submit_customers(payload: CustomerIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     bu_id = bu_scope(user, payload.business_unit_id)
     if bu_id is None:
-        raise HTTPException(400, "business_unit_id is required")
+        raise HTTPException(status_code=400, detail="business_unit_id is required")
     if payload.satisfaction_score is not None and not (1.0 <= payload.satisfaction_score <= 5.0):
-        raise HTTPException(400, "satisfaction_score must be between 1.0 and 5.0")
+        raise HTTPException(status_code=400, detail="satisfaction_score must be between 1.0 and 5.0")
     row = db.query(CustomerMetric).filter(CustomerMetric.business_unit_id == bu_id, CustomerMetric.report_date == payload.report_date).first()
     if row is None:
         row = CustomerMetric(business_unit_id=bu_id, report_date=payload.report_date)
@@ -558,14 +527,16 @@ def list_customers(business_unit_id: Optional[int] = None, days: int = 30,
     q = db.query(CustomerMetric).filter(CustomerMetric.report_date >= since)
     if bu_id is not None:
         q = q.filter(CustomerMetric.business_unit_id == bu_id)
-    rows = q.order_by(CustomerMetric.report_date.desc()).offset(clamp_offset(offset)).limit(clamp_limit(limit)).all()
-    return {"items": [
+    total = q.count()
+    limit, offset = clamp_limit(limit), clamp_offset(offset)
+    rows = q.order_by(CustomerMetric.report_date.desc()).offset(offset).limit(limit).all()
+    return page_response([
         {"id": r.id, "business_unit_id": r.business_unit_id, "report_date": r.report_date.isoformat(),
          "footfall": r.footfall, "transactions": r.transactions, "complaints": r.complaints,
          "satisfaction_score": float(r.satisfaction_score) if r.satisfaction_score is not None else None,
          "notes": r.notes}
         for r in rows
-    ]}
+    ], total, limit, offset)
 
 
 # ---------------------------------------------------------------- forecast
@@ -620,15 +591,6 @@ def serialize_document(db: Session, d: LicenseDocument) -> dict:
     }
 
 
-class DocumentIn(BaseModel):
-    business_unit_id: Optional[int] = None
-    title: str = Field(min_length=1, max_length=255)
-    document_type: str = "license"
-    issue_date: Optional[date] = None
-    expiry_date: date
-    notes: Optional[str] = None
-
-
 @router.get("/documents")
 def list_documents(business_unit_id: Optional[int] = None, expiring_soon: bool = False,
                    limit: int = 200, offset: int = 0,
@@ -648,9 +610,11 @@ def list_documents(business_unit_id: Optional[int] = None, expiring_soon: bool =
         q = q.filter(LicenseDocument.expiry_date.isnot(None),
                      LicenseDocument.expiry_date <= horizon)
     total = q.count()
-    rows = q.order_by(LicenseDocument.expiry_date.asc()).offset(clamp_offset(offset)).limit(clamp_limit(limit)).all()
+    limit, offset = clamp_limit(limit), clamp_offset(offset)
+    rows = q.order_by(LicenseDocument.expiry_date.asc()).offset(offset).limit(limit).all()
     items = [serialize_document(db, d) for d in rows]
-    return {"items": items, "count": total}
+    # B-m2: "count" renamed to "total" (+ limit/offset) — the shared envelope.
+    return page_response(items, total, limit, offset)
 
 
 @router.post("/documents")
@@ -664,7 +628,7 @@ def create_document(payload: DocumentIn, request: Request = None, user: User = D
             return replay
     bu_id = bu_scope(user, payload.business_unit_id)
     if bu_id is None:
-        raise HTTPException(400, "business_unit_id is required")
+        raise HTTPException(status_code=400, detail="business_unit_id is required")
     d = LicenseDocument(
         business_unit_id=bu_id, title=payload.title,
         document_type=payload.document_type or "license",
@@ -687,7 +651,7 @@ def create_document(payload: DocumentIn, request: Request = None, user: User = D
 def delete_document(document_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     d = db.query(LicenseDocument).filter(LicenseDocument.id == document_id).first()
     if not d:
-        raise HTTPException(404, "Document not found")
+        raise HTTPException(status_code=404, detail="Document not found")
     bu_scope(user, d.business_unit_id)
     db.delete(d)
     db.commit()
@@ -719,13 +683,9 @@ def monthly_report(month: Optional[str] = None, user: User = Depends(require_adm
     from fastapi.responses import StreamingResponse
     from sqlalchemy import func
 
+    y, m = parse_month_or_422(month)
     today = today_local()
-    month = validate_period(month)
-    if month:
-        y, m = (int(x) for x in month.split("-"))
-        month_start = date(y, m, 1)
-    else:
-        month_start = date(today.year, today.month, 1)
+    month_start = date(y, m, 1)
     import calendar as _cal
     month_end = date(month_start.year, month_start.month, _cal.monthrange(month_start.year, month_start.month)[1])
     days_in_month = (month_end - month_start).days + 1
@@ -978,6 +938,6 @@ def export_excel(tab: str = "actions", business_unit_id: Optional[int] = None,
                        c.footfall, c.transactions, c.complaints,
                        float(c.satisfaction_score) if c.satisfaction_score is not None else ""] for c in rows])
 
-    raise HTTPException(400, "tab must be actions/documents/staff/customers")
+    raise HTTPException(status_code=400, detail="tab must be actions/documents/staff/customers")
 
 

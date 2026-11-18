@@ -8,6 +8,10 @@ class ApiError extends Error {
     // M-01: the full response body — the login flow reads
     // `data.totp_setup_token` from a TOTP_ENROLLMENT_REQUIRED response.
     this.data = data || null;
+    // B-m6: the stable machine code when the backend sent one
+    // (e.g. TOTP_REQUIRED); `detail` stays the human-readable message.
+    // Prefer `code` over string-matching `message` (see LoginPage).
+    this.code = data?.code || null;
   }
 }
 
@@ -32,7 +36,10 @@ async function handle(response) {
   const isJson = (response.headers.get('content-type') || '').includes('application/json');
   const body = isJson ? await response.json().catch(() => ({})) : null;
   if (!response.ok) {
-    if (response.status === 401 && body?.detail !== 'TOTP_REQUIRED') {
+    // B-m6: branch on the stable `code` when the backend sent one;
+    // fall back to matching `detail` (err.message) for older responses.
+    const code = body?.code || body?.detail;
+    if (response.status === 401 && code !== 'TOTP_REQUIRED') {
       // SM-1: global 401 handling — every API call funnels through here,
       // so a session that expired (or was revoked on another device) is
       // caught in one place instead of each page's .catch. The flag lets

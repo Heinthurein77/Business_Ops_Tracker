@@ -15,9 +15,7 @@ from sqlalchemy.orm import sessionmaker
 
 from src.models import AuditLog, Base, BusinessUnit, Notification, User
 from src.routers.ceo import set_monthly_target as ceo_set_monthly_target
-from src.routers.ceo import submit_report as ceo_submit_report
 from src.routers.ho import set_monthly_target as ho_set_monthly_target
-from src.routers.ho import submit_report as ho_submit_report
 from src.schemas import MonthlyTargetRequest
 from src.utils import today_local
 
@@ -25,10 +23,16 @@ REQUEST = SimpleNamespace(headers={}, client=SimpleNamespace(host="127.0.0.1"))
 
 
 @pytest.fixture()
-def db():
-    engine = create_engine("sqlite://")
+def db(tmp_path):
+    # B-M1: file-backed SQLite (not :memory:) so the submit handler,
+    # which FastAPI runs on a threadpool thread, sees the same rows as
+    # the test thread. expire_on_commit=False so the test user objects
+    # keep their loaded attributes when the HTTP layer reads them
+    # from the worker thread (no lazy refresh on the fixture session).
+    engine = create_engine(f"sqlite:///{tmp_path}/b.db",
+                           connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
     session.add_all([
         BusinessUnit(id=1, code="BU1", name="Shop One"),
         BusinessUnit(id=2, code="BU2", name="Shop Two"),
@@ -73,11 +77,63 @@ _SUBMIT_DEFAULTS = dict(
 )
 
 
+# B-M1: submit-report tests go through HTTP (real routing, Form parsing
+# and middleware) instead of calling the handler as a plain function with
+# a fake request. The app's auth/db dependencies are overridden per call:
+# get_current_user returns the test user, get_db yields a fresh session on
+# the same file-backed engine. Error responses are translated back into
+# HTTPException so the existing status/detail assertions read unchanged.
+def _post_submit(db, user, path, payload):
+    import asyncio
+
+    import httpx
+
+    from src.auth import get_current_user
+    from src.database import get_db
+    from src.main import app
+
+    def _override_db():
+        session = sessionmaker(bind=db.test_engine)()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    def _override_user():
+        return user
+
+    app.dependency_overrides[get_db] = _override_db
+    app.dependency_overrides[get_current_user] = _override_user
+    try:
+        async def _go():
+            async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app),
+                    base_url="http://testserver") as ac:
+                return await ac.post(path, data={
+                    k: v for k, v in payload.items() if v is not None
+                })
+
+        response = asyncio.run(_go())
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(get_current_user, None)
+    if response.status_code == 200:
+        return response.json()
+    try:
+        detail = response.json().get("detail", "")
+    except Exception:
+        detail = ""
+    if isinstance(detail, list):
+        detail = "; ".join(str(item.get("msg", item)) for item in detail)
+    raise HTTPException(status_code=response.status_code,
+                        detail=detail or f"Request failed ({response.status_code})")
+
+
 def _ceo_submit(db, user, **overrides):
     import src.routers.ceo as ceo_router
     ceo_router._rate_limiter.reset()
     kwargs = {**_SUBMIT_DEFAULTS, **overrides}
-    return ceo_submit_report(request=REQUEST, user=user, db=db, **kwargs)
+    return _post_submit(db, user, "/api/ceo/submit-report", kwargs)
 
 
 def _ho_submit(db, user, **overrides):
@@ -94,7 +150,7 @@ def _ho_submit(db, user, **overrides):
         attachment=None,
     )
     payload.update(overrides)
-    return ho_submit_report(REQUEST, user=user, db=db, **payload)
+    return _post_submit(db, user, "/api/ho/submit-report", payload)
 
 
 def _target(month_iso):
@@ -230,7 +286,8 @@ class TestAuditGapsClosed:
             fresh.close()
 
     def test_create_business_unit_audited(self, db):
-        from src.routers.admin import BUCreateIn, create_business_unit
+        from src.routers.admin import create_business_unit
+        from src.schemas import BUCreateIn
         chairman = db.test_users["chairman"]
         out = create_business_unit(BUCreateIn(name="New Unit B"), user=chairman, db=db)
         actions = self._audit_actions(db)
@@ -244,7 +301,8 @@ class TestAuditGapsClosed:
             fresh.close()
 
     def test_update_business_unit_audited(self, db):
-        from src.routers.admin import BUUpdateIn, update_business_unit
+        from src.routers.admin import update_business_unit
+        from src.schemas import BUUpdateIn
         chairman = db.test_users["chairman"]
         update_business_unit(1, BUUpdateIn(name="Shop One Renamed"), user=chairman, db=db)
         assert "BUSINESS_UNIT_UPDATED" in self._audit_actions(db)
@@ -496,7 +554,7 @@ class TestExpiringSoonSqlFilter:
         ceo = db.test_users["ceo"]
         # 3 matching rows (5d, 10d, expired); limit 2 must still report 3.
         out = list_documents(expiring_soon=True, limit=2, offset=0, user=ceo, db=db)
-        assert out["count"] == 3
+        assert out["total"] == 3
         assert len(out["items"]) == 2
         assert {i["title"] for i in out["items"]} <= {"Soon 5d", "Soon 10d", "Expired"}
 
@@ -505,7 +563,7 @@ class TestExpiringSoonSqlFilter:
         self._seed_docs(db)
         ceo = db.test_users["ceo"]
         out = list_documents(expiring_soon=True, limit=2, offset=2, user=ceo, db=db)
-        assert out["count"] == 3
+        assert out["total"] == 3
         assert len(out["items"]) == 1
         assert out["items"][0]["title"] in {"Soon 5d", "Soon 10d", "Expired"}
 
@@ -521,7 +579,7 @@ class TestExpiringSoonSqlFilter:
         self._seed_docs(db)
         ceo = db.test_users["ceo"]
         out = list_documents(expiring_soon=False, limit=100, offset=0, user=ceo, db=db)
-        assert out["count"] == 5
+        assert out["total"] == 5
         assert len(out["items"]) == 5
 
 
@@ -683,7 +741,8 @@ class TestActionItemAssigneeValidation:
 
     def test_nonexistent_assignee_400_and_nothing_created(self, db):
         from src.models import ActionItem
-        from src.routers.ops import ActionItemIn, create_action_item
+        from src.routers.ops import create_action_item
+        from src.schemas import ActionItemIn
         ceo = db.test_users["ceo"]
         with pytest.raises(HTTPException) as exc:
             create_action_item(ActionItemIn(business_unit_id=1, title="Nope",
@@ -693,7 +752,8 @@ class TestActionItemAssigneeValidation:
         assert db.query(ActionItem).count() == 0
 
     def test_cross_bu_assignee_400(self, db):
-        from src.routers.ops import ActionItemIn, create_action_item
+        from src.routers.ops import create_action_item
+        from src.schemas import ActionItemIn
         ceo = db.test_users["ceo"]
         with pytest.raises(HTTPException) as exc:
             create_action_item(ActionItemIn(business_unit_id=1, title="X",
@@ -703,7 +763,8 @@ class TestActionItemAssigneeValidation:
         assert "business unit" in exc.value.detail
 
     def test_chairman_assignee_400_for_ceo_creator(self, db):
-        from src.routers.ops import ActionItemIn, create_action_item
+        from src.routers.ops import create_action_item
+        from src.schemas import ActionItemIn
         ceo = db.test_users["ceo"]
         with pytest.raises(HTTPException) as exc:
             create_action_item(ActionItemIn(business_unit_id=1, title="X",
@@ -712,7 +773,8 @@ class TestActionItemAssigneeValidation:
         assert exc.value.status_code == 400
 
     def test_inactive_assignee_400(self, db):
-        from src.routers.ops import ActionItemIn, create_action_item
+        from src.routers.ops import create_action_item
+        from src.schemas import ActionItemIn
         self._teammate(db, active=False)
         ceo = db.test_users["ceo"]
         with pytest.raises(HTTPException) as exc:
@@ -723,7 +785,8 @@ class TestActionItemAssigneeValidation:
         assert "not active" in exc.value.detail
 
     def test_same_bu_assignee_ok_and_link_is_ceo_reachable(self, db):
-        from src.routers.ops import ActionItemIn, create_action_item
+        from src.routers.ops import create_action_item
+        from src.schemas import ActionItemIn
         # One active CEO per BU (partial unique index), so the only
         # same-BU assignee a CEO can pick is themselves — which is allowed
         # and sends no notification (assignee == creator).
@@ -736,7 +799,8 @@ class TestActionItemAssigneeValidation:
             Notification.type == "action_assigned").count() == 0
 
     def test_admin_may_assign_to_any_bu(self, db):
-        from src.routers.ops import ActionItemIn, create_action_item
+        from src.routers.ops import create_action_item
+        from src.schemas import ActionItemIn
         chairman = db.test_users["chairman"]
         out = create_action_item(ActionItemIn(business_unit_id=2, title="Do it",
                                               assigned_to_id=db.test_users["ceo2"].id),
@@ -747,7 +811,8 @@ class TestActionItemAssigneeValidation:
         assert note.link == "/ceo"
 
     def test_admin_assigning_to_ho_links_to_daily_ops(self, db):
-        from src.routers.ops import ActionItemIn, create_action_item
+        from src.routers.ops import create_action_item
+        from src.schemas import ActionItemIn
         chairman = db.test_users["chairman"]
         create_action_item(ActionItemIn(business_unit_id=1, title="HO task",
                                         assigned_to_id=db.test_users["ho"].id),
@@ -758,7 +823,8 @@ class TestActionItemAssigneeValidation:
 
     def test_update_validates_assignee(self, db):
         from src.models import ActionItem
-        from src.routers.ops import ActionItemIn, ActionItemUpdate, create_action_item, update_action_item
+        from src.routers.ops import create_action_item, update_action_item
+        from src.schemas import ActionItemIn, ActionItemUpdate
         ceo = db.test_users["ceo"]
         out = create_action_item(ActionItemIn(business_unit_id=1, title="T"),
                                  user=ceo, db=db)

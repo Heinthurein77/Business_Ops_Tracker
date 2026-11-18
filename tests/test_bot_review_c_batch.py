@@ -25,18 +25,18 @@ class TestSharedHelpers:
         for raw in (None, "", "false", "0", "no", "off", "maybe"):
             assert parse_bool(raw) is False, raw
 
-    def test_parse_month_or_default(self):
+    def test_parse_month_or_today(self):
         from datetime import date
 
-        from src.utils import parse_month_or_default
+        from src.utils import parse_month_or_today
 
         today = date(2026, 11, 17)
-        assert parse_month_or_default("2026-03", today) == (2026, 3)
-        assert parse_month_or_default("", today) == (2026, 11)
-        assert parse_month_or_default("garbage", today) == (2026, 11)
-        assert parse_month_or_default("2026-13", today) == (2026, 11)
-        assert parse_month_or_default("9999-12", today) == (2026, 11)
-        assert parse_month_or_default("1999-01", today) == (2026, 11)
+        assert parse_month_or_today("2026-03", today) == (2026, 3)
+        assert parse_month_or_today("", today) == (2026, 11)
+        assert parse_month_or_today("garbage", today) == (2026, 11)
+        assert parse_month_or_today("2026-13", today) == (2026, 11)
+        assert parse_month_or_today("9999-12", today) == (2026, 11)
+        assert parse_month_or_today("1999-01", today) == (2026, 11)
 
     def test_notify_adds_one_row(self, db):
         from src.models import Notification
@@ -671,10 +671,17 @@ class TestSubmitUploadHoldsNoSession:
             seen["checkedout"] = engine.pool.checkedout()
             return "https://bucket.r2.dev/activity-attachments/evidence.pdf"
 
-        monkeypatch.setattr(ceo_router, "upload_attachment_or_503", fake_upload)
+        # B-M1: the upload now runs inside the form builder
+        # (src/services/daily_report.upload_report_attachment), so the
+        # fake upload is patched there, not on the router.
+        import src.services.daily_report as daily_report_mod
+        from src.report_forms import build_ceo_report_form
+
+        monkeypatch.setattr(daily_report_mod, "upload_attachment_or_503", fake_upload)
         request = Request({"type": "http", "headers": [], "client": ("8.8.8.8", 5555)})
-        ceo_router.submit_report(
-            request=request, report_date="", revenue="100000", cash_flow="0",
+        form = build_ceo_report_form(
+            request=request, user=ceo, db=db, rate_limiter=ceo_router._rate_limiter,
+            report_date="", revenue="100000", cash_flow="0",
             receivable="0", payable="0", other_amount="", financial_other_notes="",
             meetings_attended="Standup", meetings_count="", site_visits="",
             key_decisions="", key_achievement="", next_day_schedule="",
@@ -686,8 +693,8 @@ class TestSubmitUploadHoldsNoSession:
             health_cycle_percent=None, health_other_notes="", event_flag="false",
             meeting_flag="false", golf_flag="false", social_other_notes="",
             attachment=UploadFile(filename="evidence.pdf",
-                                  file=io.BytesIO(self.PDF_BYTES)),
-            user=ceo, db=db)
+                                  file=io.BytesIO(self.PDF_BYTES)))
+        ceo_router.submit_report(request=request, form=form, user=ceo, db=db)
         assert seen == {"checkedout": 0}, "upload ran while a pooled connection was held"
         # The submit still succeeds end to end, with the URL stored.
         fin = db.query(DailyFinancial).filter(
@@ -719,10 +726,14 @@ class TestSubmitUploadHoldsNoSession:
             seen["checkedout"] = engine.pool.checkedout()
             return "https://bucket.r2.dev/activity-attachments/ho.pdf"
 
-        monkeypatch.setattr(ho_router, "upload_attachment_or_503", fake_upload)
+        import src.services.daily_report as daily_report_mod
+        from src.report_forms import build_ho_report_form
+
+        monkeypatch.setattr(daily_report_mod, "upload_attachment_or_503", fake_upload)
         request = Request({"type": "http", "headers": [], "client": ("8.8.8.8", 5555)})
-        ho_router.submit_report(
-            request, revenue="100000", cash_flow="20000", receivable="5000",
+        form = build_ho_report_form(
+            request=request, user=ho, db=db, rate_limiter=ho_router._rate_limiter,
+            revenue="100000", cash_flow="20000", receivable="5000",
             payable="3000", other_amount="1000", financial_other_notes="",
             meetings_attended="Standup", site_visits="", key_decisions="",
             next_day_schedule="", gym_percent="50", swimming_percent="",
@@ -731,8 +742,8 @@ class TestSubmitUploadHoldsNoSession:
             bp_diastolic="80", health_other_notes="", event_flag="true",
             meeting_flag="false", golf_flag="false", social_other_notes="",
             attachment=UploadFile(filename="evidence.pdf",
-                                  file=io.BytesIO(self.PDF_BYTES)),
-            user=ho, db=db)
+                                  file=io.BytesIO(self.PDF_BYTES)))
+        ho_router.submit_report(request, form=form, user=ho, db=db)
         assert seen == {"checkedout": 0}, "upload ran while a pooled connection was held"
         fin = db.query(HeadOfficeDailyFinancial).filter(
             HeadOfficeDailyFinancial.report_date == today_local()).one()

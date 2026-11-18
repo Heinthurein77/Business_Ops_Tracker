@@ -1,10 +1,17 @@
-// T-m2 smoke layer: the frontend previously had zero tests of any kind.
+// T-M1 smoke layer: the frontend previously had zero tests of any kind.
 // These specs cover the three checks the audit asked for — Chairman
-// login + admin dashboard load, role visibility (a BU accountant must
-// not reach Chairman-only pages), and the failed-load error state
-// (an error card, not a permanent spinner).
+// login + admin dashboard load, role visibility (a CEO must not reach
+// Chairman-only pages), and the failed-load error state (an error card,
+// not a permanent spinner).
+//
+// Roles that exist post-ERP-removal are Chairman, HO and CEO only
+// (src/schemas.py CreateUserRequest.validate_role rejects anything
+// else); there is no Accountant role and no /accounting route. The
+// role-bounce spec therefore uses the seeded CEO (ceo_bu1), whose home
+// is /ceo. Specs stick to the login page and role bounces so the
+// ongoing page refactor cannot break them.
 import { expect, test } from "@playwright/test";
-import { accounts, completeForcedRotation, createAccountant, loginAs, rotatedPassword, signOut } from "./helpers.js";
+import { accounts, completeCeoProfile, loginAs } from "./helpers.js";
 
 test("chairman login lands on the admin dashboard", async ({ page }) => {
   await loginAs(page, accounts.chairman);
@@ -28,28 +35,22 @@ test("wrong password shows an error and stays on login", async ({ page }) => {
   await expect(banner).toContainText(/invalid|incorrect|failed|wrong/i);
 });
 
-test("BU accountant cannot reach Chairman-only pages", async ({ page }) => {
-  // Create the accountant as Chairman, then switch users.
-  await loginAs(page, accounts.chairman);
-  const acct = await createAccountant(page, 1);
-  await signOut(page);
+test("CEO cannot reach Chairman-only pages", async ({ page }) => {
+  // Seeded CEO: forced rotation first, then the mandatory profile
+  // (completed over the API), then the CEO home.
+  await loginAs(page, accounts.ceo);
+  await completeCeoProfile(page);
+  await page.goto("/ceo");
+  await expect(page).toHaveURL(/\/ceo$/);
 
-  // Fresh account: forced rotation first, then the accountant home.
-  await page.goto("/login");
-  await page.getByPlaceholder("Your username").fill(acct.username);
-  await page.getByPlaceholder("••••••••").fill(acct.temporary_password);
-  await page.getByRole("button", { name: "Sign In Securely" }).click();
-  await completeForcedRotation(page, acct.temporary_password, rotatedPassword);
-  await expect(page).toHaveURL(/\/accounting/);
-
-  // Chairman-only route: bounced back to the accountant's own home.
+  // Chairman-only route: bounced back to the CEO's own home.
   await page.goto("/admin/users");
-  await expect(page).toHaveURL(/\/accounting/);
+  await expect(page).toHaveURL(/\/ceo$/);
   await expect(page.getByText("Manage Users")).toHaveCount(0);
 
   // The admin dashboard itself is Chairman/HO-only too.
   await page.goto("/admin");
-  await expect(page).toHaveURL(/\/accounting/);
+  await expect(page).toHaveURL(/\/ceo$/);
 });
 
 test("HO user cannot reach Chairman-only pages", async ({ page }) => {

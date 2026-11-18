@@ -14,9 +14,9 @@ from fastapi import HTTPException
 
 from src.models import BusinessUnit
 from src.routers.admin import (
-    BUCreateIn, BUUpdateIn, create_business_unit, list_business_units,
-    update_business_unit,
+    create_business_unit, list_business_units, update_business_unit,
 )
+from src.schemas import BUCreateIn, BUUpdateIn
 
 CHAIRMAN = SimpleNamespace(id=None, role="Chairman", business_unit_id=None)
 CEO = SimpleNamespace(id=None, role="CEO", business_unit_id=1)

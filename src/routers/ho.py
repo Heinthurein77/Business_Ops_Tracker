@@ -1,13 +1,12 @@
 import logging
 from datetime import date
-from decimal import Decimal
-from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from src.auth import assert_token_current, require_roles
+from src.auth import require_roles
+from src.constants import Role
 from src.config import settings
 from src.database import get_db
 from src.models import (
@@ -18,16 +17,10 @@ from src.models import (
     HeadOfficeSocialLog,
     User,
 )
-from src.r2_storage import delete_object, extract_r2_key, upload_attachment_or_503
+from src.report_forms import HoReportForm, ho_report_form
 from src.schemas import MonthlyTargetRequest
-from src.upload_validation import content_matches_extension
+from src.services.daily_report import DailyReportRowSpec, upsert_daily_report
 from src.utils import (
-    BP_DIASTOLIC_RANGE,
-    BP_SYSTOLIC_RANGE,
-    HEART_RATE_RANGE,
-    MAX_NARRATIVE_TEXT_LEN,
-    SLEEP_HOURS_RANGE,
-    STEPS_RANGE,
     build_activity_rows,
     build_financial_rows,
     build_health_rows,
@@ -37,21 +30,14 @@ from src.utils import (
     compute_ho_quadrant_summary,
     compute_monthly_social_counts,
     evaluate_ho_cumulative_health,
-    form_decimal,
-    form_int,
-    form_money,
-    form_percent,
-    form_text,
     format_local_datetime,
     log_audit,
     monthly_target_window_error,
-    parse_bool,
-    parse_month_or_default,
+    parse_month_or_today,
     parse_monthly_target_amounts,
     SubmitRateLimiter,
     today_local,
     todays_submission_events,
-    validate_blood_pressure,
 )
 
 router = APIRouter(prefix="/api/ho", tags=["ho"])
@@ -63,15 +49,11 @@ REPORT_SUBMIT_RATE_WINDOW_SECONDS = 60
 # M-12: the guard itself lives in src/utils.py (SubmitRateLimiter); this
 # router owns one instance so CEO and HO keep separate budgets.
 _rate_limiter = SubmitRateLimiter(REPORT_SUBMIT_RATE_LIMIT, REPORT_SUBMIT_RATE_WINDOW_SECONDS)
-_is_rate_limited = _rate_limiter.is_limited
-
-MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
-ALLOWED_ATTACHMENT_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "gif", "webp", "docx", "xlsx", "csv", "txt"}
 
 logger = logging.getLogger(__name__)
 
 @router.get("/dashboard")
-def ho_dashboard(user: User = Depends(require_roles("HO")), db: Session = Depends(get_db)):
+def ho_dashboard(user: User = Depends(require_roles(Role.HO)), db: Session = Depends(get_db)):
     report_date = today_local()
 
     financial = db.query(HeadOfficeDailyFinancial).filter(HeadOfficeDailyFinancial.report_date == report_date).first()
@@ -218,12 +200,12 @@ def ho_dashboard(user: User = Depends(require_roles("HO")), db: Session = Depend
 
 
 @router.get("/monthly-target")
-def get_monthly_target(month: str = "", user: User = Depends(require_roles("HO")), db: Session = Depends(get_db)):
+def get_monthly_target(month: str = "", user: User = Depends(require_roles(Role.HO)), db: Session = Depends(get_db)):
     """Fetches the target already set for the given month (default: current
     month) — mirrors /api/ceo/monthly-target so the "Set Monthly Target" form
     can pre-fill the same way."""
     today = today_local()
-    year, month_num = parse_month_or_default(month, today)
+    year, month_num = parse_month_or_today(month, today)
     target_month = date(year, month_num, 1)
 
     target = db.query(HeadOfficeMonthlyTarget).filter(HeadOfficeMonthlyTarget.target_month == target_month).first()
@@ -245,7 +227,7 @@ def get_monthly_target(month: str = "", user: User = Depends(require_roles("HO")
 def set_monthly_target(
     payload: MonthlyTargetRequest,
     request: Request,
-    user: User = Depends(require_roles("HO")),
+    user: User = Depends(require_roles(Role.HO)),
     db: Session = Depends(get_db),
 ):
     """Sets Head Office's monthly target for the given month — but only once,
@@ -294,35 +276,68 @@ def set_monthly_target(
     return {"ok": True, "target_month": target_month.isoformat()}
 
 
+_parse_report_form = ho_report_form(_rate_limiter)
+
+
+def _apply_ho_report(form: HoReportForm, user: User):
+    """Returns the `apply` callback for the shared upsert: assigns the
+    parsed HO form to the four per-day rows. Returns the previous
+    attachment URL (or None) so a replaced attachment can be deleted
+    after the commit."""
+
+    def apply(rows, previous):
+        financial = rows["financial"]
+        activity = rows["activity"]
+        health = rows["health"]
+        social = rows["social"]
+
+        financial.revenue = form.revenue
+        financial.cash_flow = form.cash_flow
+        financial.receivable = form.receivable
+        financial.payable = form.payable
+        financial.other_amount = form.other_amount
+        financial.other_notes = form.financial_other_notes or None
+        financial.submitted_by = user.id
+
+        # SM-7: captured before being overwritten below, so a resubmission that
+        # replaces the attachment can delete the previous R2 object afterwards.
+        previous_document_url = activity.document_url
+        activity.meetings_attended = form.meetings_attended
+        activity.site_visits = form.site_visits
+        activity.key_decisions = form.key_decisions
+        activity.next_day_schedule = form.next_day_schedule
+        if form.document_url:
+            activity.document_url = form.document_url
+        activity.gym_percent = form.gym_percent
+        activity.swimming_percent = form.swimming_percent
+        activity.cycle_percent = form.cycle_percent
+        activity.other_notes = form.activity_other_notes or None
+        activity.submitted_by = user.id
+
+        health.daily_steps = form.daily_steps
+        health.heart_rate = form.heart_rate
+        health.sleep_hours = form.sleep_hours
+        health.bp_systolic = form.bp_systolic
+        health.bp_diastolic = form.bp_diastolic
+        health.other_notes = form.health_other_notes or None
+        health.submitted_by = user.id
+
+        social.event_flag = form.event_flag
+        social.meeting_flag = form.meeting_flag
+        social.golf_flag = form.golf_flag
+        social.other_notes = form.social_other_notes or None
+        social.submitted_by = user.id
+
+        return previous_document_url
+
+    return apply
+
+
 @router.post("/submit-report")
 def submit_report(
     request: Request,
-    revenue: str = Form(""),
-    cash_flow: str = Form(""),
-    receivable: str = Form(""),
-    payable: str = Form(""),
-    other_amount: str = Form(""),
-    financial_other_notes: str = Form(""),
-    meetings_attended: str = Form(""),
-    site_visits: str = Form(""),
-    key_decisions: str = Form(""),
-    next_day_schedule: str = Form(""),
-    gym_percent: str = Form(""),
-    swimming_percent: str = Form(""),
-    cycle_percent: str = Form(""),
-    activity_other_notes: str = Form(""),
-    daily_steps: str = Form(""),
-    heart_rate: str = Form(""),
-    sleep_hours: str = Form(""),
-    bp_systolic: str = Form(""),
-    bp_diastolic: str = Form(""),
-    health_other_notes: str = Form(""),
-    event_flag: str = Form("false"),
-    meeting_flag: str = Form("false"),
-    golf_flag: str = Form("false"),
-    social_other_notes: str = Form(""),
-    attachment: Optional[UploadFile] = File(None),
-    user: User = Depends(require_roles("HO")),
+    form: HoReportForm = Depends(_parse_report_form),
+    user: User = Depends(require_roles(Role.HO)),
     db: Session = Depends(get_db),
 ):
     # Deliberately a plain `def`, not `async def`: everything below is blocking
@@ -330,285 +345,98 @@ def submit_report(
     # 10 MB), so FastAPI must run it in its threadpool instead of on the event
     # loop, where it would stall every other request while locks are held.
     # UploadFile.file is a regular SpooledTemporaryFile, safe to use from here.
-    if _is_rate_limited(user.id):
-        log_audit(db, user, "HO_REPORT_SUBMIT_RATE_LIMITED", "", request)
-        raise HTTPException(status_code=429, detail="Too many submissions in a short time. Please wait a moment and try again.")
-
-    report_date = today_local()
-
-    # --- Validate every input up front, before any DB work, row lock or
-    # upload. Invalid values are a clear HTTP 400 - never a 500, and never
-    # stored (NaN/Infinity/huge money would poison the dashboards' SUMs). The
-    # ranges mirror the database CHECK constraints. Blank stays "not given". ---
-    revenue_val = form_money(revenue, "Revenue")
-    cash_flow_val = form_money(cash_flow, "Cash Flow")
-    receivable_val = form_money(receivable, "Receivable")
-    payable_val = form_money(payable, "Payable")
-    # Optional - mirrors /api/ceo/submit-report's Other Amount, defaults to 0
-    # rather than blocking submission when left blank.
-    other_amount_val = form_money(other_amount, "Other Amount") or Decimal("0")
-
-    # Financial fields are mandatory every day, same as a CEO's daily report.
-    missing = [
-        label
-        for label, val in [("Revenue", revenue_val), ("Cash Flow", cash_flow_val), ("Receivable", receivable_val), ("Payable", payable_val)]
-        if val is None
+    #
+    # B-M1: parsing/validation/upload live in src/report_forms.py (the
+    # `form` dependency) and the 4-table upsert in
+    # src/services/daily_report.py — this handler only wires them together
+    # and writes the resubmit audit entry.
+    report_date = form.report_date
+    specs = [
+        DailyReportRowSpec(
+            key="financial", cls=HeadOfficeDailyFinancial,
+            filters={"report_date": report_date},
+            create_kwargs={"report_date": report_date},
+            snapshot_fields=(
+                ("revenue", "revenue"), ("cash_flow", "cash_flow"),
+                ("receivable", "receivable"), ("payable", "payable"),
+                ("other_amount", "other_amount"), ("other_notes", "financial_other_notes"),
+            ),
+        ),
+        DailyReportRowSpec(
+            key="activity", cls=HeadOfficeActivityLog,
+            filters={"report_date": report_date},
+            create_kwargs={"report_date": report_date},
+            snapshot_fields=(
+                ("meetings_attended", "meetings_attended"), ("site_visits", "site_visits"),
+                ("key_decisions", "key_decisions"), ("next_day_schedule", "next_day_schedule"),
+                ("gym_percent", "gym_percent"), ("swimming_percent", "swimming_percent"),
+                ("cycle_percent", "cycle_percent"), ("other_notes", "activity_other_notes"),
+            ),
+        ),
+        DailyReportRowSpec(
+            key="health", cls=HeadOfficeHealthStatus,
+            filters={"report_date": report_date},
+            create_kwargs={"report_date": report_date},
+            snapshot_fields=(
+                ("daily_steps", "daily_steps"), ("heart_rate", "heart_rate"),
+                ("sleep_hours", "sleep_hours"), ("bp_systolic", "bp_systolic"),
+                ("bp_diastolic", "bp_diastolic"), ("other_notes", "health_other_notes"),
+            ),
+        ),
+        DailyReportRowSpec(
+            key="social", cls=HeadOfficeSocialLog,
+            filters={"report_date": report_date},
+            create_kwargs={"report_date": report_date},
+            snapshot_fields=(
+                ("event_flag", "event_flag"), ("meeting_flag", "meeting_flag"),
+                ("golf_flag", "golf_flag"), ("other_notes", "social_other_notes"),
+            ),
+        ),
     ]
-    if missing:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Financial fields are mandatory. Missing: {', '.join(missing)}",
-        )
-
-    daily_steps_val = form_int(daily_steps, *STEPS_RANGE)
-    heart_rate_val = form_int(heart_rate, *HEART_RATE_RANGE)
-    sleep_hours_val = form_decimal(sleep_hours, *SLEEP_HOURS_RANGE, places=1)
-    bp_systolic_val = form_int(bp_systolic, *BP_SYSTOLIC_RANGE)
-    bp_diastolic_val = form_int(bp_diastolic, *BP_DIASTOLIC_RANGE)
-    validate_blood_pressure(bp_systolic_val, bp_diastolic_val)
-
-    gym_percent_val = form_percent(gym_percent, "Gym %")
-    swimming_percent_val = form_percent(swimming_percent, "Swimming %")
-    cycle_percent_val = form_percent(cycle_percent, "Cycle %")
-
-    financial_other_notes = form_text(financial_other_notes, "Financial notes", MAX_NARRATIVE_TEXT_LEN)
-    meetings_attended = form_text(meetings_attended, "Meetings attended", MAX_NARRATIVE_TEXT_LEN)
-    site_visits = form_text(site_visits, "Site visits", MAX_NARRATIVE_TEXT_LEN)
-    key_decisions = form_text(key_decisions, "Key decisions", MAX_NARRATIVE_TEXT_LEN)
-    next_day_schedule = form_text(next_day_schedule, "Next day schedule", MAX_NARRATIVE_TEXT_LEN)
-    activity_other_notes = form_text(activity_other_notes, "Activity notes", MAX_NARRATIVE_TEXT_LEN)
-    health_other_notes = form_text(health_other_notes, "Health notes", MAX_NARRATIVE_TEXT_LEN)
-    social_other_notes = form_text(social_other_notes, "Social notes", MAX_NARRATIVE_TEXT_LEN)
-
-    # m-13: the attachment is validated and uploaded BEFORE any row is
-    # locked or written, and with NO database session held — same shape
-    # as /api/ceo/submit-report. get_db checks a pooled connection out
-    # (SELECT 1) before the handler runs, and the old code then took
-    # this day's row locks before the R2 upload, so a slow upload (up
-    # to ~90 s) held a pooled connection AND row locks. The pre-upload
-    # locks are not needed for orphan-safety: the write phase below
-    # re-takes the same row locks, a first-submission race still
-    # surfaces as the 409 at commit time (whose handler deletes the
-    # loser's upload), and a resubmission's post-commit cleanup deletes
-    # the previous attachment in every interleaving. So the upload now
-    # runs between validation and the writes, after db.close() releases
-    # the pooled connection; the write phase re-uses the same session
-    # object, which checks a fresh connection out on its next query.
-    document_url = None
-    if attachment is not None and attachment.filename:
-        extension = attachment.filename.rsplit(".", 1)[-1].lower() if "." in attachment.filename else ""
-        if extension not in ALLOWED_ATTACHMENT_EXTENSIONS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported attachment type. Allowed: {', '.join(sorted(ALLOWED_ATTACHMENT_EXTENSIONS))}",
-            )
-        attachment.file.seek(0, 2)
-        attachment_size = attachment.file.tell()
-        attachment.file.seek(0)
-        if attachment_size > MAX_ATTACHMENT_SIZE_BYTES:
-            raise HTTPException(status_code=400, detail="Attachment must be 10 MB or smaller")
-        if not content_matches_extension(extension, attachment.file):
-            raise HTTPException(status_code=400, detail="File content does not match its file type")
-
-        # Release the pooled connection checked out by get_db before the
-        # (potentially slow) R2 upload; the session is reused below.
-        db.close()
-        # D-4: an attachment that cannot be stored fails the submit (503)
-        # instead of saving the report as if the evidence were attached.
-        document_url = upload_attachment_or_503(attachment.file, attachment.filename)
-
-    # M-14: no_autoflush for the four lookup-or-create blocks below (and
-    # the assert_token_current check just before the commit, which queries
-    # too) — same guard as /api/ceo/submit-report. Each block adds a new
-    # per-day row and the NEXT block's lookup would autoflush that pending
-    # INSERT — on a concurrent double submit the flush hits the per-day
-    # unique constraint OUTSIDE the try/except around db.commit() below
-    # and 500s instead of 409ing. With autoflush off, nothing is sent to
-    # the DB until the commit, whose IntegrityError handler is the 409
-    # guard. The lookups only ever read already-committed rows (each block
-    # queries a different table), so deferring the flush changes no result.
-    with db.no_autoflush:
-        financial = (
-            db.query(HeadOfficeDailyFinancial)
-            .filter(HeadOfficeDailyFinancial.report_date == report_date)
-            .with_for_update()
-            .first()
-        )
-        # Captured before being overwritten below, so a same-day resubmission's
-        # audit log entry can show exactly what changed rather than just that a
-        # submission happened — mirrors /api/ceo/submit-report's same tamper-evidence.
-        previous_financial = (
-            {
-                "revenue": financial.revenue,
-                "cash_flow": financial.cash_flow,
-                "receivable": financial.receivable,
-                "payable": financial.payable,
-                "other_amount": financial.other_amount,
-                "financial_other_notes": financial.other_notes,
-            }
-            if financial is not None
-            else None
-        )
-        if financial is None:
-            financial = HeadOfficeDailyFinancial(report_date=report_date)
-            db.add(financial)
-        financial.revenue = revenue_val
-        financial.cash_flow = cash_flow_val
-        financial.receivable = receivable_val
-        financial.payable = payable_val
-        financial.other_amount = other_amount_val
-        financial.other_notes = financial_other_notes or None
-        financial.submitted_by = user.id
-
-        activity = (
-            db.query(HeadOfficeActivityLog)
-            .filter(HeadOfficeActivityLog.report_date == report_date)
-            .with_for_update()
-            .first()
-        )
-        previous_activity = (
-            {
-                "meetings_attended": activity.meetings_attended,
-                "site_visits": activity.site_visits,
-                "key_decisions": activity.key_decisions,
-                "next_day_schedule": activity.next_day_schedule,
-                "gym_percent": activity.gym_percent,
-                "swimming_percent": activity.swimming_percent,
-                "cycle_percent": activity.cycle_percent,
-                "activity_other_notes": activity.other_notes,
-            }
-            if activity is not None
-            else None
-        )
-        if activity is None:
-            activity = HeadOfficeActivityLog(report_date=report_date)
-            db.add(activity)
-        # SM-7: captured before being overwritten below, so a resubmission that
-        # replaces the attachment can delete the previous R2 object afterwards.
-        previous_document_url = activity.document_url
-        activity.meetings_attended = meetings_attended
-        activity.site_visits = site_visits
-        activity.key_decisions = key_decisions
-        activity.next_day_schedule = next_day_schedule
-        if document_url:
-            activity.document_url = document_url
-        activity.gym_percent = gym_percent_val
-        activity.swimming_percent = swimming_percent_val
-        activity.cycle_percent = cycle_percent_val
-        activity.other_notes = activity_other_notes or None
-        activity.submitted_by = user.id
-
-        health = (
-            db.query(HeadOfficeHealthStatus)
-            .filter(HeadOfficeHealthStatus.report_date == report_date)
-            .with_for_update()
-            .first()
-        )
-        previous_health = (
-            {
-                "daily_steps": health.daily_steps,
-                "heart_rate": health.heart_rate,
-                "sleep_hours": health.sleep_hours,
-                "bp_systolic": health.bp_systolic,
-                "bp_diastolic": health.bp_diastolic,
-                "health_other_notes": health.other_notes,
-            }
-            if health is not None
-            else None
-        )
-        if health is None:
-            health = HeadOfficeHealthStatus(report_date=report_date)
-            db.add(health)
-        health.daily_steps = daily_steps_val
-        health.heart_rate = heart_rate_val
-        health.sleep_hours = sleep_hours_val
-        health.bp_systolic = bp_systolic_val
-        health.bp_diastolic = bp_diastolic_val
-        health.other_notes = health_other_notes or None
-        health.submitted_by = user.id
-
-        social = (
-            db.query(HeadOfficeSocialLog)
-            .filter(HeadOfficeSocialLog.report_date == report_date)
-            .with_for_update()
-            .first()
-        )
-        previous_social = (
-            {
-                "event_flag": social.event_flag,
-                "meeting_flag": social.meeting_flag,
-                "golf_flag": social.golf_flag,
-                "social_other_notes": social.other_notes,
-            }
-            if social is not None
-            else None
-        )
-        if social is None:
-            social = HeadOfficeSocialLog(report_date=report_date)
-            db.add(social)
-        social.event_flag = parse_bool(event_flag)
-        social.meeting_flag = parse_bool(meeting_flag)
-        social.golf_flag = parse_bool(golf_flag)
-        social.other_notes = social_other_notes or None
-        social.submitted_by = user.id
-
-        # m-05 (SM-1): same mid-request revocation re-check as the CEO
-        # submit path — immediately before the commit.
-        assert_token_current(db, user)
-
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        if document_url:
-            # SM-7: the loser's upload is already in R2 with no DB row
-            # pointing at it — delete it instead of orphaning it (and its
-            # upload-budget slot) on every double-click.
-            delete_object(extract_r2_key(document_url))
-        log_audit(db, user, "HO_REPORT_SUBMIT_CONFLICT", f"date={report_date.isoformat()}", request)
-        raise HTTPException(
-            status_code=409,
-            detail="Another submission for today was saved at the same moment — please try again.",
-        )
-
-    if document_url and previous_document_url and previous_document_url != document_url:
-        # SM-7: this resubmission replaced the previous attachment — delete
-        # the orphaned object instead of leaving it in R2 forever.
-        delete_object(extract_r2_key(previous_document_url))
+    result = upsert_daily_report(
+        db=db, request=request, user=user, report_date=report_date, specs=specs,
+        document_url=form.document_url, apply=_apply_ho_report(form, user),
+        conflict_audit_action="HO_REPORT_SUBMIT_CONFLICT",
+    )
+    activity = result.rows["activity"]
+    previous_financial = result.previous["financial"]
+    previous_activity = result.previous["activity"]
+    previous_health = result.previous["health"]
+    previous_social = result.previous["social"]
 
     changes = None
     if previous_financial is not None:
         current_financial = {
-            "revenue": revenue_val,
-            "cash_flow": cash_flow_val,
-            "receivable": receivable_val,
-            "payable": payable_val,
-            "other_amount": other_amount_val,
-            "financial_other_notes": financial.other_notes,
+            "revenue": form.revenue,
+            "cash_flow": form.cash_flow,
+            "receivable": form.receivable,
+            "payable": form.payable,
+            "other_amount": form.other_amount,
+            "financial_other_notes": result.rows["financial"].other_notes,
         }
         current_activity = {
             "meetings_attended": activity.meetings_attended,
             "site_visits": activity.site_visits,
             "key_decisions": activity.key_decisions,
             "next_day_schedule": activity.next_day_schedule,
-            "gym_percent": gym_percent_val,
-            "swimming_percent": swimming_percent_val,
-            "cycle_percent": cycle_percent_val,
+            "gym_percent": form.gym_percent,
+            "swimming_percent": form.swimming_percent,
+            "cycle_percent": form.cycle_percent,
             "activity_other_notes": activity.other_notes,
         }
         current_health = {
-            "daily_steps": daily_steps_val,
-            "heart_rate": heart_rate_val,
-            "sleep_hours": sleep_hours_val,
-            "bp_systolic": bp_systolic_val,
-            "bp_diastolic": bp_diastolic_val,
-            "health_other_notes": health.other_notes,
+            "daily_steps": form.daily_steps,
+            "heart_rate": form.heart_rate,
+            "sleep_hours": form.sleep_hours,
+            "bp_systolic": form.bp_systolic,
+            "bp_diastolic": form.bp_diastolic,
+            "health_other_notes": form.health_other_notes,
         }
         current_social = {
-            "event_flag": social.event_flag,
-            "meeting_flag": social.meeting_flag,
-            "golf_flag": social.golf_flag,
-            "social_other_notes": social.other_notes,
+            "event_flag": form.event_flag,
+            "meeting_flag": form.meeting_flag,
+            "golf_flag": form.golf_flag,
+            "social_other_notes": form.social_other_notes,
         }
         # Health vitals and free-text values are recorded as "(hidden)" by
         # compute_field_changes (only THAT they changed is audited); money
