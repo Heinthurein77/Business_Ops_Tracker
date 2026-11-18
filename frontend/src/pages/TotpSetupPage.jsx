@@ -100,8 +100,8 @@ export default function TotpSetupPage() {
             </p>
             <form onSubmit={handleDisable} className="space-y-5">
               <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1.5">Authenticator code</label>
-                <input
+                <label className="block text-sm font-medium text-slate-300 mb-1.5" htmlFor="totp-disable-code">Authenticator code</label>
+                <input id="totp-disable-code"
                   type="text"
                   required
                   autoComplete="one-time-code"
@@ -142,8 +142,8 @@ export default function TotpSetupPage() {
             </div>
             <form onSubmit={handleConfirm} className="space-y-5">
               <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1.5">Authenticator code</label>
-                <input
+                <label className="block text-sm font-medium text-slate-300 mb-1.5" htmlFor="totp-enroll-code">Authenticator code</label>
+                <input id="totp-enroll-code"
                   type="text"
                   required
                   autoComplete="one-time-code"

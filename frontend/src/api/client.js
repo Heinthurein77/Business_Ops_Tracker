@@ -244,4 +244,4 @@ export const api = {
   adminUpdateBU: (id, payload) => patchJson(`/api/admin/business-units/${id}`, payload),
 };
 
-export { ApiError };
+export { ApiError, buildQuery };

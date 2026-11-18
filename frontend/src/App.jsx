@@ -4,27 +4,39 @@ import { ThemeProvider } from './context/ThemeContext';
 import ProtectedRoute from './components/ProtectedRoute';
 import SessionExpiryBanner from './components/SessionExpiryBanner';
 
+// F-m6: one lazy chunk per route — the login page no longer downloads
+// every page's code. The auth pages stay eager (they are the entry point).
+import { lazy, Suspense } from 'react';
+import ErrorBoundary from './components/ErrorBoundary';
 import LoginPage from './pages/LoginPage';
 import ForcePasswordChangePage from './pages/ForcePasswordChangePage';
-import ProfileSetupPage from './pages/ProfileSetupPage';
-import CeoDashboardPage from './pages/CeoDashboardPage';
-import CeoHistoryPage from './pages/CeoHistoryPage';
-import CeoReportLogsPage from './pages/CeoReportLogsPage';
-import AdminDashboardPage from './pages/AdminDashboardPage';
-import ComparisonPage from './pages/ComparisonPage';
-import OperationsPage from './pages/OperationsPage';
-import DailyOpsPage from './pages/DailyOpsPage';
-import ActivityDashboardPage from './pages/ActivityDashboardPage';
-import CeoCalendarPage from './pages/CeoCalendarPage';
-import HealthDashboardPage from './pages/HealthDashboardPage';
-import ReportLogsPage from './pages/ReportLogsPage';
-import SecurityLogPage from './pages/SecurityLogPage';
-import CeoProfilesPage from './pages/CeoProfilesPage';
-import BusinessUnitDetailPage from './pages/BusinessUnitDetailPage';
-import HeadOfficePage from './pages/HeadOfficePage';
-import ManageUsersPage from './pages/ManageUsersPage';
-import BusinessUnitsPage from './pages/BusinessUnitsPage';
 import TotpSetupPage from './pages/TotpSetupPage';
+const ProfileSetupPage = lazy(() => import('./pages/ProfileSetupPage'));
+const CeoDashboardPage = lazy(() => import('./pages/CeoDashboardPage'));
+const CeoHistoryPage = lazy(() => import('./pages/CeoHistoryPage'));
+const CeoReportLogsPage = lazy(() => import('./pages/CeoReportLogsPage'));
+const AdminDashboardPage = lazy(() => import('./pages/AdminDashboardPage'));
+const ComparisonPage = lazy(() => import('./pages/ComparisonPage'));
+const OperationsPage = lazy(() => import('./pages/OperationsPage'));
+const DailyOpsPage = lazy(() => import('./pages/DailyOpsPage'));
+const ActivityDashboardPage = lazy(() => import('./pages/ActivityDashboardPage'));
+const CeoCalendarPage = lazy(() => import('./pages/CeoCalendarPage'));
+const HealthDashboardPage = lazy(() => import('./pages/HealthDashboardPage'));
+const ReportLogsPage = lazy(() => import('./pages/ReportLogsPage'));
+const SecurityLogPage = lazy(() => import('./pages/SecurityLogPage'));
+const CeoProfilesPage = lazy(() => import('./pages/CeoProfilesPage'));
+const BusinessUnitDetailPage = lazy(() => import('./pages/BusinessUnitDetailPage'));
+const HeadOfficePage = lazy(() => import('./pages/HeadOfficePage'));
+const ManageUsersPage = lazy(() => import('./pages/ManageUsersPage'));
+const BusinessUnitsPage = lazy(() => import('./pages/BusinessUnitsPage'));
+
+function RouteLoading() {
+  return (
+    <div className="min-h-screen flex items-center justify-center">
+      <div className="w-8 h-8 border-2 border-slate-200 border-t-brand-600 rounded-full animate-spin" />
+    </div>
+  );
+}
 
 function RootRedirect() {
   const { user, loading } = useAuth();
@@ -46,6 +58,8 @@ export default function App() {
       <ThemeProvider>
       <AuthProvider>
         <SessionExpiryBanner />
+        <ErrorBoundary>
+        <Suspense fallback={<RouteLoading />}>
         <Routes>
           <Route path="/" element={<RootRedirect />} />
           <Route path="/login" element={<LoginRoute />} />
@@ -214,6 +228,8 @@ export default function App() {
 
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        </Suspense>
+        </ErrorBoundary>
       </AuthProvider>
       </ThemeProvider>
     </BrowserRouter>
