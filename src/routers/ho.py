@@ -1,7 +1,12 @@
 import logging
 from datetime import date, timedelta
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+# PM-m22: alias for datetime.date — ho_dashboard's `date` query parameter
+# shadows the class in that function's scope.
+_DATE = date
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -55,14 +60,16 @@ _rate_limiter = SubmitRateLimiter(REPORT_SUBMIT_RATE_LIMIT, REPORT_SUBMIT_RATE_W
 logger = logging.getLogger(__name__)
 
 @router.get("/dashboard")
-def ho_dashboard(report_date_query: str = Query("", alias="date"), user: User = Depends(require_roles(Role.HO)), db: Session = Depends(get_db)):
+def ho_dashboard(date: str = "", user: User = Depends(require_roles(Role.HO)), db: Session = Depends(get_db)):
     # PM-m22: same 7-day backfill affordance as CEOs (?date= editing).
     # No date = today, as before. A date outside the edit window 400s
-    # with the shared window error.
+    # with the shared window error. The `date` parameter shadows the
+    # datetime.date class in this scope, so _DATE (module alias) is used
+    # for date construction below.
     today = today_local()
-    if report_date_query:
+    if date:
         try:
-            report_date = date.fromisoformat(report_date_query)
+            report_date = _DATE.fromisoformat(date)
         except ValueError:
             raise HTTPException(status_code=400, detail="date must be a valid ISO date")
         window_error = report_date_window_error(report_date, today, settings.REPORT_EDIT_WINDOW_DAYS)
@@ -99,7 +106,7 @@ def ho_dashboard(report_date_query: str = Query("", alias="date"), user: User = 
     latest_health = db.query(HeadOfficeHealthStatus).order_by(HeadOfficeHealthStatus.report_date.desc()).first()
     latest_social = db.query(HeadOfficeSocialLog).order_by(HeadOfficeSocialLog.report_date.desc()).first()
 
-    current_month_start = date(report_date.year, report_date.month, 1)
+    current_month_start = _DATE(report_date.year, report_date.month, 1)
     monthly_target = (
         db.query(HeadOfficeMonthlyTarget)
         .filter(HeadOfficeMonthlyTarget.target_month == current_month_start)
@@ -120,7 +127,7 @@ def ho_dashboard(report_date_query: str = Query("", alias="date"), user: User = 
     # row's own calendar month present, so targets are looked up per distinct
     # (year, month) present in financial_history — same approach as
     # /api/admin/business-unit/{id} and /api/ceo/dashboard.
-    target_months = {date(f.report_date.year, f.report_date.month, 1) for f in financial_history}
+    target_months = {_DATE(f.report_date.year, f.report_date.month, 1) for f in financial_history}
     targets_by_month = {}
     if target_months:
         for t in db.query(HeadOfficeMonthlyTarget).filter(HeadOfficeMonthlyTarget.target_month.in_(target_months)).all():
