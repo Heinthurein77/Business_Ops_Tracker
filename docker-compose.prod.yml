@@ -96,6 +96,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # PM-11: bake the deployed commit into the image (Dockerfile ARG
+      # GIT_SHA -> ENV GIT_SHA, exposed on /healthz). deploy.sh exports
+      # GIT_SHA from `git rev-parse` before building; without it the
+      # image reports "dev".
+      args:
+        GIT_SHA: ${GIT_SHA:-dev}
     container_name: bot_app
     restart: unless-stopped
     # Resource limits + log rotation (D-m9): Docker's json-file driver

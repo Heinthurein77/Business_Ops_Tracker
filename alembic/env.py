@@ -61,7 +61,12 @@ def _load_target_metadata():
     the original import error instead of proceeding.
     """
     try:
-        from src import models  # noqa: F401 - registers all model classes on Base.metadata
+        # Imported for the side effect: registers all model classes on
+        # Base.metadata. importlib (not a bare `from src import models`)
+        # so pyflakes has no unused import to flag.
+        import importlib
+
+        importlib.import_module("src.models")
         from src.database import Base
 
         return Base.metadata
