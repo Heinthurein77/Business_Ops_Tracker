@@ -84,10 +84,13 @@ class TestSharedHelpers:
         assert limiter.is_limited(9) is False
         assert limiter.is_limited(9) is True
         assert limiter.is_limited(10) is False  # per-user budget
-        fast = SubmitRateLimiter(limit=1, window_seconds=0.05)
+        # T-m6: was a 0.05 s window with a 0.06 s sleep — a 10 ms margin
+        # that flakes under a loaded CI runner. The widened window/sleep
+        # still asserts expiry logic, not scheduler timing.
+        fast = SubmitRateLimiter(limit=1, window_seconds=0.5)
         assert fast.is_limited(1) is False
         assert fast.is_limited(1) is True
-        time.sleep(0.06)
+        time.sleep(0.6)
         assert fast.is_limited(1) is False
 
     def test_ceo_and_ho_routers_share_the_limiter(self):
