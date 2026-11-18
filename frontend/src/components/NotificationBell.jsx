@@ -152,6 +152,14 @@ export default function NotificationBell() {
               <p className="text-sm font-bold text-slate-900 dark:text-slate-100">Notifications</p>
               {status === null && unread > 0 && <button onClick={markAll} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">Mark all read</button>}
             </div>
+            {/* PM-21: link to the paginated archive page. */}
+            <button
+              type="button"
+              onClick={() => { setOpen(false); navigate('/notifications'); }}
+              className="w-full text-left px-3 py-2 text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline"
+            >
+              View all notifications →
+            </button>
             {status === 'expired' && (
               <p className="px-3 py-4 text-center text-xs font-medium text-amber-700 dark:text-amber-400">
                 Notifications unavailable — your session expired. Please sign in again.

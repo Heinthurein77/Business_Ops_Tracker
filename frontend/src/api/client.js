@@ -141,7 +141,7 @@ export const api = {
       confirm_password: confirmPassword,
     }),
 
-  hoDashboard: () => getJson('/api/ho/dashboard'),
+  hoDashboard: (date) => getJson(`/api/ho/dashboard${date ? `?date=${date}` : ''}`),
   submitHoReport: (formData) => postForm('/api/ho/submit-report', formData),
   setHoMonthlyTarget: (payload) => postJson('/api/ho/monthly-target', payload),
 
@@ -162,6 +162,8 @@ export const api = {
   adminComparison: () => getJson('/api/admin/comparison'),
   adminOperations: () => getJson('/api/admin/operations'),
   businessUnitDetail: (id, signal) => getJson(`/api/admin/business-unit/${id}`, signal),
+  // PM-6: explicit review/acknowledge of a revenue anomaly for one BU/day.
+  reviewAnomaly: (buId, reportDate) => postJson(`/api/admin/business-unit/${buId}/anomaly/review?report_date=${reportDate}`),
   overrideMonthlyTarget: (id, payload) => postJson(`/api/admin/business-unit/${id}/monthly-target`, payload),
   reportLogs: () => getJson('/api/admin/report-logs'),
   securityLog: () => getJson('/api/admin/security-log'),
@@ -204,10 +206,14 @@ export const api = {
   updateActionItem: (id, payload) => patchJson(`/api/ops/action-items/${id}`, payload),
   deleteActionItem: (id) => deleteJson(`/api/ops/action-items/${id}`),
 
-  listNotifications: (unreadOnly = false) => getJson(`/api/ops/notifications${unreadOnly ? '?unread_only=true' : ''}`),
+  // PM-21: paginated notification history (limit/offset; default 100).
+  listNotifications: (unreadOnly = false, limit, offset) =>
+    getJson(`/api/ops/notifications${buildQuery({ unread_only: unreadOnly || undefined, limit, offset })}`),
   markNotificationRead: (id) => postJson(`/api/ops/notifications/${id}/read`),
   markAllNotificationsRead: () => postJson('/api/ops/notifications/read-all'),
   remindMissingReports: () => postJson('/api/ops/notifications/remind-missing'),
+  // PM-2: recipient count for the manual missing-report button.
+  missingReportCount: () => getJson('/api/ops/notifications/missing-count'),
   remindActionItems: () => postJson('/api/ops/notifications/remind-actions'),
 
   submitStaff: (payload) => postJson('/api/ops/staff', payload, { 'Idempotency-Key': newIdempotencyKey() }),

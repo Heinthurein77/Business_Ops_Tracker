@@ -32,7 +32,7 @@ export default function LoginPage() {
   useEffect(() => {
     try {
       if (sessionStorage.getItem('bot-session-expired')) {
-        setInfo('Your session expired — please sign in again. Any unsaved form will be restored from your draft.');
+        setInfo('Your session expired — please sign in again. Any unsaved form will be restored from your draft on this device.');
         sessionStorage.removeItem('bot-session-expired');
       }
     } catch { /* storage unavailable — plain login */ }
@@ -120,7 +120,7 @@ export default function LoginPage() {
       const data = await api.forgotPassword(forgotUsername.trim());
       setInfo(
         data?.message ||
-          'If this account exists, a reset request has been sent to the Chairman. You will receive a temporary password once it is approved.'
+          'If this account exists, a reset request has been sent to the Chairman. Ask the Chairman — they will share a temporary password with you once approved.'
       );
       setForgotUsername('');
       setShowForgot(false);
@@ -329,8 +329,8 @@ export default function LoginPage() {
               <div>
                 <h2 className="text-2xl font-bold tracking-tight lg:text-slate-900 text-white">Request password reset</h2>
                 <p className="mt-2 text-sm lg:text-slate-500 text-slate-400">
-                  Submit your username to send a reset request to the Chairman. Once it is approved you will be issued a
-                  temporary password, and you'll be asked to set a new one the first time you sign in.
+                  Submit your username to send a reset request to the Chairman. Ask the Chairman — they will share a
+                  temporary password with you once approved, and you'll be asked to set a new one the first time you sign in.
                 </p>
 
                 {error && (

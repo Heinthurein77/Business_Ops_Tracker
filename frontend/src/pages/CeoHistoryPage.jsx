@@ -5,7 +5,7 @@ import AdminSidebar from '../components/AdminSidebar';
 import ActivityMonthCalendar from '../components/ActivityMonthCalendar';
 import Footer from '../components/Footer';
 import LastUpdated from '../components/LastUpdated';
-import { money } from '../utils/format';
+import { money, localTodayISO } from '../utils/format';
 import DayDetailPanel from '../components/DayDetailPanel';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
 
@@ -109,6 +109,35 @@ export default function CeoHistoryPage() {
               <div className="flex items-start justify-between flex-wrap gap-3">
                 <div className="min-w-0">
                   <p className="font-semibold text-slate-900">{selectedDay.date_display}</p>
+                  {/* PM-5: the Fill/Edit button used to render for any day,
+                      including future days and days outside the 7-day edit
+                      window — every one then 400d on submit. */}
+                  {(() => {
+                    const todayISO = localTodayISO();
+                    const daysAgo = Math.floor((new Date(`${todayISO}T00:00:00`) - new Date(`${selectedDay.date_iso}T00:00:00`)) / 86400000);
+                    const editable = daysAgo >= 0 && daysAgo <= 7;
+                    const reason = daysAgo < 0
+                      ? 'This day is in the future — reports cannot be filed ahead.'
+                      : daysAgo > 7
+                        ? 'Outside the 7-day edit window — contact Head Office; correction is manual.'
+                        : '';
+                    return (
+                      <>
+                        <button
+                          type="button"
+                          disabled={!editable}
+                          title={editable ? '' : reason}
+                          onClick={() => navigate(`/ceo?date=${selectedDay.date_iso}`)}
+                          className="mt-3 text-xs font-semibold bg-brand-600 hover:bg-brand-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white px-4 py-2.5 rounded-lg transition-colors flex-shrink-0"
+                        >
+                          {selectedDay.has_report ? 'Edit this day’s report' : 'Fill this day’s report'} &rarr;
+                        </button>
+                        {!editable && <p className="text-xs text-slate-400 mt-2">{reason}</p>}
+                      </>
+                    );
+                  })()}
+                </div>
+                <div className="min-w-0 flex-1">
                   {selectedDay.has_report || selectedDay.revenue != null ? (
                     <div className="mt-2 space-y-1.5 text-xs text-slate-600 max-w-2xl">
                       {selectedDay.meetings_attended && (
@@ -155,13 +184,6 @@ export default function CeoHistoryPage() {
                     <p className="text-xs text-slate-400 italic mt-1">Nothing submitted for this day yet.</p>
                   )}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => navigate(`/ceo?date=${selectedDay.date_iso}`)}
-                  className="text-xs font-semibold bg-brand-600 hover:bg-brand-700 text-white px-4 py-2.5 rounded-lg transition-colors flex-shrink-0"
-                >
-                  {selectedDay.has_report ? 'Edit this day’s report' : 'Fill this day’s report'} &rarr;
-                </button>
               </div>
             </div>
           )}

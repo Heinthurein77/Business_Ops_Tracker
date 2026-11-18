@@ -1,4 +1,5 @@
 import { money } from '../utils/quadrantMetrics';
+import { localTodayISO } from '../utils/format';
 
 const WEEKDAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
@@ -112,6 +113,11 @@ export default function ActivityMonthCalendar({
               const moreCount = chips.length - shown.length;
               const revenueLabel = compactMoney(day.revenue);
               const isSelected = selectedDate && selectedDate === day.date_iso;
+              // PM-5: missing-day marker — a past in-month day with no
+              // report and no revenue. Future days and today are not
+              // "missing" (today may still be filed).
+              const isMissing = day.in_month && !day.has_report && day.revenue == null
+                && day.date_iso && day.date_iso < localTodayISO();
               return (
                 <button
                   type="button"
@@ -150,6 +156,9 @@ export default function ActivityMonthCalendar({
                   {revenueLabel && (
                     <span className="mt-auto text-[10px] text-slate-400 dark:text-slate-500 tabular-nums">Rev {revenueLabel}</span>
                   )}
+                  {isMissing && (
+                    <span className="mt-auto text-[10px] font-semibold text-amber-600 dark:text-amber-400">• Missing — no report</span>
+                  )}
                 </button>
               );
             })}
@@ -164,7 +173,7 @@ export default function ActivityMonthCalendar({
             {g.label}
           </span>
         ))}
-        <span className="ml-auto hidden sm:inline">Rev = revenue submitted that day</span>
+        <span className="ml-auto hidden sm:inline">Rev = revenue submitted that day · Missing = past day with no report</span>
       </div>
     </div>
   );
