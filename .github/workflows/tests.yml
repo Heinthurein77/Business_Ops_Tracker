@@ -2,9 +2,12 @@ name: tests
 
 # Test gate on deploys (A-m2, BOT security review 2026-11-09): the full
 # pytest suite (+ the frontend production build) runs on every push/PR,
-# so a bad change cannot reach main — and, via deploy_on_push, DigitalOcean
-# — untested. The DO PRE_DEPLOY migration job only catches schema errors;
-# this is the gate that catches everything else.
+# so a bad change cannot reach main — and, from main, either deploy path
+# — untested. (No deploy path is assumed here: the canonical target is
+# still undecided, VPS+Neon vs DigitalOcean — see README "Deploy paths".
+# The old comment named DigitalOcean's deploy_on_push as the path; that is
+# now off by default, PM-12.) The DO PRE_DEPLOY migration job only catches
+# schema errors; this is the gate that catches everything else.
 on:
   push:
     branches: [main]

@@ -63,6 +63,10 @@ services:
     container_name: bot_migrate
     # One-shot: exits after `alembic upgrade head`. Re-running it is a
     # no-op once the DB is at head. Uses the schema-owner URL when set.
+    # C-1: this service deliberately carries ONLY the database env vars —
+    # alembic/env.py reads just the DB URL now, so no JWT_SECRET_KEY,
+    # DATA_ENCRYPTION_KEY or ALLOWED_* is needed (or wanted) here; the app
+    # service below is the only one that holds the app secrets.
     command: ["alembic", "upgrade", "head"]
     # Log rotation (m-15): same 10 MB x 3 bound as the app service —
     # Docker's json-file driver grows without bound by default.

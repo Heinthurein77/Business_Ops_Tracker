@@ -92,6 +92,37 @@ def _enforce_db_tls(url: str, production: bool) -> str:
     return parsed.update_query_dict(query).render_as_string(hide_password=False)
 
 
+def migration_database_url() -> str:
+    """Database URL for migrations ONLY — no full app config required.
+
+    C-1 (PM review 2026-11-18): `alembic/env.py` used to import the whole
+    app `Settings()`, so the compose `migrate` service and the DO
+    PRE_DEPLOY job had to carry JWT / encryption / allowlist secrets just
+    to run `alembic upgrade head` — and both deploy paths failed to boot
+    without them. Migrations need exactly one thing (the schema-owner URL),
+    so this reads only the DB env vars and applies the same Postgres TLS
+    normalisation `Settings` uses (`_enforce_db_tls`). It deliberately
+    does NOT construct `Settings()` and never touches JWT_SECRET_KEY,
+    DATA_ENCRYPTION_KEY or ALLOWED_* — importing this module is safe in a
+    migrate-only environment. `MIGRATION_DATABASE_URL` wins when set,
+    else `DATABASE_URL`. A SQLite URL is allowed here (local migration
+    checks); the app itself still refuses SQLite in production.
+    """
+    environment = os.getenv("ENVIRONMENT", "production").strip().lower()
+    if environment not in _KNOWN_ENVIRONMENTS:
+        raise RuntimeError(
+            f"ENVIRONMENT={environment!r} is not recognised — use one of "
+            f"{sorted(_KNOWN_ENVIRONMENTS)}."
+        )
+    raw = os.getenv("MIGRATION_DATABASE_URL", "").strip() or os.getenv("DATABASE_URL", "").strip()
+    if not raw:
+        raise RuntimeError(
+            "DATABASE_URL must be set — migrations have no database to run against. "
+            "Set DATABASE_URL (or MIGRATION_DATABASE_URL for the schema-owner role)."
+        )
+    return _enforce_db_tls(raw, environment == "production")
+
+
 class Settings:
     def __init__(self) -> None:
         # --- Core / Render ---
@@ -113,8 +144,9 @@ class Settings:
         # --- Database (Neon.tech / DigitalOcean Postgres) ---
         raw_db_url = os.getenv("DATABASE_URL", "").strip()
         if not raw_db_url:
-            # Local development fallback only. Production deployments on Render
-            # must set DATABASE_URL to the Neon.tech Postgres connection string.
+            # Local development fallback only. Production deployments
+            # must set DATABASE_URL to the Postgres connection string
+            # (Neon, or DigitalOcean's ${db.DATABASE_URL}).
             if self.IS_PRODUCTION:
                 # Silently booting a "production" deploy against local SQLite
                 # would look like it's working — until the next redeploy wipes
@@ -325,4 +357,31 @@ class Settings:
             )
 
 
-settings = Settings()
+# Lazy singleton (C-1, PM review 2026-11-18): importing this module must
+# NOT validate the full production config. `alembic/env.py` needs only the
+# database URL (`migration_database_url()` above), and the migrate service /
+# DO PRE_DEPLOY job deliberately carry no JWT / encryption / allowlist
+# secrets. Constructing `Settings()` eagerly at import time made every
+# migration run demand the whole app config and blocked both deploy paths
+# from booting. `settings` is therefore resolved on first access (PEP 562
+# module `__getattr__`); every `from src.config import settings` still gets
+# the same singleton, and the production guards still fire the first time
+# anything reads it — the app boot path is unchanged.
+_settings: Settings | None = None
+
+
+def _get_settings() -> Settings:
+    global _settings
+    if _settings is None:
+        _settings = Settings()
+    return _settings
+
+
+def __getattr__(name: str):
+    if name == "settings":
+        return _get_settings()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(list(globals()) + ["settings"])
