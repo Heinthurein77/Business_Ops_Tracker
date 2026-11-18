@@ -230,7 +230,8 @@ class TestAuditGapsClosed:
             fresh.close()
 
     def test_create_business_unit_audited(self, db):
-        from src.routers.admin import BUCreateIn, create_business_unit
+        from src.routers.admin import create_business_unit
+        from src.schemas import BUCreateIn
         chairman = db.test_users["chairman"]
         out = create_business_unit(BUCreateIn(name="New Unit B"), user=chairman, db=db)
         actions = self._audit_actions(db)
@@ -244,7 +245,8 @@ class TestAuditGapsClosed:
             fresh.close()
 
     def test_update_business_unit_audited(self, db):
-        from src.routers.admin import BUUpdateIn, update_business_unit
+        from src.routers.admin import update_business_unit
+        from src.schemas import BUUpdateIn
         chairman = db.test_users["chairman"]
         update_business_unit(1, BUUpdateIn(name="Shop One Renamed"), user=chairman, db=db)
         assert "BUSINESS_UNIT_UPDATED" in self._audit_actions(db)
@@ -683,7 +685,8 @@ class TestActionItemAssigneeValidation:
 
     def test_nonexistent_assignee_400_and_nothing_created(self, db):
         from src.models import ActionItem
-        from src.routers.ops import ActionItemIn, create_action_item
+        from src.routers.ops import create_action_item
+        from src.schemas import ActionItemIn
         ceo = db.test_users["ceo"]
         with pytest.raises(HTTPException) as exc:
             create_action_item(ActionItemIn(business_unit_id=1, title="Nope",
@@ -693,7 +696,8 @@ class TestActionItemAssigneeValidation:
         assert db.query(ActionItem).count() == 0
 
     def test_cross_bu_assignee_400(self, db):
-        from src.routers.ops import ActionItemIn, create_action_item
+        from src.routers.ops import create_action_item
+        from src.schemas import ActionItemIn
         ceo = db.test_users["ceo"]
         with pytest.raises(HTTPException) as exc:
             create_action_item(ActionItemIn(business_unit_id=1, title="X",
@@ -703,7 +707,8 @@ class TestActionItemAssigneeValidation:
         assert "business unit" in exc.value.detail
 
     def test_chairman_assignee_400_for_ceo_creator(self, db):
-        from src.routers.ops import ActionItemIn, create_action_item
+        from src.routers.ops import create_action_item
+        from src.schemas import ActionItemIn
         ceo = db.test_users["ceo"]
         with pytest.raises(HTTPException) as exc:
             create_action_item(ActionItemIn(business_unit_id=1, title="X",
@@ -712,7 +717,8 @@ class TestActionItemAssigneeValidation:
         assert exc.value.status_code == 400
 
     def test_inactive_assignee_400(self, db):
-        from src.routers.ops import ActionItemIn, create_action_item
+        from src.routers.ops import create_action_item
+        from src.schemas import ActionItemIn
         self._teammate(db, active=False)
         ceo = db.test_users["ceo"]
         with pytest.raises(HTTPException) as exc:
@@ -723,7 +729,8 @@ class TestActionItemAssigneeValidation:
         assert "not active" in exc.value.detail
 
     def test_same_bu_assignee_ok_and_link_is_ceo_reachable(self, db):
-        from src.routers.ops import ActionItemIn, create_action_item
+        from src.routers.ops import create_action_item
+        from src.schemas import ActionItemIn
         # One active CEO per BU (partial unique index), so the only
         # same-BU assignee a CEO can pick is themselves — which is allowed
         # and sends no notification (assignee == creator).
@@ -736,7 +743,8 @@ class TestActionItemAssigneeValidation:
             Notification.type == "action_assigned").count() == 0
 
     def test_admin_may_assign_to_any_bu(self, db):
-        from src.routers.ops import ActionItemIn, create_action_item
+        from src.routers.ops import create_action_item
+        from src.schemas import ActionItemIn
         chairman = db.test_users["chairman"]
         out = create_action_item(ActionItemIn(business_unit_id=2, title="Do it",
                                               assigned_to_id=db.test_users["ceo2"].id),
@@ -747,7 +755,8 @@ class TestActionItemAssigneeValidation:
         assert note.link == "/ceo"
 
     def test_admin_assigning_to_ho_links_to_daily_ops(self, db):
-        from src.routers.ops import ActionItemIn, create_action_item
+        from src.routers.ops import create_action_item
+        from src.schemas import ActionItemIn
         chairman = db.test_users["chairman"]
         create_action_item(ActionItemIn(business_unit_id=1, title="HO task",
                                         assigned_to_id=db.test_users["ho"].id),
@@ -758,7 +767,8 @@ class TestActionItemAssigneeValidation:
 
     def test_update_validates_assignee(self, db):
         from src.models import ActionItem
-        from src.routers.ops import ActionItemIn, ActionItemUpdate, create_action_item, update_action_item
+        from src.routers.ops import create_action_item, update_action_item
+        from src.schemas import ActionItemIn, ActionItemUpdate
         ceo = db.test_users["ceo"]
         out = create_action_item(ActionItemIn(business_unit_id=1, title="T"),
                                  user=ceo, db=db)

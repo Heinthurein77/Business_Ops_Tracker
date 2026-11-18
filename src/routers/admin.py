@@ -32,7 +32,7 @@ from src.models import (
     SocialLog,
     User,
 )
-from src.schemas import MonthlyTargetRequest, ResolveHelpRequest
+from src.schemas import BUCreateIn, BUUpdateIn, MonthlyTargetRequest, ResolveHelpRequest
 from src.utils import (
     APP_TZ,
     activity_quadrant_status,
@@ -1987,9 +1987,6 @@ def export_excel(
 
 # ------------------------------------------------------------------ business unit management
 
-from pydantic import BaseModel as _BaseModel, Field as _Field  # noqa: E402
-
-
 def _serialize_bu_admin(db: Session, bu: BusinessUnit) -> dict:
     user_count = db.query(User).filter(User.business_unit_id == bu.id).count()
     ceo = db.query(User).filter(User.business_unit_id == bu.id, User.role == Role.CEO,
@@ -2008,14 +2005,6 @@ def _next_bu_code(db: Session) -> str:
         if code and code.startswith("BU") and code[2:].isdigit():
             nums.append(int(code[2:]))
     return f"BU{(max(nums) + 1) if nums else 1}"
-
-
-class BUCreateIn(_BaseModel):
-    name: str = _Field(min_length=1, max_length=120)
-
-
-class BUUpdateIn(_BaseModel):
-    name: Optional[str] = None
 
 
 @router.get("/business-units")

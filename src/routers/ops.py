@@ -15,7 +15,6 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -28,6 +27,7 @@ from src.services.ops_alerts import (  # noqa: F401 - re-exported for callers/te
     run_remind_missing_reports,
 )
 from src.database import get_db
+from src.schemas import ActionItemIn, ActionItemUpdate, CustomerIn, DocumentIn, StaffIn
 from src.routers.month_params import parse_month_or_422
 from src.utils import _sanitize_excel_cell, clamp_days, clamp_limit, clamp_offset, log_audit, notify, today_local, utcnow
 from src.models import (
@@ -190,14 +190,6 @@ def serialize_action_item(db: Session, item: ActionItem) -> dict:
 
 # ---------------------------------------------------------------- action items
 
-class ActionItemIn(BaseModel):
-    business_unit_id: Optional[int] = None
-    title: str = Field(min_length=1, max_length=200)
-    description: Optional[str] = None
-    assigned_to_id: Optional[int] = None
-    due_date: Optional[date] = None
-
-
 @router.get("/action-items")
 def list_action_items(
     business_unit_id: Optional[int] = None,
@@ -277,14 +269,6 @@ def create_action_item(payload: ActionItemIn, request: Request = None, user: Use
         if replay is not None:
             return replay
     return body
-
-
-class ActionItemUpdate(BaseModel):
-    status: Optional[str] = None
-    title: Optional[str] = None
-    description: Optional[str] = None
-    assigned_to_id: Optional[int] = None
-    due_date: Optional[date] = None
 
 
 @router.patch("/action-items/{item_id}")
@@ -467,17 +451,6 @@ def view_upload(key: str = Query(...), user: User = Depends(get_current_user),
 
 # ---------------------------------------------------------------- staff
 
-class StaffIn(BaseModel):
-    business_unit_id: Optional[int] = None
-    report_date: date
-    total_staff: int = Field(default=0, ge=0, le=1000000)
-    present: int = Field(default=0, ge=0, le=1000000)
-    absent: int = Field(default=0, ge=0, le=1000000)
-    new_hires: int = Field(default=0, ge=0, le=1000000)
-    resignations: int = Field(default=0, ge=0, le=1000000)
-    notes: Optional[str] = None
-
-
 @router.post("/staff")
 def submit_staff(payload: StaffIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     bu_id = bu_scope(user, payload.business_unit_id)
@@ -518,16 +491,6 @@ def list_staff(business_unit_id: Optional[int] = None, days: int = 30,
 
 
 # ---------------------------------------------------------------- customers
-
-class CustomerIn(BaseModel):
-    business_unit_id: Optional[int] = None
-    report_date: date
-    footfall: Optional[int] = Field(default=None, ge=0, le=10**9)
-    transactions: Optional[int] = Field(default=None, ge=0, le=10**9)
-    complaints: int = Field(default=0, ge=0, le=10**9)
-    satisfaction_score: Optional[float] = None
-    notes: Optional[str] = None
-
 
 @router.post("/customers")
 def submit_customers(payload: CustomerIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -620,15 +583,6 @@ def serialize_document(db: Session, d: LicenseDocument) -> dict:
         "notes": d.notes,
         "created_at": d.created_at.isoformat() if d.created_at else None,
     }
-
-
-class DocumentIn(BaseModel):
-    business_unit_id: Optional[int] = None
-    title: str = Field(min_length=1, max_length=255)
-    document_type: str = "license"
-    issue_date: Optional[date] = None
-    expiry_date: date
-    notes: Optional[str] = None
 
 
 @router.get("/documents")
