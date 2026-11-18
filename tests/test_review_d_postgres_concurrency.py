@@ -68,7 +68,14 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture()
 def pg_engine():
     """Engine on the CI Postgres DB + seeded CEO/BU, get_db overridden
-    per request with a fresh session. Tears the scratch rows down."""
+    per request with a fresh session. Tears the scratch rows down.
+
+    T-m1 note: like the SQLite race file, this harness deliberately
+    does NOT use the shared `client` fixture from root conftest.py —
+    racing threads need fresh sessions per request and one override
+    for the whole test, not the shared client's single session and
+    per-request override install/pop.
+    """
     eng = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
     maker = sessionmaker(bind=eng)
     with maker() as s:

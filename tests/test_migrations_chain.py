@@ -108,3 +108,44 @@ def test_smoke_tracker_insert(migrated_engine):
         assert saved.net_profit == Decimal("60000")
     finally:
         db.close()
+
+
+def _migration_fk_policy():
+    """The ON DELETE policy declared by migration c2d6e0f4b8a3
+    (alembic/versions/c2d6e0f4b8a3_fk_ondelete_policy.py), loaded from
+    the migration file itself so this test fails if the two ever
+    disagree about the rule — not if they merely share a copy of it."""
+    import importlib.util
+
+    path = ROOT / "alembic" / "versions" / "c2d6e0f4b8a3_fk_ondelete_policy.py"
+    spec = importlib.util.spec_from_file_location("fk_ondelete_policy", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module._policy
+
+
+def test_model_fk_ondelete_matches_migration_policy():
+    # T-m3: models.py used to declare no ON DELETE anywhere while the
+    # migration enforced RESTRICT / SET NULL / CASCADE in Postgres, so
+    # dev/test DBs (create_all) had different delete semantics than
+    # prod — and this file only compared table/column names, so the
+    # drift was invisible. Every model FK must now match the
+    # migration's _policy(); FKs the policy leaves alone (None) must
+    # stay without ondelete (= NO ACTION).
+    from src.models import Base
+
+    policy = _migration_fk_policy()
+    mismatches = []
+    for table_name, table in Base.metadata.tables.items():
+        for col in table.columns:
+            for fk in col.foreign_keys:
+                expected = policy(table_name, col.name, fk.column.table.name)
+                actual = fk.ondelete
+                if (actual or "NO ACTION").upper() != (expected or "NO ACTION").upper():
+                    mismatches.append(
+                        f"{table_name}.{col.name}: models ondelete={actual!r}, "
+                        f"migration policy={expected!r}")
+    assert not mismatches, (
+        "FK ON DELETE drift between src/models.py and migration "
+        "c2d6e0f4b8a3:\n" + "\n".join(mismatches)
+    )

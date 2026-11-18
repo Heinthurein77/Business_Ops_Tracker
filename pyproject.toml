@@ -1,0 +1,6 @@
+# Minimal pytest configuration (T-m5, senior review 2026-11-18): the
+# suite previously had no config file at all — no testpaths, no
+# defaults. Parallelism lives in CI (tests.yml runs `-n auto`); local
+# runs stay serial unless the developer passes `-n auto` explicitly.
+[tool.pytest.ini_options]
+testpaths = ["tests"]

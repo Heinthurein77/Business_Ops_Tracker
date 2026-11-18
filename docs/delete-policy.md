@@ -1,8 +1,15 @@
 # Delete policy (D-m4)
 
-There is no `ON DELETE` policy anywhere in `src/models.py` — every foreign
-key uses the database default (NO ACTION / RESTRICT). Delete behaviour is
-therefore defined per endpoint below, not by the schema. The rule of thumb:
+Every foreign key in `src/models.py` declares the `ON DELETE` policy
+the migration enforces — see
+`alembic/versions/c2d6e0f4b8a3_fk_ondelete_policy.py` (BU refs →
+RESTRICT, `submitted_by`/`set_by`/`created_by`/`resolved_by` +
+`audit_logs.user_id` → SET NULL, `ceo_profiles`/`password_reset_requests`
+`.user_id` → CASCADE; anything else stays NO ACTION). The migration-chain
+test (`tests/test_migrations_chain.py::test_model_fk_ondelete_matches_migration_policy`)
+compares the two, so `create_all` dev/test DBs and migrated prod now
+agree. Delete behaviour is therefore defined per endpoint below, not
+just by the schema. The rule of thumb:
 
 - **Anything with history is deactivated, never hard-deleted.** Reports,
   targets, notes, action items and audit rows must stay reconcilable, so

@@ -15,17 +15,13 @@ C-2 (Decimal not imported in ops.py, fixed on another workstream) — the
 score test here asserts the 400 validation branch, which runs before
 the Decimal line, and the happy-path submit omits the score.
 """
-import asyncio
 from datetime import timedelta
 
-import httpx
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from src.auth import hash_password as make_hash
-from src.database import get_db
-from src.main import app
 from src.models import (
     ActionItem,
     Base,
@@ -87,68 +83,22 @@ def http_db(tmp_path):
     engine.dispose()
 
 
-class ApiClient:
-    """Minimal sync wrapper over httpx ASGI transport that keeps the
-    login cookie across calls (each request builds a fresh AsyncClient,
-    so the cookie is carried explicitly)."""
-
-    def __init__(self, http_db):
-        self._db = http_db
-        self.cookie = None
-
-    def request(self, method, url, **kw):
-        headers = dict(kw.pop("headers", {}) or {})
-        if self.cookie:
-            headers["Cookie"] = self.cookie
-
-        def _override():
-            yield self._db
-
-        app.dependency_overrides[get_db] = _override
-        try:
-            async def _go():
-                async with httpx.AsyncClient(
-                        transport=httpx.ASGITransport(app=app),
-                        base_url="http://testserver") as ac:
-                    return await ac.request(method, url, headers=headers, **kw)
-            return asyncio.run(_go())
-        finally:
-            app.dependency_overrides.pop(get_db, None)
-
-    def get(self, url, **kw):
-        return self.request("GET", url, **kw)
-
-    def post(self, url, **kw):
-        return self.request("POST", url, **kw)
-
-    def delete(self, url, **kw):
-        return self.request("DELETE", url, **kw)
-
-    def login(self, username):
-        r = self.post("/api/auth/login",
-                      json={"username": username, "password": PW})
-        assert r.status_code == 200, r.text
-        self.cookie = r.headers.get("set-cookie", "").split(";")[0]
-        assert self.cookie.startswith("access_token="), r.headers
-        return r
-
-
+# T-m1: the local ApiClient harness is deleted — tests use the shared
+# `client` fixture from root conftest.py (same httpx ASGI client, same
+# get_db override, same cookie handling). `ceo`/`admin` build their own
+# client via `make_client` because a test can hold both at once
+# (test_check_expiry_admin_ok) and one client holds one cookie.
 @pytest.fixture()
-def client(http_db):
-    return ApiClient(http_db)
-
-
-@pytest.fixture()
-def admin(http_db):
-    c = ApiClient(http_db)
-    c.login("ho")
+def admin(make_client):
+    c = make_client()
+    c.login("ho", PW)
     return c
 
 
 @pytest.fixture()
-def ceo(http_db):
-    c = ApiClient(http_db)
-    c.login("ceo_one")
+def ceo(make_client):
+    c = make_client()
+    c.login("ceo_one", PW)
     return c
 
 

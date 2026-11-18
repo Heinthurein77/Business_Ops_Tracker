@@ -16,3 +16,7 @@ __pycache__/
 *.log
 frontend/node_modules/
 frontend/dist/
+# Dev-seed / bootstrap credential files (0600, written on first boot).
+# Never commit these: they hold real passwords for a local database.
+.dev_seed_passwords
+.bootstrap_chairman_password

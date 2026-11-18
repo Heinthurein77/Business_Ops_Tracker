@@ -57,7 +57,15 @@ def race_db(tmp_path):
     for the whole test with a generator yielding a FRESH session per
     request from this engine: the two racing threads must not share
     one Session object (and must not race the override itself — it is
-    set here, not per call)."""
+    set here, not per call).
+
+    T-m1 note: this harness deliberately does NOT use the shared
+    `client` fixture from root conftest.py — that client yields one
+    shared session and installs/pops the override per request, which
+    is not thread-safe for two racing threads. Same for the
+    _login_cookie/_post_submit helpers below: they run their own event
+    loop per thread.
+    """
     db_path = tmp_path / "race.db"
     engine = create_engine(
         f"sqlite:///{db_path}", connect_args={"check_same_thread": False})

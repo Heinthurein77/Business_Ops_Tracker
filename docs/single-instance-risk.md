@@ -33,7 +33,7 @@ split (and effectively double) it; moving it to the DB comes first.
    for the last known-good commit, `git checkout <sha>`,
    `docker compose -f docker-compose.prod.yml up -d --build`, then
    `git checkout main` once verified. If the bad deploy already ran a
-   migration, see "rollback" in the runbook §2C — downgrades past
+   migration, see "rollback" in the incident runbook ([BOT_Incident_Runbook_2026-11-09.md](BOT_Incident_Runbook_2026-11-09.md) §2C) — downgrades past
    `e4f8a2b6d0c5` cannot restore scrubbed audit data; a forward-fix is
    preferred.
 4. If the container crash-loops at startup, check whether it is the DB

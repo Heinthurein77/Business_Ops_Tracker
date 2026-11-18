@@ -54,8 +54,8 @@ or build the per-device session table.
    bumps `token_version` and kills every session, including the stolen
    one.
 2. If the Chairman's session is suspected, also rotate `JWT_SECRET_KEY`
-   — see the incident runbook (`BOT_Incident_Runbook_2026-11-09.md`,
+   — see the incident runbook ([BOT_Incident_Runbook_2026-11-09.md](BOT_Incident_Runbook_2026-11-09.md),
    "Leaked JWT_SECRET_KEY"): rotating the secret invalidates every
    session for every user at once.
 3. Check `audit_logs` for actions from that user in the window
-   (see the incident runbook's evidence-preservation step first).
+   (see the incident runbook's evidence-preservation step first — [BOT_Incident_Runbook_2026-11-09.md](BOT_Incident_Runbook_2026-11-09.md) §2).

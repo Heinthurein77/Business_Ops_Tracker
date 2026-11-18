@@ -75,5 +75,73 @@ jobs:
       - name: Pyflakes lint (src + tests)
         run: python -m pyflakes src/ tests/
 
+      # T-m5: run the suite in parallel across workers (pytest-xdist,
+      # in requirements-dev.txt). Each worker is its own process, so
+      # the process-global state tests poke at (rate limiters,
+      # dependency overrides) stays per-worker.
       - name: Pytest suite
-        run: python -m pytest tests/ -q
+        run: python -m pytest tests/ -q -n auto
+
+  # T-M1 (senior review 2026-11-18): the Playwright smoke suite is the
+  # only frontend test layer, and it was dead since the ERP removal and
+  # never ran anywhere — so its rot was invisible. This job runs it
+  # against the dev servers on every push/PR, exactly as
+  # frontend/e2e/README.md documents locally.
+  e2e:
+    runs-on: ubuntu-latest
+    env:
+      ENVIRONMENT: development
+      ALLOW_DEV_SEED: "true"
+      ALLOWED_ORIGINS: http://localhost:5173
+      DATABASE_URL: sqlite:////tmp/bot-e2e.db
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --ignore-scripts
+
+      - name: Install Playwright chromium
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      # Start the backend in the background against a scratch DB, then
+      # read the random dev-seed passwords it writes to
+      # .dev_seed_passwords on first boot (M-02) into the E2E_* vars the
+      # specs log in with. The DB is a runner-local /tmp file and the
+      # passwords are dev-seed throwaways for it — the values are never
+      # printed to the log.
+      - name: Start backend on a scratch DB
+        run: |
+          rm -f /tmp/bot-e2e.db .dev_seed_passwords
+          nohup python -m uvicorn src.main:app --host 127.0.0.1 --port 8123 > /tmp/e2e-backend.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8123/healthz > /dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8123/healthz
+          test -f .dev_seed_passwords
+          {
+            echo "E2E_CHAIRMAN_PASSWORD=$(grep '^chairman: ' .dev_seed_passwords | cut -d' ' -f2)"
+            echo "E2E_HO_PASSWORD=$(grep '^ho_staff: ' .dev_seed_passwords | cut -d' ' -f2)"
+            echo "E2E_CEO_PASSWORD=$(grep '^ceo_bu1: ' .dev_seed_passwords | cut -d' ' -f2)"
+          } >> "$GITHUB_ENV"
+
+      # Playwright's webServer starts the vite dev server itself (and
+      # reuses it if already running); the backend must already be up
+      # on :8123, which the step above guarantees.
+      - name: Playwright smoke suite
+        working-directory: frontend
+        run: npm run test:e2e

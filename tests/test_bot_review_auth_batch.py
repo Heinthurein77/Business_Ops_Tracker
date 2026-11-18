@@ -7,12 +7,10 @@ test_security_fixes.py (seed guards) and test_config_guards.py (prod
 config guards); the tests here cover the rest, plus the end-to-end
 behaviour of the shared pieces.
 """
-import asyncio
 import stat
 from datetime import timedelta
 from pathlib import Path
 
-import httpx
 import pyotp
 import pytest
 from fastapi import HTTPException, Response, UploadFile
@@ -21,8 +19,6 @@ from sqlalchemy.orm import sessionmaker
 from starlette.requests import Request
 
 from src.auth import hash_password, verify_password
-from src.database import get_db
-from src.main import app
 from src.models import AuditLog, Base, BusinessUnit, PasswordHistory, User
 from src.schemas import ForcePasswordChangeRequest, TotpEnrollRequest
 from src.utils import utcnow
@@ -89,35 +85,11 @@ def http_db(tmp_path):
     engine.dispose()
 
 
-@pytest.fixture()
-def client(http_db):
-    def _override():
-        try:
-            yield http_db
-        finally:
-            pass
-
-    app.dependency_overrides[get_db] = _override
-    try:
-        class SyncClient:
-            def request(self, method, url, **kw):
-                async def _go():
-                    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
-                                                 base_url="http://testserver") as ac:
-                        return await ac.request(method, url, **kw)
-                return asyncio.run(_go())
-
-            def get(self, url, **kw):
-                return self.request("GET", url, **kw)
-
-            def post(self, url, **kw):
-                return self.request("POST", url, **kw)
-
-        yield SyncClient()
-    finally:
-        app.dependency_overrides.pop(get_db, None)
-
-
+# T-m1: the local SyncClient harness is deleted — tests use the shared
+# `client` fixture from root conftest.py (same httpx ASGI client, same
+# get_db override). This file keeps its own `http_db` fixture: it seeds
+# chairman + HO + ceo_bu1 with the S3cure-Horse-99! password, which the
+# shared fixture does not.
 def _login(client, username, password="S3cure-Horse-99!", totp_code=None):
     body = {"username": username, "password": password}
     if totp_code is not None:
@@ -334,7 +306,18 @@ class TestPasswordPolicy:
         assert policy("S3cure-Horse-99!") is None
         assert policy("correct horse battery", username="ceo_bu5") is None
 
-    def test_password_reuse_is_blocked_by_history(self, db):
+    def test_password_reuse_is_blocked_by_history(self, db, monkeypatch):
+        # T-m5: ~14 s of bcrypt cost-12 hashing (one hash + up to 5
+        # history verifies per rotation). The password-history logic is
+        # what's under test, not the hash cost — run it at cost 4.
+        from passlib.context import CryptContext
+
+        import src.auth as auth_module
+
+        monkeypatch.setattr(
+            auth_module, "pwd_context",
+            CryptContext(schemes=["bcrypt"], deprecated="auto",
+                         bcrypt__default_rounds=4))
         from src.routers.auth import force_password_change
 
         user = _add_user(db, "alice", "CEO", password="S3cure-Horse-99!")
