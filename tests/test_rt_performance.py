@@ -14,6 +14,7 @@ script + TZ (PM-7/TZ), and the pool settings (PM-5).
 
 import asyncio
 import os
+import re
 import stat
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -116,10 +117,13 @@ class TestCrontabFlock:
         repo = Path(__file__).resolve().parents[1]
         lines = [l for l in (repo / "deploy" / "crontab").read_text().splitlines()
                  if l.strip() and not l.strip().startswith("#")]
-        assert len(lines) == 4  # Pm-1: 4 cron lines (the reconcile_journals line
+        # Cron job lines only: env assignments (MAILTO, PM-14) are not jobs
+        # and carry no schedule, so they are exempt from the flock rule.
+        job_lines = [l for l in lines if re.match(r"^[\d*]", l.strip())]
+        assert len(job_lines) == 4  # Pm-1: 4 cron lines (the reconcile_journals line
         # was deleted with the ERP removal, 2026-11-17)
-        assert not any("reconcile_journals" in l for l in lines)
-        for line in lines:
+        assert not any("reconcile_journals" in l for l in job_lines)
+        for line in job_lines:
             assert "flock -E 99 -n" in line
             assert "already running" in line
             assert "exit 0" in line  # a skip is not a failure

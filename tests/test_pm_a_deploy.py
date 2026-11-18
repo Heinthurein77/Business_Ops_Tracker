@@ -225,8 +225,10 @@ class TestDeployArtifacts:
 class TestDbRolesParameterised:
     def test_db_roles_uses_psql_variables_and_is_idempotent(self):
         text = (ROOT / "deploy" / "db_roles.sql").read_text()
-        assert "defaultdb" not in text
-        assert ":\"db_name\"" in text or ":'db_name'" in text or ":db_name" in text
+        # No hard-coded database name in any statement (the word survives
+        # only in the comment explaining that it is gone).
+        assert "ON DATABASE defaultdb" not in text
+        assert "ON DATABASE :\"db_name\"" in text
         assert "migrator_password" in text and "app_password" in text
         # CREATE ROLE is guarded by an existence check (Postgres has no
         # CREATE ROLE IF NOT EXISTS), so re-running is safe.
@@ -252,7 +254,8 @@ class TestDeployAndBackupScripts:
     def test_deploy_preflight_runs_before_stop(self):
         text = (ROOT / "scripts" / "deploy.sh").read_text()
         preflight = text.index("docker compose -f docker-compose.prod.yml config -q")
-        stop = text.index("stop app caddy")
+        # The executed stop command (not the header comment's example).
+        stop = text.index("$COMPOSE stop app caddy")
         assert preflight < stop
         assert "PRE_DEPLOY_SNAPSHOT" in text
         assert "pg_isready" in text
