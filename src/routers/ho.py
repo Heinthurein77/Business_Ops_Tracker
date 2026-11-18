@@ -1,12 +1,12 @@
 import logging
-from datetime import date
+from datetime import date, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.auth import require_roles
-from src.constants import Role
+from src.constants import NotificationType, Role
 from src.config import settings
 from src.database import get_db
 from src.models import (
@@ -33,8 +33,10 @@ from src.utils import (
     format_local_datetime,
     log_audit,
     monthly_target_window_error,
+    notify,
     parse_month_or_today,
     parse_monthly_target_amounts,
+    report_date_window_error,
     SubmitRateLimiter,
     today_local,
     todays_submission_events,
@@ -53,8 +55,21 @@ _rate_limiter = SubmitRateLimiter(REPORT_SUBMIT_RATE_LIMIT, REPORT_SUBMIT_RATE_W
 logger = logging.getLogger(__name__)
 
 @router.get("/dashboard")
-def ho_dashboard(user: User = Depends(require_roles(Role.HO)), db: Session = Depends(get_db)):
-    report_date = today_local()
+def ho_dashboard(report_date_query: str = Query("", alias="date"), user: User = Depends(require_roles(Role.HO)), db: Session = Depends(get_db)):
+    # PM-m22: same 7-day backfill affordance as CEOs (?date= editing).
+    # No date = today, as before. A date outside the edit window 400s
+    # with the shared window error.
+    today = today_local()
+    if report_date_query:
+        try:
+            report_date = date.fromisoformat(report_date_query)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date must be a valid ISO date")
+        window_error = report_date_window_error(report_date, today, settings.REPORT_EDIT_WINDOW_DAYS)
+        if window_error:
+            raise HTTPException(status_code=400, detail=window_error)
+    else:
+        report_date = today
 
     financial = db.query(HeadOfficeDailyFinancial).filter(HeadOfficeDailyFinancial.report_date == report_date).first()
     activity = db.query(HeadOfficeActivityLog).filter(HeadOfficeActivityLog.report_date == report_date).first()
@@ -114,6 +129,11 @@ def ho_dashboard(user: User = Depends(require_roles(Role.HO)), db: Session = Dep
     return {
         "report_date": report_date.isoformat(),
         "report_date_display": report_date.strftime("%A, %d %B %Y"),
+        # PM-m22: the backfill form keys (same names the CEO dashboard
+        # uses), so the HO page can tell "editing a past day" from today.
+        "form_date": report_date.isoformat(),
+        "form_date_display": report_date.strftime("%A, %d %B %Y"),
+        "form_is_today": report_date == today,
         "last_submitted_by": last_submitted_by,
         "submission_events_today": todays_submission_events(db, user.id, "HO_DAILY_REPORT_SUBMITTED", report_date),
         "financial": {
@@ -447,6 +467,48 @@ def submit_report(
             + compute_field_changes(previous_health, current_health)
             + compute_field_changes(previous_social, current_social)
         )
+
+    # PM-m1: HO submit was silent — share the CEO post-submit alert
+    # block. (a) >50% revenue deviation vs the trailing 14-day HO
+    # average notifies Chairman/HO; (b) a backdated resubmit notifies
+    # Chairman/HO so a restatement of reviewed history is visible.
+    # HO has no stored revenue_anomaly column (unlike DailyFinancial),
+    # so the anomaly here is notification-only.
+    try:
+        window_start = report_date - timedelta(days=14)
+        prior_amounts = [
+            float(r[0] or 0)
+            for r in db.query(HeadOfficeDailyFinancial.revenue).filter(
+                HeadOfficeDailyFinancial.report_date >= window_start,
+                HeadOfficeDailyFinancial.report_date < report_date,
+            ).all()
+        ]
+        anomaly_avg = sum(prior_amounts) / len(prior_amounts) if prior_amounts else None
+        if anomaly_avg and anomaly_avg > 0 and abs(float(form.revenue or 0) - anomaly_avg) / anomaly_avg > 0.5:
+            deviation = (float(form.revenue or 0) - anomaly_avg) / anomaly_avg * 100
+            for recipient in db.query(User).filter(User.role.in_([Role.CHAIRMAN, Role.HO]), User.is_active == True).all():  # noqa: E712
+                notify(
+                    db, recipient.id, NotificationType.ALERT,
+                    "Revenue anomaly: Head Office",
+                    f"Revenue Ks {float(form.revenue or 0):,.0f} on {report_date.isoformat()} "
+                    f"vs 14-day average Ks {anomaly_avg:,.0f} ({deviation:+.0f}%) — please review.",
+                    link="/admin/head-office",
+                )
+    except Exception as exc:  # noqa: BLE001 - never break a submission over the anomaly check
+        logger.warning("HO revenue anomaly check failed: %s", exc)
+    if previous_financial is not None and report_date < today_local():
+        for recipient in db.query(User).filter(User.role.in_([Role.CHAIRMAN, Role.HO]), User.is_active == True).all():  # noqa: E712
+            notify(
+                db, recipient.id, NotificationType.ALERT,
+                "Backdated report edit: Head Office",
+                f"{user.username} resubmitted the {report_date.isoformat()} Head Office report — please review the change.",
+                link="/admin/head-office",
+            )
+    try:
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 - report already committed
+        db.rollback()
+        logger.warning("HO post-submit notification commit failed: %s", exc)
 
     audit_detail = build_resubmit_audit_detail(report_date, changes)
     log_audit(db, user, "HO_DAILY_REPORT_SUBMITTED", audit_detail, request)
