@@ -5,6 +5,7 @@ import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
 import LastUpdated from '../components/LastUpdated';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
+import { ACTIVITY_STATUS_LABEL } from '../utils/status';
 import { viewUploadUrl } from '../utils/safeUrl';
 
 const STATUS_CARD_CLASS = {
@@ -14,7 +15,6 @@ const STATUS_CARD_CLASS = {
   grey: 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 border-l-4 border-l-slate-300 dark:border-l-slate-600',
 };
 const STATUS_DOT = { green: 'bg-emerald-500', yellow: 'bg-amber-500', red: 'bg-red-500', grey: 'bg-slate-400' };
-const STATUS_LABEL = { green: 'Active', yellow: 'Moderate', red: 'Low Activity', grey: 'No Data' };
 
 function HelpBadge() {
   return (
@@ -191,6 +191,7 @@ function HeaderStat({ label, value, accentClass = 'text-slate-900 dark:text-slat
 
 export default function ActivityDashboardPage() {
   const [data, setData] = useState(null);
+  const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [expanded, setExpanded] = useState(null);
   const [dirSearch, setDirSearch] = useState('');
@@ -201,9 +202,10 @@ export default function ActivityDashboardPage() {
 
   const reload = useCallback(() => {
     setRefreshing(true);
+    setError('');
     api.activityDashboard()
       .then((d) => { setData(d); setUpdatedAt(new Date()); })
-      .catch(() => {})
+      .catch((err) => setError(err instanceof ApiError ? err.message : 'Failed to load activity dashboard'))
       .finally(() => setRefreshing(false));
   }, []);
 
@@ -238,7 +240,11 @@ export default function ActivityDashboardPage() {
   if (!data) {
     return (
       <div className={`min-h-screen flex items-center justify-center ${PAGE_BG}`}>
-        <div className="w-8 h-8 border-2 border-slate-200 dark:border-slate-700 border-t-brand-600 rounded-full animate-spin" />
+        {error ? (
+          <p className="text-sm text-red-600 dark:text-red-400 px-4 text-center">{error}</p>
+        ) : (
+          <div className="w-8 h-8 border-2 border-slate-200 dark:border-slate-700 border-t-brand-600 rounded-full animate-spin" />
+        )}
       </div>
     );
   }
@@ -407,7 +413,7 @@ export default function ActivityDashboardPage() {
                       {d.key_achievement && (
                         <div className="flex justify-between"><span className="text-emerald-600 dark:text-emerald-400">Achievement</span><span className="font-semibold text-slate-800 dark:text-slate-200 truncate max-w-[9rem]" title={d.key_achievement}>{d.key_achievement}</span></div>
                       )}
-                      <div className="flex justify-between"><span className="text-slate-500 dark:text-slate-400">Fitness Avg</span><span className={`font-semibold ${d.status === 'red' ? 'text-red-600 dark:text-red-400' : d.status === 'yellow' ? 'text-amber-600 dark:text-amber-400' : d.status === 'green' ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400'}`}>{STATUS_LABEL[d.status]}</span></div>
+                      <div className="flex justify-between"><span className="text-slate-500 dark:text-slate-400">Fitness Avg</span><span className={`font-semibold ${d.status === 'red' ? 'text-red-600 dark:text-red-400' : d.status === 'yellow' ? 'text-amber-600 dark:text-amber-400' : d.status === 'green' ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400'}`}>{ACTIVITY_STATUS_LABEL[d.status]}</span></div>
                       {d.problems_today && (
                         <div className="flex justify-between"><span className="text-slate-500 dark:text-slate-400">Problems</span><span className="font-semibold text-amber-600 dark:text-amber-400">Reported</span></div>
                       )}

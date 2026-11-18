@@ -21,24 +21,12 @@ import {
   QUADRANT_STATUS_LABEL,
 } from '../utils/quadrantMetrics';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
+import { money, formatDate } from '../utils/format';
+import { KPI_HEALTH_LABEL, STATUS_COLOR, STATUS_PILL_CLASS } from '../utils/status';
 
-const STATUS_COLOR = { green: '#10B981', yellow: '#F59E0B', red: '#EF4444', grey: '#94a3b8' };
-const STATUS_LABEL = { green: 'Optimal', yellow: 'Needs Attention', red: 'Critical Warning', grey: 'No Target Set' };
-const STATUS_PILL = {
-  green: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20 dark:border-emerald-500/30',
-  yellow: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20 dark:border-amber-500/30',
-  red: 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20 dark:border-red-500/30',
-  grey: 'bg-slate-500/10 text-slate-500 dark:text-slate-400 border-slate-500/20 dark:border-slate-500/30',
-};
-
-function money(v) {
-  return v == null ? '—' : `Ks ${Math.round(Number(v)).toLocaleString()}`;
-}
-
-function formatIsoShort(iso) {
-  const d = new Date(iso + 'T00:00:00');
-  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).replace(/ /g, ' ');
-}
+// F-M5/F-m1: money + the KPI-health vocabulary now come from the shared
+// modules. Behaviour alignment: a missing value now renders `Ks 0`
+// (the canonical money() rule) instead of this page's old `—`.
 
 /** Attaches a running Month-to-Date Revenue / Other Amount total to each row
  * (client-side only — financial_rows already carries the combined cumulative
@@ -111,7 +99,9 @@ export default function AdminDashboardPage() {
   }
 
   useEffect(() => {
-    loadOverview().catch(() => {});
+    // loadOverview() never throws — it catches internally and surfaces
+    // ovError — so there is no silent .catch here any more (F-M2).
+    loadOverview();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -120,12 +110,23 @@ export default function AdminDashboardPage() {
 
   const selectedBuId = Number(searchParams.get('bu')) || ov?.operations?.[0]?.bu_id || null;
 
+  // F-M2: the detail fetch is aborted when the selected BU changes or
+  // the page unmounts, so a stale response can never overwrite the
+  // current BU's detail.
   useEffect(() => {
     if (!selectedBuId) return;
     setDetail(null);
     setDetailError('');
     setDateIndex(0);
-    api.businessUnitDetail(selectedBuId).then(setDetail).catch((err) => setDetailError(err.message || 'Failed to load business unit detail'));
+    const controller = new AbortController();
+    api.businessUnitDetail(selectedBuId, controller.signal)
+      .then(setDetail)
+      .catch((err) => {
+        if (err?.name !== 'AbortError' && !controller.signal.aborted) {
+          setDetailError(err.message || 'Failed to load business unit detail');
+        }
+      });
+    return () => controller.abort();
   }, [selectedBuId]);
 
   function selectBu(buId) {
@@ -257,7 +258,7 @@ export default function AdminDashboardPage() {
             labels: {
               show: true,
               value: { fontSize: '26px', fontWeight: 700, color: isDark ? '#f1f5f9' : '#0f172a', formatter: () => (perf ? `${perf.achievement_pct}%` : '—') },
-              total: { show: true, label: perf ? STATUS_LABEL[status] : 'No Target', fontSize: '12px', color: STATUS_COLOR[status], formatter: () => (perf ? `${perf.achievement_pct}%` : '—') },
+              total: { show: true, label: perf ? KPI_HEALTH_LABEL[status] : 'No Target', fontSize: '12px', color: STATUS_COLOR[status], formatter: () => (perf ? `${perf.achievement_pct}%` : '—') },
             },
           },
         },
@@ -478,9 +479,9 @@ export default function AdminDashboardPage() {
           <div className={`${GLASS} p-5 relative overflow-hidden flex flex-col justify-between`}>
             <span className="absolute top-0 left-0 right-0 h-[3px]" style={{ backgroundColor: STATUS_COLOR[status] }} />
             <p className="text-[11px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-[0.08em]">Cumulative Health</p>
-            <span className={`inline-flex items-center gap-1.5 text-sm font-bold px-3 py-1.5 rounded-full border mt-2 w-fit ${STATUS_PILL[status]}`}>
+            <span className={`inline-flex items-center gap-1.5 text-sm font-bold px-3 py-1.5 rounded-full border mt-2 w-fit ${STATUS_PILL_CLASS[status]}`}>
               <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: STATUS_COLOR[status] }} />
-              {perf ? `${perf.achievement_pct}%` : '—'} · {STATUS_LABEL[status]}
+              {perf ? `${perf.achievement_pct}%` : '—'} · {KPI_HEALTH_LABEL[status]}
             </span>
             <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1.5">vs Monthly Target: {perf ? formatVariance(perf.variance_amount) : '—'}</p>
           </div>
@@ -639,7 +640,7 @@ export default function AdminDashboardPage() {
                     <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                       {financialRows.map((r, i) => {
                         const rowStatus = (r.performance?.status || 'grey').toLowerCase();
-                        const note = detail.financial_notes.find((n) => formatIsoShort(n.note_date) === r.report_date);
+                        const note = detail.financial_notes.find((n) => formatDate(n.note_date) === r.report_date);
                         return (
                           <tr key={i} onClick={() => setDateIndex(i)} className={`cursor-pointer transition-colors ${i === dateIndex ? 'bg-brand-50/70 dark:bg-brand-500/10' : 'hover:bg-slate-50 dark:hover:bg-slate-900'}`}>
                             <td className="px-5 py-3 text-slate-700 dark:text-slate-300 font-medium">{r.report_date}</td>
@@ -648,7 +649,7 @@ export default function AdminDashboardPage() {
                             <td className="px-5 py-3 text-right font-semibold text-slate-900 dark:text-slate-100">{money((r.revenue || 0) + (r.other_amount || 0))}</td>
                             <td className="px-5 py-3 text-slate-500 dark:text-slate-400 max-w-[160px] truncate" title={note?.note_text || ''}>{note?.note_text || '—'}</td>
                             <td className="px-5 py-3 text-center">
-                              <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_PILL[rowStatus]}`}>
+                              <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_PILL_CLASS[rowStatus]}`}>
                                 {r.performance ? `${r.performance.achievement_pct}%` : '—'}
                               </span>
                             </td>

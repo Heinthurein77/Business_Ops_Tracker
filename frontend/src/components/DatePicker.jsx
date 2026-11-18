@@ -1,3 +1,4 @@
+import { formatDate } from '../utils/format';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -31,10 +32,11 @@ function buildGrid(year, month) {
   return cells;
 }
 
+// F-M5: display formatting lives in utils/format.js. An empty value
+// renders as '' here (the picker's placeholder), unlike formatDate's '—'.
 function formatDisplay(iso) {
-  const d = parseIso(iso);
-  if (!d) return '';
-  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  if (!iso) return '';
+  return formatDate(iso);
 }
 
 /** Reusable calendar-dropdown date picker — a styled replacement for the

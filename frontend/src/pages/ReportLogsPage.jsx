@@ -5,13 +5,7 @@ import DatePicker from '../components/DatePicker';
 import Footer from '../components/Footer';
 import LastUpdated from '../components/LastUpdated';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
-
-function formatReportDate(iso) {
-  if (!iso) return '—';
-  const [y, m, d] = iso.split('-').map(Number);
-  if (!y || !m || !d) return iso;
-  return new Date(y, m - 1, d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-}
+import { formatDate } from '../utils/format';
 
 export default function ReportLogsPage() {
   const [data, setData] = useState(null);
@@ -153,7 +147,7 @@ export default function ReportLogsPage() {
                 {filtered.map((log, i) => (
                   <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors">
                     <td className="px-6 py-3.5 font-medium tabular-nums text-slate-700 dark:text-slate-300">{log.timestamp_display}</td>
-                    <td className="px-6 py-3.5 text-slate-500 dark:text-slate-400">{formatReportDate(log.report_date)}</td>
+                    <td className="px-6 py-3.5 text-slate-500 dark:text-slate-400">{formatDate(log.report_date)}</td>
                     <td className="px-6 py-3.5">
                       <p className="font-semibold text-slate-800 dark:text-slate-200">{log.bu_name}</p>
                     </td>

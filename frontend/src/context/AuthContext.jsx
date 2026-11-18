@@ -27,6 +27,7 @@ export function AuthProvider({ children }) {
   // httponly, so the frontend cannot read it itself). Drives the
   // "session expires in 15 min" warning (SessionExpiryBanner).
   const [sessionExpiresAt, setSessionExpiresAt] = useState(null);
+  const [authError, setAuthError] = useState('');
 
   const refresh = useCallback(async () => {
     try {
@@ -62,8 +63,9 @@ export function AuthProvider({ children }) {
     const data = await api.login(username, password, totpCode);
     setUser(data.user);
     // Exact expiry comes from /api/auth/me; refresh so the warning banner
-    // has the real value instead of a client-side guess.
-    refresh().catch(() => {});
+    // has the real value instead of a client-side guess. A failure here is
+    // recorded (not swallowed) so it can be surfaced (F-M2).
+    refresh().catch((err) => setAuthError(err instanceof ApiError ? err.message : 'Failed to refresh session'));
     return data;
   }, [refresh]);
 
@@ -77,7 +79,7 @@ export function AuthProvider({ children }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout, refresh, setUser, sessionExpiresAt }}>
+    <AuthContext.Provider value={{ user, loading, login, logout, refresh, setUser, sessionExpiresAt, authError }}>
       {children}
     </AuthContext.Provider>
   );

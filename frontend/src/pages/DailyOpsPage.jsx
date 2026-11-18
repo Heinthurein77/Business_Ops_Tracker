@@ -5,6 +5,7 @@ import Footer from '../components/Footer';
 import LastUpdated from '../components/LastUpdated';
 import useRefreshOnFocus from '../hooks/useRefreshOnFocus';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
+import { money, localMonth } from '../utils/format';
 
 // Tracker-only daily-ops inputs (ex-Operations Center, ERP tabs removed
 // 2026-11-17): action items, documents, staff, customers, forecast.
@@ -23,9 +24,7 @@ const STATUS_BADGE = {
   done: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400',
 };
 
-function money(v) {
-  return `Ks ${Number(v || 0).toLocaleString()}`;
-}
+// F-M5: money() now comes from utils/format.js (rounded, null -> Ks 0).
 
 export default function DailyOpsPage() {
   const [tab, setTab] = useState('actions');
@@ -38,7 +37,7 @@ export default function DailyOpsPage() {
 
   const [documents, setDocuments] = useState([]);
   const [docForm, setDocForm] = useState({ title: '', document_type: 'license', expiry_date: '', notes: '' });
-  const [reportMonth, setReportMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [reportMonth, setReportMonth] = useState(localMonth());
   const [staff, setStaff] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [forecast, setForecast] = useState(null);
@@ -49,7 +48,7 @@ export default function DailyOpsPage() {
   const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
-    api.adminOverview().then((d) => setBus(d.operations || [])).catch(() => {});
+    api.adminOverview().then((d) => setBus(d.operations || [])).catch((err) => setError(err.message || 'Failed to load business units'));
   }, []);
 
   const load = useCallback(async () => {
