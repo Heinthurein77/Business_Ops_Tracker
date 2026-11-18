@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { api } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
@@ -31,28 +31,9 @@ const EVENT_FILTERS = [
 ];
 
 export default function SecurityLogPage() {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState('');
-  const [search, setSearch] = useState('');
-  const [eventFilter, setEventFilter] = useState('all');
-  // F-12: when the log was last refreshed (LastUpdated, header).
-  const [updatedAt, setUpdatedAt] = useState(null);
-  const [refreshing, setRefreshing] = useState(false);
-
-  const load = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      setData(await api.securityLog());
-      setError('');
-      setUpdatedAt(new Date());
-    } catch (err) {
-      setError(err.message || 'Failed to load security log');
-    } finally {
-      setRefreshing(false);
-    }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
+  // F-M2: shared server-state hook — load/error/refreshing + abort +
+  // refresh-on-focus, instead of the hand-rolled triple.
+  const { data, error, refreshing, refetch, updatedAt } = useApi(() => api.securityLog(), []);
 
   const filtered = useMemo(() => {
     if (!data) return [];
@@ -110,7 +91,7 @@ export default function SecurityLogPage() {
               </p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
-              <LastUpdated updatedAt={updatedAt} onRefresh={load} refreshing={refreshing} />
+              <LastUpdated updatedAt={updatedAt} onRefresh={refetch} refreshing={refreshing} />
               <input
                 type="text"
                 placeholder="Search user, detail, IP..."

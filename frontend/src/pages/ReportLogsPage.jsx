@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { api } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import DatePicker from '../components/DatePicker';
@@ -8,29 +8,9 @@ import { GLASS, PAGE_BG } from '../utils/glassTheme';
 import { formatDate } from '../utils/format';
 
 export default function ReportLogsPage() {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState('');
-  const [search, setSearch] = useState('');
-  const [dateFilter, setDateFilter] = useState(null);
-  const [buFilter, setBuFilter] = useState('all');
-  // F-12: when the logs were last refreshed (LastUpdated, header).
-  const [updatedAt, setUpdatedAt] = useState(null);
-  const [refreshing, setRefreshing] = useState(false);
-
-  const load = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      setData(await api.reportLogs());
-      setError('');
-      setUpdatedAt(new Date());
-    } catch (err) {
-      setError(err.message || 'Failed to load report logs');
-    } finally {
-      setRefreshing(false);
-    }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
+  // F-M2: shared server-state hook — load/error/refreshing + abort +
+  // refresh-on-focus, instead of the hand-rolled triple.
+  const { data, error, refreshing, refetch, updatedAt } = useApi(() => api.reportLogs(), []);
 
   const buOptions = useMemo(() => {
     if (!data) return [];
@@ -98,7 +78,7 @@ export default function ReportLogsPage() {
               </p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
-              <LastUpdated updatedAt={updatedAt} onRefresh={load} refreshing={refreshing} />
+              <LastUpdated updatedAt={updatedAt} onRefresh={refetch} refreshing={refreshing} />
               <input
                 type="text"
                 placeholder="Search BU, submitter..."

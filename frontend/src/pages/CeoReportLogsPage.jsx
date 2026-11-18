@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import { api, ApiError } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
@@ -9,26 +9,9 @@ import { GLASS, PAGE_BG } from '../utils/glassTheme';
  * this CEO's own submission log, mirroring the admin section's Report Logs
  * page but scoped to just their own business unit. */
 export default function CeoReportLogsPage() {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState('');
-  // F-12: when the logs were last refreshed (LastUpdated, header).
-  const [updatedAt, setUpdatedAt] = useState(null);
-  const [refreshing, setRefreshing] = useState(false);
-
-  const load = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      setData(await api.ceoDashboard());
-      setError('');
-      setUpdatedAt(new Date());
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Failed to load report logs');
-    } finally {
-      setRefreshing(false);
-    }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
+  // F-M2: shared server-state hook — load/error/refreshing + abort +
+  // refresh-on-focus, instead of the hand-rolled triple.
+  const { data, error, refreshing, refetch, updatedAt } = useApi(() => api.ceoDashboard(), []);
 
   if (!data) {
     return (
@@ -53,7 +36,7 @@ export default function CeoReportLogsPage() {
             <h1 className="font-bold text-slate-900 tracking-tight text-lg">My Report Logs</h1>
             <p className="text-xs text-slate-500 mt-0.5">Your own submission history, with exact submission time</p>
           </div>
-          <LastUpdated updatedAt={updatedAt} onRefresh={load} refreshing={refreshing} />
+          <LastUpdated updatedAt={updatedAt} onRefresh={refetch} refreshing={refreshing} />
         </div>
 
         <section className={`${GLASS} overflow-hidden`}>

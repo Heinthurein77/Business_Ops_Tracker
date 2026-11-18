@@ -1,44 +1,19 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import DatePicker from '../components/DatePicker';
 import Footer from '../components/Footer';
 import LastUpdated from '../components/LastUpdated';
-import useRefreshOnFocus from '../hooks/useRefreshOnFocus';
 import QuadrantStatusCircle from '../components/QuadrantStatusCircle';
 import { BUDGET_BADGE_CLASS, BUDGET_STATUS_LABEL, formatVariance, money } from '../utils/quadrantMetrics';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
 
 export default function OperationsPage() {
   const navigate = useNavigate();
-  const [data, setData] = useState(null);
-  const [error, setError] = useState('');
-  const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState('all');
-  const [startDate, setStartDate] = useState('');
-  const [endDate, setEndDate] = useState('');
-  // F-12: when the grid was last refreshed (LastUpdated, header).
-  const [updatedAt, setUpdatedAt] = useState(null);
-  const [refreshing, setRefreshing] = useState(false);
-
-  const load = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      setData(await api.adminOperations());
-      setError('');
-      setUpdatedAt(new Date());
-    } catch (err) {
-      setError(err.message || 'Failed to load operations');
-    } finally {
-      setRefreshing(false);
-    }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-
-  // m-09: re-run the load when the tab regains focus (no polling).
-  useRefreshOnFocus(load);
+  // F-M2: shared server-state hook — load/error/refreshing + abort +
+  // refresh-on-focus, instead of the hand-rolled triple.
+  const { data, error, refreshing, refetch, updatedAt } = useApi(() => api.adminOperations(), []);
 
   const filtered = useMemo(() => {
     if (!data) return [];
@@ -89,7 +64,7 @@ export default function OperationsPage() {
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{data.today_display}</p>
           </div>
           <div className="flex items-center gap-3 flex-wrap">
-            <LastUpdated updatedAt={updatedAt} onRefresh={load} refreshing={refreshing} />
+            <LastUpdated updatedAt={updatedAt} onRefresh={refetch} refreshing={refreshing} />
             <a
               href={api.exportExcelUrl()}
               className="flex items-center gap-2 text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white px-3.5 py-2.5 rounded-xl transition-colors shadow-lg shadow-emerald-600/20"
