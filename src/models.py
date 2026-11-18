@@ -118,7 +118,7 @@ class User(Base):
     hashed_password = Column(String(255), nullable=False)
     full_name = Column(String(150), nullable=True)
     role = Column(String(20), nullable=False)  # Chairman | HO | CEO
-    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=True, index=True)  # m-12: per-BU lookups
+    business_unit_id = Column(Integer, ForeignKey("business_units.id", ondelete="RESTRICT"), nullable=True, index=True)  # m-12: per-BU lookups
     require_password_change = Column(Boolean, default=False, nullable=False)
     # Only meaningful for role == "CEO" — Chairman/HO have no profile to
     # complete, so this stays True (irrelevant) for them. Checked on every
@@ -163,7 +163,7 @@ class DailyFinancial(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id", ondelete="RESTRICT"), nullable=False, index=True)
     report_date = Column(Date, nullable=False, default=_today_local, index=True)
     revenue = Column(Numeric(16, 2), nullable=False, default=0)
     expenses = Column(Numeric(16, 2), nullable=False, default=0)
@@ -185,7 +185,7 @@ class DailyFinancial(Base):
     # edits and is visible to every review view that reads the row.
     revenue_anomaly = Column(Boolean, default=False, nullable=False)
     other_notes = Column(Text, nullable=True)
-    submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    submitted_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
@@ -200,7 +200,7 @@ class ActivityLog(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id", ondelete="RESTRICT"), nullable=False, index=True)
     report_date = Column(Date, nullable=False, default=_today_local, index=True)
     meetings_attended = Column(Text, nullable=True)
     site_visits = Column(Text, nullable=True)
@@ -229,7 +229,7 @@ class ActivityLog(Base):
     cycle_percent = Column(Integer, nullable=True)  # 0-100
     # Free-text catch-all for anything not covered by the fields above.
     other_notes = Column(Text, nullable=True)
-    submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    submitted_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
@@ -244,7 +244,7 @@ class HealthStatus(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id", ondelete="RESTRICT"), nullable=False, index=True)
     report_date = Column(Date, nullable=False, default=_today_local, index=True)
     physical_health = Column(String(20), nullable=True)  # Healthy | Tired | Sick (legacy, no longer collected)
     stress_level = Column(String(20), nullable=True)  # Low | Medium | High (collected again as one-tap chips)
@@ -266,7 +266,7 @@ class HealthStatus(Base):
     cycle_percent = Column(Integer, nullable=True)  # 0-100
     # Free-text catch-all for anything not covered by the fields above.
     other_notes = Column(EncryptedText, nullable=True)  # health free text — encrypted at rest
-    submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    submitted_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
@@ -280,14 +280,14 @@ class SocialLog(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id", ondelete="RESTRICT"), nullable=False, index=True)
     report_date = Column(Date, nullable=False, default=_today_local, index=True)
     event_flag = Column(Boolean, default=False, nullable=False)
     meeting_flag = Column(Boolean, default=False, nullable=False)
     golf_flag = Column(Boolean, default=False, nullable=False)
     # Free-text catch-all for anything not covered by the fields above.
     other_notes = Column(Text, nullable=True)
-    submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    submitted_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
@@ -316,7 +316,7 @@ class HeadOfficeActivityLog(Base):
     swimming_percent = Column(Integer, nullable=True)  # 0-100
     cycle_percent = Column(Integer, nullable=True)  # 0-100
     other_notes = Column(Text, nullable=True)
-    submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    submitted_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
@@ -352,7 +352,7 @@ class HeadOfficeDailyFinancial(Base):
     payable = Column(Numeric(16, 2), nullable=True)
     other_amount = Column(Numeric(16, 2), nullable=True)
     other_notes = Column(Text, nullable=True)
-    submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    submitted_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
@@ -376,7 +376,7 @@ class HeadOfficeHealthStatus(Base):
     bp_systolic = Column(Integer, nullable=True)
     bp_diastolic = Column(Integer, nullable=True)
     other_notes = Column(EncryptedText, nullable=True)  # health free text — encrypted at rest
-    submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    submitted_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
@@ -393,7 +393,7 @@ class HeadOfficeSocialLog(Base):
     meeting_flag = Column(Boolean, default=False, nullable=False)
     golf_flag = Column(Boolean, default=False, nullable=False)
     other_notes = Column(Text, nullable=True)
-    submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    submitted_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
@@ -416,7 +416,7 @@ class HeadOfficeMonthlyTarget(Base):
     monthly_cash_flow_target = Column(Numeric(16, 2), nullable=False)
     monthly_max_receivable = Column(Numeric(16, 2), nullable=False)
     monthly_max_payable = Column(Numeric(16, 2), nullable=False)
-    set_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    set_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
@@ -430,13 +430,13 @@ class MonthlyTarget(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id", ondelete="RESTRICT"), nullable=False, index=True)
     target_month = Column(Date, nullable=False, index=True)  # always the 1st of the target month
     monthly_revenue_target = Column(Numeric(16, 2), nullable=False)
     monthly_cash_flow_target = Column(Numeric(16, 2), nullable=False)
     monthly_max_receivable = Column(Numeric(16, 2), nullable=False)
     monthly_max_payable = Column(Numeric(16, 2), nullable=False)
-    set_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    set_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
@@ -459,10 +459,10 @@ class FinancialNote(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id", ondelete="RESTRICT"), nullable=False, index=True)
     note_date = Column(Date, nullable=False, default=_today_local, index=True)
     note_text = Column(Text, nullable=False)
-    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     business_unit = relationship("BusinessUnit")
@@ -472,7 +472,7 @@ class CeoProfile(Base):
     __tablename__ = "ceo_profiles"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
     # full_name lives on User (already existed pre-profile-setup) — this
     # table only holds the fields specific to the mandatory profile.
     executive_title = Column(String(120), nullable=False, default="Chief Executive Officer")
@@ -523,12 +523,12 @@ class PasswordResetRequest(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     username = Column(String(80), nullable=False)
     status = Column(String(20), default="Pending", nullable=False)  # Pending | Approved | Rejected
     requested_at = Column(DateTime, default=_utcnow, nullable=False)
     resolved_at = Column(DateTime, nullable=True)
-    resolved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    resolved_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
 
 class AuditLog(Base):
@@ -545,7 +545,7 @@ class AuditLog(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     username = Column(String(80), nullable=True)
     action = Column(String(120), nullable=False)
     details = Column(Text, nullable=True)
@@ -562,7 +562,7 @@ class ActionItem(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id", ondelete="RESTRICT"), nullable=False, index=True)
     title = Column(String(200), nullable=False)
     description = Column(Text, nullable=True)
     assigned_to_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
@@ -602,7 +602,7 @@ class StaffRecord(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id", ondelete="RESTRICT"), nullable=False, index=True)
     report_date = Column(Date, nullable=False, index=True)
     total_staff = Column(Integer, default=0, nullable=False)
     present = Column(Integer, default=0, nullable=False)
@@ -624,7 +624,7 @@ class CustomerMetric(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id", ondelete="RESTRICT"), nullable=False, index=True)
     report_date = Column(Date, nullable=False, index=True)
     footfall = Column(Integer, nullable=True)
     transactions = Column(Integer, nullable=True)
@@ -642,7 +642,7 @@ class LicenseDocument(Base):
     __tablename__ = "license_documents"
 
     id = Column(Integer, primary_key=True, index=True)
-    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=False, index=True)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id", ondelete="RESTRICT"), nullable=False, index=True)
     title = Column(String(255), nullable=False)
     document_type = Column(String(32), default="license", nullable=False)  # license / contract / permit / other
     issue_date = Column(Date, nullable=True)
