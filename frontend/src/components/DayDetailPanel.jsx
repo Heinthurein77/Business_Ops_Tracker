@@ -18,6 +18,8 @@ import { viewUploadUrl } from '../utils/safeUrl';
  * - `showMeetingsCount`, `showKeyAchievement`: CEO-history extras.
  * - `gymFromHealth`: when true, Gym/Swim/Cycle come from the health row
  *   (CeoHistory) instead of the activity row (BU Detail / HO).
+ * - `healthExtra`: optional node rendered inside the Health card
+ *   (CeoHistory's stress/energy/weight/sick rows).
  */
 export default function DayDetailPanel({
   activityRows = [],
@@ -31,6 +33,7 @@ export default function DayDetailPanel({
   showMeetingsCount = false,
   showKeyAchievement = false,
   gymFromHealth = false,
+  healthExtra = null,
 }) {
   const currentReview = activityRows[reviewIndex] || null;
   const financialForDay = currentReview ? financialRows.find((f) => f.report_date === currentReview.report_date) : null;
@@ -196,6 +199,7 @@ export default function DayDetailPanel({
                   <div className="flex justify-between"><span className="text-slate-500">Heart Rate</span><span className="font-semibold text-slate-800 dark:text-slate-200 tabular-nums">{healthForDay.heart_rate != null ? `${healthForDay.heart_rate} bpm` : '—'}</span></div>
                   <div className="flex justify-between"><span className="text-slate-500">Sleep Time</span><span className="font-semibold text-slate-800 dark:text-slate-200 tabular-nums">{healthForDay.sleep_hours != null ? `${healthForDay.sleep_hours} hrs` : '—'}</span></div>
                   <div className="flex justify-between"><span className="text-slate-500">Blood Pressure</span><span className="font-semibold text-slate-800 dark:text-slate-200 tabular-nums">{healthForDay.bp_systolic != null && healthForDay.bp_diastolic != null ? `${healthForDay.bp_systolic}/${healthForDay.bp_diastolic}` : '—'}</span></div>
+                  {healthExtra && (typeof healthExtra === 'function' ? healthExtra(healthForDay) : healthExtra)}
                   {healthForDay.other_notes && (
                     <div className="pt-1.5 border-t border-slate-200 dark:border-slate-700">
                       <p className="text-slate-500 mb-0.5">Other</p>
