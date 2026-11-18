@@ -125,14 +125,16 @@ class ApiClient:
     def delete(self, url, **kw):
         return self.request("DELETE", url, **kw)
 
-    def login(self, username, password=None):
+    def login(self, username, password=None, totp_code=None):
         """Log in and store the session cookie for later calls."""
         password = password if password is not None else self._password
         assert password is not None, (
             "ApiClient.login() needs a password: pass one, or build the "
             "client with make_client(password=...)")
-        r = self.post("/api/auth/login",
-                      json={"username": username, "password": password})
+        body = {"username": username, "password": password}
+        if totp_code is not None:
+            body["totp_code"] = totp_code
+        r = self.post("/api/auth/login", json=body)
         assert r.status_code == 200, r.text
         self.cookie = r.headers.get("set-cookie", "").split(";")[0]
         assert self.cookie.startswith("access_token="), r.text
