@@ -74,6 +74,42 @@ applied in Postgres); discard ondelete-only diffs. Keep exactly one
 head; `tests/test_migrations_chain.py` guards models ↔ migrations
 drift (tables, columns, and FK `ondelete`).
 
+The chain still replays 8 ERP-era migrations (`erp_phase1..6`,
+`erp_completion_*`, …) that build tables the ERP-removal migration
+(`a720b6b7c616`) drops afterwards — they are history, not live schema,
+and must not be re-added (PM-m11). Squashing them is deliberately not
+done: editing applied history is riskier than replaying it.
+
+## Deploy paths (read before deploying)
+
+**No canonical deploy target is chosen yet — this is open question 1
+(PM review 2026-11-18, C-1), and it blocks the Neon string, domain,
+secrets, and drill work.** Two fully-written candidate paths exist;
+both can now boot (migrations need only the database URL since the
+C-1 fix), but do not deploy from either until the user picks one —
+then archive or delete the losing spec.
+
+| Path | Spec | Notes |
+|---|---|---|
+| VPS + Neon + Caddy | `docker-compose.prod.yml`, `scripts/deploy.sh` | Go-live runbook §2 documents this path only. Needs a Neon project + PITR, a domain, `.env` (0600) on the server. |
+| DigitalOcean App Platform | `.do/app.yaml` | `deploy_on_push` is off (PM-12) — releases deploy explicitly from a tag. DB is dev-tier (`production: false` — flip before real data). `ALLOWED_HOSTS`/`ALLOWED_ORIGINS` still carry `replace-with-your-domain` placeholders: set the real domain before the first deploy. |
+
+**Layout (PM-m6):** scripts live in three places on purpose — `scripts/`
+holds the host-side shell entry points (`deploy.sh`, `backup.sh`),
+`src/scripts/` holds Python CLIs that run inside the app container
+(`audit_retention.py`, `reset_chairman.py`, `reset_totp.py`,
+`rotate_data_key.py`), and `deploy/` holds the non-script deploy
+inputs (`crontab`, `db_roles.sql`). `deploy.sh` stays in `scripts/`
+(documented here, not moved). The go-live runbook
+(`docs/BOT_GoLive_Runbook_2026-10-21.md`) is the execution script;
+`CHANGELOG.md` records what changed and what is still pending
+(the `v1.0.0` tag belongs on the go-live commit, not before).
+
+Release identification (PM-11): the image bakes the commit in
+(Dockerfile `ARG GIT_SHA`, compose `args:`) and `/healthz` reports
+`version` + `commit` — runbook §2D compares that against the deployed
+commit ("push ≠ live").
+
 ## Auth in five lines
 
 - Roles: **Chairman** (one, seeded at first boot), **HO** (group),
@@ -91,7 +127,8 @@ drift (tables, columns, and FK `ondelete`).
 
 - `src/` — API (`routers/`, `services/`, `jobs/`), `src/models.py`
   (the schema; FK `ON DELETE` policy lives here, matching migration
-  `c2d6e0f4b8a3`), `src/main.py` (startup, seeding).
+  `c2d6e0f4b8a3`), `src/main.py` (startup/assembly only; first-boot
+  seeding lives in `src/seed.py`).
 - `frontend/src/` — pages, `api/client.js`, `context/AuthContext.jsx`.
 - `tests/` — pytest suite (HTTP tests go through the shared `client`
   fixture in root `conftest.py`).

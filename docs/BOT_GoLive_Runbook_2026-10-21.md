@@ -143,15 +143,16 @@ R2_ACCESS_KEY_ID='<R2 access key>'
 R2_SECRET_ACCESS_KEY='<R2 secret key>'
 R2_BUCKET_NAME='business-ops-tracker'
 R2_ENDPOINT_URL='https://<account-id>.r2.cloudflarestorage.com'
-R2_PUBLIC_BASE_URL='<public base URL — ရှိရင်>'
+# R2_PUBLIC_BASE_URL ကို လုံးဝ မထည့် — production မှာ အဲ့ဒါ ပါရင် app က
+# စတောင် မစဘူး (src/config.py က ငြင်းတယ်, PM-9)။ Attachment တွေကို
+# session-gated endpoint ကပဲ ပြတယ် — public URL မရှိ။
 ```
 
 **⚠️ အရေးကြီး — chairman password:** production first boot မှာ chairman account ကို
 `BOOTSTRAP_CHAIRMAN_PASSWORD` env ရှိရင် အဲ့ဒါနဲ့ seed လုပ်တယ် — env က အားနည်းရင် app က
 စတောင် မစဘူး (password policy စစ်တယ်, `src/config.py`). **မရှိရင် random password ထုတ်ပြီး
-`/app/uploads/.bootstrap_chairman_password` file ထဲ 0600 နဲ့ သိမ်းတယ်** (log ထဲမှာ အစပိုင်း
-4 လုံးပဲ hint အနေနဲ့ ပြတယ်, အပြည့်အစုံ မပြဘူး) — server မှာ
-`docker compose exec web cat /app/uploads/.bootstrap_chairman_password` နဲ့ ယူ, first login
+`/app/.bootstrap_chairman_password` file ထဲ 0600 နဲ့ သိမ်းတယ်** (log ထဲမှာ password ကို လုံးဝ မပြဘူး — file path ပဲ ပြတယ်) — server မှာ
+`docker compose exec app cat /app/.bootstrap_chairman_password` နဲ့ ယူ, first login
 ပြီးရင် file ကို ဖျက်. မလုပ်မိရင် login ဝင်မရဘူး.
 ဒါကြောင့် `BOOTSTRAP_CHAIRMAN_PASSWORD` ကိုလည်း အပေါ် `.env` file ထဲ ထည့်
 (`export` မလုပ်) — အားနည်းတဲ့ password ထားရင် app က စတောင် မစဘူး.
@@ -163,7 +164,8 @@ cd ~/business-ops-tracker        # repo clone လုပ်ထားတဲ့ fol
 git pull
 # Deploy လုပ်ခါနီး head ကို အရင် စစ် (runbook ထဲက နံပါတ်/HEAD ကို မယုံနဲ့ —
 # `alembic heads` နဲ့ `git log` ပဲ အမှန်):
-alembic heads                    # → single head a720b6b7c616
+alembic heads                    # → exactly one head (ဘယ် hash လဲ ဒီစာရွက်ထဲက
+#   နံပါတ်ကို မယုံနဲ့ — `git log` နဲ့ တိုက်စစ်; head တစ်ခုတည်း ဖြစ်ရမယ်)
 git log -1 --oneline
 # Secrets တွေက §2B မှာ `.env` file (0600) ထဲ ရောက်ပြီးသား — Compose က
 # အလိုအလျောက် ဖတ်တယ်, ဒီမှာ `export` လုပ်စရာ မလို (D-m10: command line
@@ -210,8 +212,10 @@ aggregation နဲ့ ပြင်ပြီးပြီ, ဒါပေမယ့�
 မှတ်ချက်များ:
 - Migrations ကို one-shot **`migrate` service** က app မစခင် run တယ်
   (`RUN_MIGRATIONS_ON_STARTUP=false`) — လက်နဲ့ alembic run စရာ မလို။
-  Rollback: code revert + rebuild — ⚠️ head revision `a720b6b7c616` က
-  one-way ဖြစ်တယ် (downgrade က ငြင်းတယ်) — ပြန်ယူချင်ရင် ERP ဖျက်ခြင်း
+  Rollback: code revert + rebuild — ⚠️ ERP-removal revision `a720b6b7c616` က
+  one-way ဖြစ်တယ် (downgrade က အဲ့ကို ကျော်ပြီး ပြန်မဆင်းဘူး — အခု head
+  ဟာ အဲ့နောက် migration တွေ ထပ်ပါပြီးသား; `alembic heads` နဲ့ စစ်) —
+  ပြန်ယူချင်ရင် ERP ဖျက်ခြင်း
   မတိုင်ခင် backup ကနေ restore လုပ်; downgrade ဟာ `e4f8a2b6d0c5` ကို
   ကျော်ရင် scrub လုပ်ပြီးသား audit data ပြန်မရဘူး, forward-fix ကို ဦးစားပေး။
 - **Health check — `/readyz` က DB လည်း စစ်တယ်:** `curl http://127.0.0.1:8123/readyz` →
@@ -238,7 +242,13 @@ aggregation နဲ့ ပြင်ပြီးပြီ, ဒါပေမယ့�
   `DROP TABLE users` တို့ fail ဖြစ်ရမယ်) run။ မလုပ်ရသေးရင် default က
   owner URL နဲ့ run နေတယ် — `DATABASE_URL` leak ဖြစ်ရင် table အကုန် ဖျက်လို့ရ။
 - **Scheduled jobs:** `crontab deploy/crontab` install → `crontab -l` နဲ့
-  အတည်ပြု (output ကို ဒီမှာ မှတ်) — 4 ခု:
+  အတည်ပြု (output ကို ဒီမှာ မှတ်) — 4 ခု. `deploy/crontab` ထဲက `MAILTO` ကို
+  alert လက်ခံမယ့် email နဲ့ အစားထိုးထား (မထည့်ရင် cron failure က host log
+  ထဲမှာပဲ ရှိမယ်, ဘယ်သူမှ မသိဘူး — PM-14). VPS/Docker/cron ကိုယ်တိုင် လဲရင်
+  ဘယ်သူမှ မသိတာမို့ UptimeRobot / Healthchecks လို အပြင်က uptime check
+  တစ်ခုကို `/healthz` (liveness) ကို ping ခိုင်းထား — အဲ့ဒါက server ပြင်ပက
+  စစ်တာ, in-app log_scan (09:00) က system အတွင်းကပဲ စစ်တာ။ Telegram
+  alerting ကတော့ မဆုံးဖြတ်ရသေးတဲ့ backlog (open question 5) — မဆောက်ရသေး။
   scheduled_alerts (နေ့စဉ် 08:30),
   audit_retention (Sunday 03:00, MIGRATION_DATABASE_URL လိုတယ်),
   log_scan (နေ့စဉ် 09:00), backup (Sunday 03:30)။ Log တွေက `~/bot-*.log`။
@@ -281,7 +291,7 @@ aggregation နဲ့ ပြင်ပြီးပြီ, ဒါပေမယ့�
   မရှိသေးဘူး — ပထမအကြိမ် လိုအပ်မှ ရေးရမယ်); `audit_logs.username` +
   reports ကို evidence အဖြစ် ထား။ အပြည့်အစုံ:
   `docs/security-decisions.md` (A-m3)။
-- **Capacity — ပထမ bottleneck (A-m4):** DB pool (4+4, 10 စက္ကန့်) က CPU
+- **Capacity — ပထမ bottleneck (A-m4):** DB pool (5+5, 10 စက္ကန့်) က CPU
   ထက် အရင် ပြည့်တယ် — exports တွေက in-request sync ဖြစ်လို့ connection
   ကိုင်ထားတယ်။ Pool-timeout 500 တွေက log မှာ `ERROR` line အနေနဲ့ ပေါ်တယ်
   — နေ့စဉ် 09:00 log scan က ရေတွက်ပြီး Chairman ကို notify လုပ်တယ်
@@ -301,7 +311,9 @@ aggregation နဲ့ ပြင်ပြီးပြီ, ဒါပေမယ့�
 - **Incident runbook:** `BOT_Incident_Runbook_2026-11-09.md` (ဒီ file နား) —
   secret leak ဖြစ်ရင် အဲ့ အတိုင်း လုပ်; JWT rotation ကို go-live မတိုင်ခင်
   တစ်ခါ rehearsal လုပ်။
-- Dev login `Chairman123!` က **local dev DB အတွက်ပဲ** — production က `BOOTSTRAP_CHAIRMAN_PASSWORD` နဲ့ ဝင်.
+- Dev login အတွက် fixed password မရှိဘူး — dev seed account တွေရဲ့ password က
+boot တိုင်း random ဖြစ်ပြီး `.dev_seed_passwords` file ထဲ တစ်ခါပဲ ရေးတယ် (M-02);
+production က `BOOTSTRAP_CHAIRMAN_PASSWORD` (သို့မဟုတ် bootstrap file) နဲ့ ဝင်.
 
 ### 2D. Deploy အတည်ပြု (push ≠ live — KPI သင်ခန်းစာ)
 
@@ -318,7 +330,8 @@ aggregation နဲ့ ပြင်ပြီးပြီ, ဒါပေမယ့�
   (scratch DB မှာ restore + migration-chain check) — ပထမဆုံး drill က go-live gate။
   R2 bucket versioning ကို Cloudflare dashboard မှာ ဖွင့်ထား (repo ကနေ လုပ်လို့ မရ)။
 - **Incident runbook rehearsal:** JWT rotation ကို တစ်ခါ ကျင့်ထား —
-  `BOT_Incident_Runbook_2026-11-09.md` §6။
+  `BOT_Incident_Runbook_2026-11-09.md` §6 (go-live gate — မကျင့်ရသေး။
+  Dual-key/key-id support က နောက်မှ လုပ်မယ့် improvement, ဒီမှာ မဆောက် — PM-m28)။
 - **Telegram notify (option 10)** — အရင် list မှာ မရွေးခဲ့တာ, backlog မှာ ကျန်နေသေးတယ်. လိုချင် ပြော.
 - **R2 uploads** — §2B မှာ လုပ်ရမယ် (go-live အတွက် required) — မထည့်ရင် production မှာ
   CEO/HO daily-report attachments, CEO profile-photo uploads, တခြား attachment
