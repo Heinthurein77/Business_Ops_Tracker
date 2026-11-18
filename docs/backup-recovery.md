@@ -37,7 +37,7 @@ data goes in.
    ```bash
    DATABASE_URL='<scratch connection string>' alembic heads
    DATABASE_URL='<scratch connection string>' alembic upgrade head
-   # expect: single head a720b6b7c616, upgrade is a no-op
+   # expect: single head 621509460777, upgrade is a no-op
    ```
 3. Start the app against the scratch DB (test env) and spot-check: a
    CEO can log in, the CEO dashboard loads, and one
@@ -56,7 +56,7 @@ data goes in.
 4. Run the migration-chain check above against the restored DB.
 5. Update `DATABASE_URL` (and `MIGRATION_DATABASE_URL`, if the roles
    are in use) to the restored database and `up -d --build`.
-6. Verify §2D of the incident runbook ([BOT_Incident_Runbook_2026-11-09.md](BOT_Incident_Runbook_2026-11-09.md)) (login, CEO dashboard, one attachment
+6. Verify §2D of the go-live runbook ([BOT_GoLive_Runbook_2026-10-21.md](BOT_GoLive_Runbook_2026-10-21.md)) (login, CEO dashboard, one attachment
    resolves).
 7. If Neon PITR is unavailable, restore the latest weekly dump instead:
    ```bash
