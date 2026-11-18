@@ -29,7 +29,7 @@ from src.services.ops_alerts import (  # noqa: F401 - re-exported for callers/te
 from src.database import get_db
 from src.schemas import ActionItemIn, ActionItemUpdate, CustomerIn, DocumentIn, StaffIn
 from src.routers.month_params import parse_month_or_422
-from src.utils import _sanitize_excel_cell, clamp_days, clamp_limit, clamp_offset, log_audit, notify, today_local, utcnow
+from src.utils import _sanitize_excel_cell, clamp_days, clamp_limit, clamp_offset, log_audit, notify, page_response, today_local, utcnow
 from src.models import (
     ActionItem,
     ActivityLog,
@@ -208,8 +208,10 @@ def list_action_items(
         q = q.filter(ActionItem.status == status)
     if mine:
         q = q.filter(ActionItem.assigned_to_id == user.id)
-    items = q.order_by(ActionItem.due_date.is_(None), ActionItem.due_date, ActionItem.created_at.desc()).offset(clamp_offset(offset)).limit(clamp_limit(limit)).all()
-    return {"items": [serialize_action_item(db, i) for i in items]}
+    total = q.count()
+    limit, offset = clamp_limit(limit), clamp_offset(offset)
+    items = q.order_by(ActionItem.due_date.is_(None), ActionItem.due_date, ActionItem.created_at.desc()).offset(offset).limit(limit).all()
+    return page_response([serialize_action_item(db, i) for i in items], total, limit, offset)
 
 
 def _validate_assignee(db: Session, user: User, assigned_to_id: Optional[int]) -> Optional[User]:
@@ -481,13 +483,15 @@ def list_staff(business_unit_id: Optional[int] = None, days: int = 30,
     q = db.query(StaffRecord).filter(StaffRecord.report_date >= since)
     if bu_id is not None:
         q = q.filter(StaffRecord.business_unit_id == bu_id)
-    rows = q.order_by(StaffRecord.report_date.desc()).offset(clamp_offset(offset)).limit(clamp_limit(limit)).all()
-    return {"items": [
+    total = q.count()
+    limit, offset = clamp_limit(limit), clamp_offset(offset)
+    rows = q.order_by(StaffRecord.report_date.desc()).offset(offset).limit(limit).all()
+    return page_response([
         {"id": r.id, "business_unit_id": r.business_unit_id, "report_date": r.report_date.isoformat(),
          "total_staff": r.total_staff, "present": r.present, "absent": r.absent,
          "new_hires": r.new_hires, "resignations": r.resignations, "notes": r.notes}
         for r in rows
-    ]}
+    ], total, limit, offset)
 
 
 # ---------------------------------------------------------------- customers
@@ -523,14 +527,16 @@ def list_customers(business_unit_id: Optional[int] = None, days: int = 30,
     q = db.query(CustomerMetric).filter(CustomerMetric.report_date >= since)
     if bu_id is not None:
         q = q.filter(CustomerMetric.business_unit_id == bu_id)
-    rows = q.order_by(CustomerMetric.report_date.desc()).offset(clamp_offset(offset)).limit(clamp_limit(limit)).all()
-    return {"items": [
+    total = q.count()
+    limit, offset = clamp_limit(limit), clamp_offset(offset)
+    rows = q.order_by(CustomerMetric.report_date.desc()).offset(offset).limit(limit).all()
+    return page_response([
         {"id": r.id, "business_unit_id": r.business_unit_id, "report_date": r.report_date.isoformat(),
          "footfall": r.footfall, "transactions": r.transactions, "complaints": r.complaints,
          "satisfaction_score": float(r.satisfaction_score) if r.satisfaction_score is not None else None,
          "notes": r.notes}
         for r in rows
-    ]}
+    ], total, limit, offset)
 
 
 # ---------------------------------------------------------------- forecast
@@ -604,9 +610,11 @@ def list_documents(business_unit_id: Optional[int] = None, expiring_soon: bool =
         q = q.filter(LicenseDocument.expiry_date.isnot(None),
                      LicenseDocument.expiry_date <= horizon)
     total = q.count()
-    rows = q.order_by(LicenseDocument.expiry_date.asc()).offset(clamp_offset(offset)).limit(clamp_limit(limit)).all()
+    limit, offset = clamp_limit(limit), clamp_offset(offset)
+    rows = q.order_by(LicenseDocument.expiry_date.asc()).offset(offset).limit(limit).all()
     items = [serialize_document(db, d) for d in rows]
-    return {"items": items, "count": total}
+    # B-m2: "count" renamed to "total" (+ limit/offset) — the shared envelope.
+    return page_response(items, total, limit, offset)
 
 
 @router.post("/documents")

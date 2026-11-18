@@ -55,8 +55,11 @@ from src.utils import (
     format_local_time,
     health_risk_notes,
     bu_lookup_maps,
+    clamp_limit,
+    clamp_offset,
     log_audit,
     notify,
+    page_response,
     parse_month_or_today,
     utcnow,
     parse_monthly_target_amounts,
@@ -1015,6 +1018,9 @@ def report_logs(limit: int = 200, offset: int = 0,
             }
         )
 
+    # B-m2: `total_logs` (page length) is kept alongside `total` (full
+    # count) — ReportLogsPage.jsx reads it for its "N of M submissions"
+    # line, so deleting it would break the page. New consumers use `total`.
     return {"logs": logs, "total_logs": len(logs), "total": total,
             "limit": limit, "offset": offset}
 
@@ -1141,7 +1147,8 @@ def security_log(limit: int = 200, offset: int = 0,
 
 
 @router.get("/ceo-profiles")
-def ceo_profiles(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def ceo_profiles(limit: int = 200, offset: int = 0,
+                 user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """All CEOs' mandatory profile info, for Head Office/Chairman to review.
 
     Note: the original spec for this asked for GET /api/v1/admin/ceo-profile
@@ -1174,7 +1181,10 @@ def ceo_profiles(user: User = Depends(require_admin), db: Session = Depends(get_
             }
         )
 
-    return {"ceo_profiles": entries, "total": len(entries)}
+    # B-m2: paginated like every other list endpoint (default returns all —
+    # there is one CEO per BU). `total` is the full count, not the page length.
+    limit, offset = clamp_limit(limit), clamp_offset(offset)
+    return page_response(entries[offset:offset + limit], len(entries), limit, offset, key="ceo_profiles")
 
 
 @router.get("/ceo-activity-calendar")
@@ -2008,9 +2018,13 @@ def _next_bu_code(db: Session) -> str:
 
 
 @router.get("/business-units")
-def list_business_units(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+def list_business_units(limit: int = 200, offset: int = 0,
+                        user: User = Depends(require_admin), db: Session = Depends(get_db)):
     bus = db.query(BusinessUnit).order_by(BusinessUnit.id).all()
-    return {"items": [_serialize_bu_admin(db, bu) for bu in bus]}
+    # B-m2: shared envelope (default returns all — 23 BUs).
+    limit, offset = clamp_limit(limit), clamp_offset(offset)
+    items = [_serialize_bu_admin(db, bu) for bu in bus]
+    return page_response(items[offset:offset + limit], len(items), limit, offset)
 
 
 @router.post("/business-units")

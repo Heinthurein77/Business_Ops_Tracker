@@ -157,6 +157,16 @@ def clamp_limit(limit: int) -> int:
 def clamp_offset(offset: int) -> int:
     return max(0, offset)
 
+def page_response(items: list, total: int, limit: int, offset: int, key: str = "items") -> dict:
+    """One list envelope for every list endpoint: {<collection>, "total",
+    "limit", "offset"}. `total` is the full matching count (never the page
+    length) and limit/offset are the clamped values actually applied, so a
+    caller can always tell whether more pages exist. The collection key
+    stays "items" except where the frontend already reads another key
+    ("logs", "ceo_profiles") — renaming those would break the pages that
+    read them, so only the shape is unified, not the key."""
+    return {key: items, "total": total, "limit": limit, "offset": offset}
+
 
 def clamp_days(days: int) -> int:
     return max(1, min(days, 365))

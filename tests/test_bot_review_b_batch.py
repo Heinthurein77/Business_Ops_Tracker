@@ -498,7 +498,7 @@ class TestExpiringSoonSqlFilter:
         ceo = db.test_users["ceo"]
         # 3 matching rows (5d, 10d, expired); limit 2 must still report 3.
         out = list_documents(expiring_soon=True, limit=2, offset=0, user=ceo, db=db)
-        assert out["count"] == 3
+        assert out["total"] == 3
         assert len(out["items"]) == 2
         assert {i["title"] for i in out["items"]} <= {"Soon 5d", "Soon 10d", "Expired"}
 
@@ -507,7 +507,7 @@ class TestExpiringSoonSqlFilter:
         self._seed_docs(db)
         ceo = db.test_users["ceo"]
         out = list_documents(expiring_soon=True, limit=2, offset=2, user=ceo, db=db)
-        assert out["count"] == 3
+        assert out["total"] == 3
         assert len(out["items"]) == 1
         assert out["items"][0]["title"] in {"Soon 5d", "Soon 10d", "Expired"}
 
@@ -523,7 +523,7 @@ class TestExpiringSoonSqlFilter:
         self._seed_docs(db)
         ceo = db.test_users["ceo"]
         out = list_documents(expiring_soon=False, limit=100, offset=0, user=ceo, db=db)
-        assert out["count"] == 5
+        assert out["total"] == 5
         assert len(out["items"]) == 5
 
 
