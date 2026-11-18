@@ -93,7 +93,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ENVIRONMENT: test
-DATABASE_URL: <redacted>
+      DATABASE_URL: <redacted>
       DATABASE_SSLMODE: require
       JWT_SECRET_KEY: ci-only-dummy-jwt-secret-that-is-long-enough-0123
       DATA_ENCRYPTION_KEY: ci-only-dummy-key
