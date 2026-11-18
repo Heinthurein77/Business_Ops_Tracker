@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-CURRENT_HEAD = "621509460777"
+CURRENT_HEAD = "9c4d2e7a1f08"
 
 
 def _scrubbed_env(**extra):
@@ -275,8 +275,9 @@ class TestCrontabAndEnvExample:
         text = (ROOT / "deploy" / "crontab").read_text()
         assert "MAILTO" in text
         # Only the MAILTO line is this workstream's: the scheduled_alerts
-        # cron line itself is untouched here (workstream B owns it).
-        assert "30 8 * * * flock" in text
+        # cron line itself is owned by workstream B (PM-2 moved it from
+        # 08:30 to 16:00, when a missing report is actually a miss).
+        assert "0 16 * * * flock" in text
 
     def test_env_example_has_all_eight_vars(self):
         text = (ROOT / ".env.example").read_text()

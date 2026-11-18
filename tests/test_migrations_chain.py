@@ -7,9 +7,10 @@ run migrations, and the bug only surfaced as a 500 against a real database.
 
 This test runs the REAL migration chain on an empty scratch DB (subprocess
 ``alembic upgrade head`` — no ``create_all`` anywhere) and asserts:
-1. exactly one migration head (621509460777, the idempotency_keys table
-   (m-10), 2026-11-17, re-chained at merge time on top of the hot-query
-   composite indexes 6d20531e9b89);
+1. exactly one migration head (9c4d2e7a1f08, the sticky revenue-anomaly
+   review columns (PM-6), 2026-11-18, on top of the idempotency_keys
+   table 621509460777 (m-10), 2026-11-17, re-chained at merge time on
+   top of the hot-query composite indexes 6d20531e9b89);
 2. every model table and every model column exists in the migrated schema;
 3. a tracker row can be inserted and read back through the models
    against the migrated schema.
