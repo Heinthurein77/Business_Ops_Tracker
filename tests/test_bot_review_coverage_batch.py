@@ -537,6 +537,10 @@ def alerts_db(db):
 
 def _run_job(monkeypatch, session2):
     monkeypatch.setattr(scheduled_alerts, "SessionLocal", lambda: session2)
+    # PM-2: the job only sends missing-report reminders at/after
+    # MISSING_REPORT_HOUR (16:00 Yangon); these tests exercise the
+    # reminder logic itself, so run as if the hour has arrived.
+    monkeypatch.setattr(scheduled_alerts, "missing_report_due", lambda now=None: True)
     return scheduled_alerts.main()
 
 
@@ -587,6 +591,9 @@ def test_scheduled_alerts_document_expiry(monkeypatch, alerts_db):
 
 def test_scheduled_alerts_failure_returns_one(monkeypatch, alerts_db):
     db, session2 = alerts_db
+    # PM-2: run as if the 16:00 hour has arrived, otherwise main()
+    # skips the missing-report step and returns 0.
+    monkeypatch.setattr(scheduled_alerts, "missing_report_due", lambda now=None: True)
     monkeypatch.setattr(scheduled_alerts, "run_remind_missing_reports",
                         lambda db: (_ for _ in ()).throw(RuntimeError("db down")))
     monkeypatch.setattr(scheduled_alerts, "SessionLocal", lambda: session2)

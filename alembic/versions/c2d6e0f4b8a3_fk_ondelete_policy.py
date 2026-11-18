@@ -30,7 +30,10 @@ down_revision: Union[str, Sequence[str], None] = 'b1c5d9e3a7f2'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-SET_NULL_COLUMNS = {"submitted_by", "set_by", "created_by", "resolved_by"}
+SET_NULL_COLUMNS = {"submitted_by", "set_by", "created_by", "resolved_by",
+                    # PM-6 (migration 9c4d2e7a1f08): the anomaly reviewer —
+                    # same "keep the record when the person is erased" rule.
+                    "revenue_anomaly_reviewed_by"}
 CASCADE = {("ceo_profiles", "user_id"), ("password_reset_requests", "user_id")}
 
 

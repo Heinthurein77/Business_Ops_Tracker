@@ -25,14 +25,18 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema."""
-    op.add_column('daily_financials', sa.Column('revenue_anomaly_reviewed_at', sa.DateTime(), nullable=True))
-    op.add_column('daily_financials', sa.Column('revenue_anomaly_reviewed_by', sa.Integer(), nullable=True))
-    op.create_foreign_key('fk_daily_financials_anomaly_reviewed_by', 'daily_financials', 'users',
-                          ['revenue_anomaly_reviewed_by'], ['id'], ondelete='SET NULL')
+    # Batch mode: plain op.create_foreign_key cannot ALTER a SQLite
+    # table (NotImplementedError); batch mode copies the table instead.
+    with op.batch_alter_table("daily_financials", recreate="always") as batch_op:
+        batch_op.add_column(sa.Column('revenue_anomaly_reviewed_at', sa.DateTime(), nullable=True))
+        batch_op.add_column(sa.Column('revenue_anomaly_reviewed_by', sa.Integer(), nullable=True))
+        batch_op.create_foreign_key('fk_daily_financials_anomaly_reviewed_by', 'users',
+                                    ['revenue_anomaly_reviewed_by'], ['id'], ondelete='SET NULL')
 
 
 def downgrade() -> None:
     """Downgrade schema."""
-    op.drop_constraint('fk_daily_financials_anomaly_reviewed_by', 'daily_financials', type_='foreignkey')
-    op.drop_column('daily_financials', 'revenue_anomaly_reviewed_by')
-    op.drop_column('daily_financials', 'revenue_anomaly_reviewed_at')
+    with op.batch_alter_table("daily_financials", recreate="always") as batch_op:
+        batch_op.drop_constraint('fk_daily_financials_anomaly_reviewed_by', type_='foreignkey')
+        batch_op.drop_column('revenue_anomaly_reviewed_by')
+        batch_op.drop_column('revenue_anomaly_reviewed_at')
