@@ -16,6 +16,46 @@ from src.constants import ACTION_ITEM_OPEN_STATUSES, NotificationType, Role
 from src.models import ActionItem, BusinessUnit, DailyFinancial, LicenseDocument, Notification, User
 from src.utils import APP_TZ, clamp_days, notify, today_local, utcnow
 
+# PM-2: the missing-report reminder hour (Yangon local time). ONE named
+# constant, one-line change: the 08:30 cron used to fire before almost
+# any CEO had submitted, so the nudge was near-universal daily noise.
+# The cron line in deploy/crontab runs at this hour, and
+# missing_report_due() (used by the scheduled job) refuses to send
+# before it. Default 16:00 — the report's 15:00–16:00 recommendation;
+# the CEO page already shows a 15:00 late nudge, so 16:00 is the
+# "actually a miss" point. OPEN QUESTION 2: 15:00 / 16:00 / end of day.
+MISSING_REPORT_HOUR = 16
+
+
+def _document_expiry_link(recipient: Optional[User]) -> str:
+    """PM-3: same role-aware routing as _action_item_link. A CEO's
+    documents live on /ceo (CeoOpsSection); Chairman/HO use
+    /admin/daily-ops. The old hard-coded /admin/daily-ops bounced a CEO
+    to their home page with no explanation."""
+    if recipient is not None and recipient.role == Role.CEO:
+        return "/ceo"
+    return "/admin/daily-ops"
+
+
+def missing_report_due(now: Optional[datetime] = None) -> bool:
+    """PM-2: True once the Yangon local hour has reached
+    MISSING_REPORT_HOUR. The scheduled job calls this before sending;
+    a manual trigger (an admin explicitly clicking) bypasses it."""
+    current = now or datetime.now(APP_TZ)
+    return current.hour >= MISSING_REPORT_HOUR
+
+
+def count_missing_report_recipients(db: Session) -> int:
+    """PM-2: how many active CEOs would get a missing-report reminder
+    right now (no submission for today). Shown on the manual button
+    before anything is sent."""
+    today = today_local()
+    submitted_bu_ids = {
+        row[0] for row in db.query(DailyFinancial.business_unit_id).filter(DailyFinancial.report_date == today).all()
+    }
+    ceos = db.query(User).filter(User.role == Role.CEO, User.is_active == True).all()  # noqa: E712
+    return sum(1 for ceo in ceos if ceo.business_unit_id and ceo.business_unit_id not in submitted_bu_ids)
+
 
 def _action_item_link(assignee: Optional[User]) -> str:
     """M-13: an action-item link must be reachable by the assignee. A CEO
@@ -125,7 +165,7 @@ def run_check_document_expiry(db: Session, days: int = 30) -> dict:
             if u.id in seen:
                 continue
             seen.add(u.id)
-            notify(db, u.id, NotificationType.DOCUMENT_EXPIRY, title, message, link="/admin/daily-ops")
+            notify(db, u.id, NotificationType.DOCUMENT_EXPIRY, title, message, link=_document_expiry_link(u))
             sent += 1
         d.expiry_notified_at = utcnow()
     db.commit()

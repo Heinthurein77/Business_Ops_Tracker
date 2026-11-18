@@ -33,6 +33,7 @@ class NotificationType(str, Enum):
     ACTION_ASSIGNED = "action_assigned"
     ACTION_DUE = "action_due"
     DOCUMENT_EXPIRY = "document_expiry"
+    LOGIN_LOCKOUT = "login_lockout"
     ALERT = "alert"
 
 
@@ -40,3 +41,17 @@ class NotificationType(str, Enum):
 # src/services/ops_alerts.py). "done" is terminal; the other two are open.
 ACTION_ITEM_STATUSES = ("pending", "in_progress", "done")
 ACTION_ITEM_OPEN_STATUSES = ("pending", "in_progress")
+
+# PM-m3: the allowed action-item status transitions. Documented here so
+# the router, the tests and any future UI all read the same table:
+#   pending     -> in_progress, done
+#   in_progress -> pending, done
+#   done        -> pending only (reopen; writes an audit note — see
+#                  update_action_item in src/routers/ops.py)
+# done -> in_progress is NOT allowed: reopen via pending first, so a
+# reopened item is never mistaken for one that was merely started.
+ACTION_ITEM_TRANSITIONS = {
+    "pending": ("in_progress", "done"),
+    "in_progress": ("pending", "done"),
+    "done": ("pending",),
+}

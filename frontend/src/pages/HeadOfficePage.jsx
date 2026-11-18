@@ -1,4 +1,5 @@
 import { Fragment, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import LastUpdated from '../components/LastUpdated';
@@ -118,6 +119,10 @@ function mapForm(payload) {
 export default function HeadOfficePage() {
   const { user } = useAuth();
   const isHo = user?.role === 'HO';
+  // PM-m22: same 7-day backfill affordance as CEOs — /admin/head-office
+  // (or an HO user) can open ?date=YYYY-MM-DD to file/correct a past day.
+  const [searchParams] = useSearchParams();
+  const editDate = searchParams.get('date') || '';
 
   const [reviewIndex, setReviewIndex] = useState(0);
   const [targetEditing, setTargetEditing] = useState(false);
@@ -131,13 +136,14 @@ export default function HeadOfficePage() {
     emptyForm,
     emptyTargetForm,
     draftKey: 'ho-daily-report',
-    fetchDashboard: () => (isHo ? api.hoDashboard() : api.headOfficeReport()),
+    fetchDashboard: () => (isHo ? api.hoDashboard(editDate) : api.headOfficeReport()),
     mapForm,
-    // HO drafts are stamped with the local today (F-m4: not UTC).
-    draftDate: () => localTodayISO(),
+    // HO drafts are stamped with the form date (today, or the ?date=
+    // backfill day) — not the UTC date.
+    draftDate: (payload) => payload.form_date || localTodayISO(),
     isFormEmpty: (f) => f.revenue === '' && f.cash_flow === '',
     fieldMap: FIELD_MAP,
-    submitReport: (fd) => api.submitHoReport(fd),
+    submitReport: (fd) => api.submitHoReport(fd, editDate || undefined),
     setTargetApi: (payload) => api.setHoMonthlyTarget(payload),
     targetMonth: (d) => (isHo ? d.report_date : d.today).slice(0, 7) + '-01',
     onLoadExtra: () => {
@@ -146,7 +152,7 @@ export default function HeadOfficePage() {
       setTargetError('');
       setReviewIndex(0);
     },
-    loadDeps: [isHo],
+    loadDeps: [isHo, editDate],
   });
 
   // Chairman-only: override the HO-set monthly target. Kept page-local
@@ -262,6 +268,20 @@ export default function HeadOfficePage() {
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
             </svg>
             <span>Head Office hasn&apos;t submitted today&apos;s report yet.</span>
+          </div>
+        )}
+        {isHo && data.form_is_today === false && (
+          <div className="rounded-xl bg-brand-500/10 border border-brand-500/20 px-5 py-4 text-sm text-slate-700 flex items-center gap-3 flex-wrap sm:flex-nowrap">
+            <span className="flex-1">
+              You’re filling the report for <strong>{reportDateDisplay}</strong>, opened for a past day.
+              Saving updates that day — not today.
+            </span>
+            <Link
+              to="/admin/head-office"
+              className="shrink-0 text-xs font-bold text-brand-700 bg-brand-500/15 hover:bg-brand-500/25 px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
+            >
+              Back to today
+            </Link>
           </div>
         )}
         {isHo && success && (

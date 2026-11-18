@@ -35,11 +35,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSIONS = ROOT / "alembic" / "versions"
-# Current head after the idempotency_keys table (m-10, 2026-11-17):
-# 621509460777, re-chained at merge time on top of the hot-query
-# composite indexes 6d20531e9b89.
-CURRENT_HEAD = "621509460777"
-CURRENT_HEAD_PARENT = "6d20531e9b89"
+# Current head after the PM-6 sticky-anomaly review columns (2026-11-18):
+# 9c4d2e7a1f08, on top of the idempotency_keys table 621509460777.
+CURRENT_HEAD = "9c4d2e7a1f08"
+CURRENT_HEAD_PARENT = "621509460777"
 # The one-way ERP-removal drop migration: a downgrade to base stops here.
 ONE_WAY_REVISION = "a720b6b7c616"
 

@@ -35,6 +35,7 @@ from typing import Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Query, Session
 
+from src.constants import NotificationType
 from src.models import AuditLog, User
 from src.utils import notify
 
@@ -388,7 +389,7 @@ def _trigger_lockout(db: Session, username: str, now: datetime, n_user: int, dur
     minutes = max(1, round(duration / 60))
     for admin in db.query(User).filter(User.role.in_(("Chairman", "HO")), User.is_active == True).all():  # noqa: E712
         notify(
-            db, admin.id, "login_lockout",
+            db, admin.id, NotificationType.LOGIN_LOCKOUT,
             f"Login locked: {username}",
             f"{n_user} failed sign-in attempts in {LOGIN_WINDOW_SECONDS // 60} minutes locked "
             f"the account '{username}' for about {minutes} minute{'s' if minutes != 1 else ''}. "

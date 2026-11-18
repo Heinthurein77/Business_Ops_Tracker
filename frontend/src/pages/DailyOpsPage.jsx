@@ -34,6 +34,13 @@ export default function DailyOpsPage() {
   const [actions, setActions] = useState([]);
   const [newTitle, setNewTitle] = useState('');
   const [newDue, setNewDue] = useState('');
+  // PM-1: users of the selected BU, for the assignee picker. listUsers
+  // is Chairman-only (src/routers/users.py), so an HO user gets no
+  // picker options — see the report note.
+  const [users, setUsers] = useState([]);
+  const [newAssignee, setNewAssignee] = useState('');
+  // PM-2: how many CEOs the manual missing-report button would ping.
+  const [missingCount, setMissingCount] = useState(null);
 
   const [documents, setDocuments] = useState([]);
   const [docForm, setDocForm] = useState({ title: '', document_type: 'license', expiry_date: '', notes: '' });
@@ -49,6 +56,11 @@ export default function DailyOpsPage() {
 
   useEffect(() => {
     api.adminOverview().then((d) => setBus(d.operations || [])).catch((err) => setError(err.message || 'Failed to load business units'));
+    // PM-1: assignee picker options (Chairman-only endpoint; HO sees
+    // an empty picker rather than a broken page).
+    api.listUsers().then((d) => setUsers(d.users || [])).catch(() => setUsers([]));
+    // PM-2: recipient count for the manual missing-report button.
+    api.missingReportCount().then((d) => setMissingCount(d.count)).catch(() => setMissingCount(null));
   }, []);
 
   const load = useCallback(async () => {
@@ -79,23 +91,58 @@ export default function DailyOpsPage() {
   async function addAction(e) {
     e.preventDefault();
     if (!newTitle.trim()) return;
+    // PM-17: a BU is required — creating with none selected used to
+    // 400 only on submit, with no upfront signal.
+    if (!buId) {
+      setError('Pick a business unit first — action items belong to one business unit.');
+      return;
+    }
     try {
-      await api.createActionItem({ business_unit_id: buId ? Number(buId) : undefined, title: newTitle.trim(), due_date: newDue || undefined });
+      await api.createActionItem({
+        business_unit_id: Number(buId),
+        title: newTitle.trim(),
+        due_date: newDue || undefined,
+        // PM-1: assignee picker (users of the selected BU).
+        assigned_to_id: newAssignee ? Number(newAssignee) : undefined,
+      });
       setNewTitle('');
       setNewDue('');
+      setNewAssignee('');
       load();
     } catch (err) { setError(err.message); }
   }
 
+  // PM-18: these handlers used to await with no try/catch — a failed
+  // click silently did nothing (contrast remindActions, which catches).
   async function setActionStatus(item, status) {
-    await api.updateActionItem(item.id, { status });
-    load();
+    try {
+      await api.updateActionItem(item.id, { status });
+      load();
+    } catch (err) { setError(err.message || 'Failed to update action item'); }
+  }
+
+  // PM-1: assign/reassign an existing item from its row.
+  async function setActionAssignee(item, assigneeId) {
+    try {
+      await api.updateActionItem(item.id, { assigned_to_id: assigneeId ? Number(assigneeId) : undefined });
+      load();
+    } catch (err) { setError(err.message || 'Failed to assign action item'); }
+  }
+
+  async function deleteActionItem(item) {
+    try {
+      await api.deleteActionItem(item.id);
+      load();
+    } catch (err) { setError(err.message || 'Failed to delete action item'); }
   }
 
   async function remind() {
-    const d = await api.remindMissingReports();
-    setNotice(`Reminder sent to ${d.notified} CEO(s) who have not reported today.`);
-    setTimeout(() => setNotice(''), 5000);
+    try {
+      const d = await api.remindMissingReports();
+      setNotice(`Reminder sent to ${d.notified} CEO(s) who have not reported today.`);
+      setTimeout(() => setNotice(''), 5000);
+      api.missingReportCount().then((c) => setMissingCount(c.count)).catch(() => {});
+    } catch (err) { setError(err.message || 'Failed to send reminders'); }
   }
 
   // M-15: the remind-actions trigger had no frontend caller (curl-only).
@@ -150,8 +197,8 @@ export default function DailyOpsPage() {
               <option value="">All Business Units</option>
               {bus.map((b) => <option key={b.bu_id} value={b.bu_id}>{b.bu_name}</option>)}
             </select>
-            <button onClick={remind} className="whitespace-nowrap text-xs font-semibold bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 px-3.5 py-2 rounded-lg hover:bg-amber-500/20 transition-colors">
-              Remind missing reports
+            <button onClick={remind} className="whitespace-nowrap text-xs font-semibold bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 px-3.5 py-2 rounded-lg hover:bg-amber-500/20 transition-colors" title={missingCount === null ? 'Remind CEOs who have not reported today' : `Would notify ${missingCount} CEO(s) who have not reported today`}>
+              Remind missing reports{missingCount !== null ? ` (${missingCount})` : ''}
             </button>
             <button onClick={remindActions} className="whitespace-nowrap text-xs font-semibold bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 px-3.5 py-2 rounded-lg hover:bg-amber-500/20 transition-colors">
               Remind due action items
@@ -187,6 +234,13 @@ export default function DailyOpsPage() {
             <form onSubmit={addAction} className="flex flex-wrap gap-3 mb-5">
               <input value={newTitle} onChange={(e) => setNewTitle(e.target.value)} placeholder="New action item…" className="flex-1 min-w-[220px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
               <input type="date" value={newDue} onChange={(e) => setNewDue(e.target.value)} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3.5 py-2.5 text-sm" />
+              {/* PM-1: assignee picker — users of the selected BU. */}
+              <select value={newAssignee} onChange={(e) => setNewAssignee(e.target.value)} disabled={!buId} title={buId ? 'Assign to a user in this business unit' : 'Pick a business unit first'} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm disabled:opacity-50">
+                <option value="">Unassigned</option>
+                {users.filter((u) => u.is_active && String(u.business_unit_id) === String(buId)).map((u) => (
+                  <option key={u.id} value={u.id}>{u.full_name || u.username} ({u.role})</option>
+                ))}
+              </select>
               <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Add</button>
             </form>
             <ul className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -198,9 +252,16 @@ export default function DailyOpsPage() {
                   </div>
                   <div className="flex items-center gap-2">
                     <span className={`text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full border ${STATUS_BADGE[a.status]}`}>{a.status.replace('_', ' ')}</span>
+                    {/* PM-1: assign / reassign from the row. */}
+                    <select value={a.assigned_to_id || ''} onChange={(e) => e.target.value && setActionAssignee(a, e.target.value)} title="Assign or reassign" className="text-xs bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5">
+                      <option value="" disabled>{a.assigned_to_id ? 'Reassign…' : 'Assign…'}</option>
+                      {users.filter((u) => u.is_active && String(u.business_unit_id) === String(a.business_unit_id)).map((u) => (
+                        <option key={u.id} value={u.id}>{u.full_name || u.username} ({u.role})</option>
+                      ))}
+                    </select>
                     {a.status !== 'done' && <button onClick={() => setActionStatus(a, 'in_progress')} className="text-xs font-semibold text-sky-600 dark:text-sky-400 hover:underline">Start</button>}
                     {a.status !== 'done' && <button onClick={() => setActionStatus(a, 'done')} className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">Done</button>}
-                    <button onClick={async () => { await api.deleteActionItem(a.id); load(); }} className="text-xs font-semibold text-red-500 hover:underline">Delete</button>
+                    <button onClick={() => deleteActionItem(a)} className="text-xs font-semibold text-red-500 hover:underline">Delete</button>
                   </div>
                 </li>
               ))}
@@ -315,7 +376,8 @@ export default function DailyOpsPage() {
               <div key={c.label} className={`${GLASS} p-5`}>
                 <p className="text-[11px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-[0.08em]">{c.label}</p>
                 <p className="font-bold text-slate-900 dark:text-slate-100 text-[24px] leading-tight mt-1.5 tabular-nums">{c.value}</p>
-                <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1">{forecast.month} · {forecast.reporting_days} reporting days</p>
+                {/* PM-16: which BU (or the whole group) these cards cover. */}
+                <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1">{forecast.business_unit_name || 'All Business Units (group total)'} · {forecast.month} · {forecast.reporting_days} reporting days</p>
               </div>
             ))}
           </section>

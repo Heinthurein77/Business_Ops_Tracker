@@ -14,8 +14,13 @@ const STATUS_BADGE = {
 
 export default function CeoOpsSection() {
   const [tasks, setTasks] = useState([]);
-  const [staffForm, setStaffForm] = useState({ total_staff: '', present: '', absent: '' });
-  const [custForm, setCustForm] = useState({ footfall: '', transactions: '', complaints: '', satisfaction_score: '' });
+  const [staffForm, setStaffForm] = useState({ total_staff: '', present: '', absent: '', new_hires: '', resignations: '', notes: '' });
+  const [custForm, setCustForm] = useState({ footfall: '', transactions: '', complaints: '', satisfaction_score: '', notes: '' });
+  // PM-3: the CEO's own documents — previously only on Daily Ops
+  // (Chairman/HO), so a document-expiry notification sent a CEO to a
+  // page they could not open. Listed/created here, on /ceo.
+  const [documents, setDocuments] = useState([]);
+  const [docForm, setDocForm] = useState({ title: '', document_type: 'license', expiry_date: '', notes: '' });
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [completingId, setCompletingId] = useState(null);
@@ -30,6 +35,12 @@ export default function CeoOpsSection() {
       setTasks((await api.listActionItems({ mine: true })).items);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Failed to load action items');
+    }
+    // PM-3: the CEO's documents for their own BU (server-scoped).
+    try {
+      setDocuments((await api.listDocuments()).items);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to load documents');
     }
   }, []);
 
@@ -73,6 +84,12 @@ export default function CeoOpsSection() {
         total_staff: Number(staffForm.total_staff) || 0,
         present: Number(staffForm.present) || 0,
         absent: Number(staffForm.absent) || 0,
+        // PM-15: hires/resignations/notes were accepted by the API and
+        // displayed (Hires/Left) on Daily Ops, but no CEO form ever
+        // collected them — the columns could only ever read 0.
+        new_hires: Number(staffForm.new_hires) || 0,
+        resignations: Number(staffForm.resignations) || 0,
+        notes: staffForm.notes || undefined,
       });
       flash('Staff record saved.');
     } catch (err) {
@@ -93,12 +110,48 @@ export default function CeoOpsSection() {
         transactions: custForm.transactions ? Number(custForm.transactions) : undefined,
         complaints: Number(custForm.complaints) || 0,
         satisfaction_score: custForm.satisfaction_score ? Number(custForm.satisfaction_score) : undefined,
+        // PM-15: customer notes, same gap as staff notes above.
+        notes: custForm.notes || undefined,
       });
       flash('Customer metrics saved.');
     } catch (err) {
       showError(err, 'Failed to save customer metrics');
     } finally {
       setCustSaving(false);
+    }
+  }
+
+  // PM-3: add a document for the CEO's own BU (the server pins a CEO
+  // to their own BU, so no business_unit_id is sent).
+  async function submitDocument(e) {
+    e.preventDefault();
+    setError('');
+    if (!docForm.title.trim() || !docForm.expiry_date) {
+      setError('Enter a document title and an expiry date.');
+      return;
+    }
+    try {
+      await api.createDocument({
+        title: docForm.title.trim(),
+        document_type: docForm.document_type,
+        expiry_date: docForm.expiry_date,
+        notes: docForm.notes || undefined,
+      });
+      setDocForm({ title: '', document_type: 'license', expiry_date: '', notes: '' });
+      await load();
+      flash('Document saved.');
+    } catch (err) {
+      showError(err, 'Failed to save document');
+    }
+  }
+
+  async function deleteDocument(doc) {
+    setError('');
+    try {
+      await api.deleteDocument(doc.id);
+      await load();
+    } catch (err) {
+      showError(err, 'Failed to delete document');
     }
   }
 
@@ -139,6 +192,11 @@ export default function CeoOpsSection() {
             <Field label="Total staff">{(fieldId) => <input id={fieldId} type="number" className={inputClass} value={staffForm.total_staff} onChange={(e) => setStaffForm({ ...staffForm, total_staff: e.target.value })} />}</Field>
             <Field label="Present">{(fieldId) => <input id={fieldId} type="number" className={inputClass} value={staffForm.present} onChange={(e) => setStaffForm({ ...staffForm, present: e.target.value })} />}</Field>
             <Field label="Absent">{(fieldId) => <input id={fieldId} type="number" className={inputClass} value={staffForm.absent} onChange={(e) => setStaffForm({ ...staffForm, absent: e.target.value })} />}</Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="New hires">{(fieldId) => <input id={fieldId} type="number" className={inputClass} value={staffForm.new_hires} onChange={(e) => setStaffForm({ ...staffForm, new_hires: e.target.value })} />}</Field>
+              <Field label="Resignations">{(fieldId) => <input id={fieldId} type="number" className={inputClass} value={staffForm.resignations} onChange={(e) => setStaffForm({ ...staffForm, resignations: e.target.value })} />}</Field>
+            </div>
+            <Field label="Notes (optional)">{(fieldId) => <input id={fieldId} type="text" className={inputClass} value={staffForm.notes} onChange={(e) => setStaffForm({ ...staffForm, notes: e.target.value })} />}</Field>
             <button type="submit" disabled={staffSaving} className="w-full bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold py-2.5 rounded-lg transition-colors disabled:opacity-50">{staffSaving ? 'Saving…' : 'Save staff record'}</button>
           </form>
         </section>
@@ -153,10 +211,44 @@ export default function CeoOpsSection() {
               <Field label="Complaints">{(fieldId) => <input id={fieldId} type="number" className={inputClass} value={custForm.complaints} onChange={(e) => setCustForm({ ...custForm, complaints: e.target.value })} />}</Field>
               <Field label="Satisfaction (1–5)">{(fieldId) => <input id={fieldId} type="number" step="0.1" min="1" max="5" className={inputClass} value={custForm.satisfaction_score} onChange={(e) => setCustForm({ ...custForm, satisfaction_score: e.target.value })} />}</Field>
             </div>
+            <Field label="Notes (optional)">{(fieldId) => <input id={fieldId} type="text" className={inputClass} value={custForm.notes} onChange={(e) => setCustForm({ ...custForm, notes: e.target.value })} />}</Field>
             <button type="submit" disabled={custSaving} className="w-full bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold py-2.5 rounded-lg transition-colors disabled:opacity-50">{custSaving ? 'Saving…' : 'Save customer metrics'}</button>
           </form>
         </section>
       </div>
+
+      {/* PM-3: the CEO's documents surface on /ceo — licences/permits
+          for their own BU, with expiry status. This is where the
+          document-expiry notification now links a CEO. */}
+      <section className={`${GLASS} p-6`}>
+        <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 mb-1">Documents</p>
+        <h2 className="font-bold text-slate-900 tracking-tight text-lg mb-4">My Documents</h2>
+        <form onSubmit={submitDocument} className="flex flex-wrap gap-3 mb-5">
+          <input value={docForm.title} onChange={(e) => setDocForm({ ...docForm, title: e.target.value })} placeholder="Document title…" className="flex-1 min-w-[200px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
+          <select value={docForm.document_type} onChange={(e) => setDocForm({ ...docForm, document_type: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm">
+            <option value="license">License</option>
+            <option value="contract">Contract</option>
+            <option value="permit">Permit</option>
+            <option value="other">Other</option>
+          </select>
+          <input type="date" value={docForm.expiry_date} onChange={(e) => setDocForm({ ...docForm, expiry_date: e.target.value })} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3.5 py-2.5 text-sm" />
+          <input value={docForm.notes} onChange={(e) => setDocForm({ ...docForm, notes: e.target.value })} placeholder="Notes (optional)" className="flex-1 min-w-[160px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3.5 py-2.5 text-sm" />
+          <button type="submit" className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors">Add</button>
+        </form>
+        {documents.length === 0 && <p className="text-sm text-slate-400">No documents yet.</p>}
+        <ul className="divide-y divide-slate-100">
+          {documents.map((d) => (
+            <li key={d.id} className="py-2.5 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-slate-800">{d.title}</p>
+                <p className="text-xs text-slate-400 capitalize">{d.document_type} · expires {d.expiry_date || '—'}{d.days_left !== null && d.days_left !== undefined ? ` (${d.days_left < 0 ? 'expired' : `${d.days_left}d left`})` : ''}</p>
+                {d.notes && <p className="text-xs text-slate-400">{d.notes}</p>}
+              </div>
+              <button type="button" onClick={() => deleteDocument(d)} className="text-xs font-semibold text-red-500 hover:underline flex-shrink-0">Remove</button>
+            </li>
+          ))}
+        </ul>
+      </section>
     </div>
   );
 }

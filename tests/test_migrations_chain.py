@@ -59,8 +59,8 @@ def test_single_migration_head():
 
     cfg = Config(str(ROOT / "alembic.ini"))
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == ["621509460777"], (
-        f"expected single head 621509460777 (idempotency_keys table, m-10), got {heads}")
+    assert heads == ["9c4d2e7a1f08"], (
+        f"expected single head 9c4d2e7a1f08 (PM-6 sticky-anomaly review columns), got {heads}")
 
 
 def test_migrated_schema_matches_models(migrated_engine):

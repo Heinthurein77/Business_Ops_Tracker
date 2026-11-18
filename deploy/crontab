@@ -37,13 +37,16 @@
 MAILTO=alerts@example.invalid
 
 # --- scheduled_alerts: missing-report reminders + document/batch expiry
-# alerts. Daily 08:30. Idempotent (one notification per CEO per run,
+# alerts. Daily 16:00 (PM-2: the old 08:30 run fired before almost any CEO
+# had submitted, so the nudge was near-universal daily noise; the hour is
+# the single MISSING_REPORT_HOUR constant in src/services/ops_alerts.py).
+# Idempotent (one notification per CEO per run,
 # one alert per document per 7 days) — safe to re-run by hand.
 # m-19: one retry after a 60 s sleep — if the container is restarting
 # (e.g. a deploy window) the first `docker compose exec` fails and that
 # day's reminders would otherwise be skipped until the next day.
 # Log: ~/bot-alerts.log
-30 8 * * * flock -E 99 -n ~/bot-alerts.lock -c 'cd ~/business-ops-tracker && docker compose -f docker-compose.prod.yml exec -T app python -m src.jobs.scheduled_alerts || (sleep 60; docker compose -f docker-compose.prod.yml exec -T app python -m src.jobs.scheduled_alerts)' >> ~/bot-alerts.log 2>&1; rc=$?; if [ $rc -eq 99 ]; then echo "$(date) scheduled_alerts skipped: already running" >> ~/bot-alerts.log; exit 0; else exit $rc; fi
+0 16 * * * flock -E 99 -n ~/bot-alerts.lock -c 'cd ~/business-ops-tracker && docker compose -f docker-compose.prod.yml exec -T app python -m src.jobs.scheduled_alerts || (sleep 60; docker compose -f docker-compose.prod.yml exec -T app python -m src.jobs.scheduled_alerts)' >> ~/bot-alerts.log 2>&1; rc=$?; if [ $rc -eq 99 ]; then echo "$(date) scheduled_alerts skipped: already running" >> ~/bot-alerts.log; exit 0; else exit $rc; fi
 
 # --- audit_retention: delete sign-in/out rows older than 90 days, clear
 # IPs older than 30 days; financial/account rows are KEPT as tamper

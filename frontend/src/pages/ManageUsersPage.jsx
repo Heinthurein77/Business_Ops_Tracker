@@ -529,6 +529,10 @@ export default function ManageUsersPage() {
                   <th className="px-6 py-3 text-left">Role</th>
                   <th className="px-6 py-3 text-left">Business Unit</th>
                   <th className="px-6 py-3 text-center">Status</th>
+                  {/* PM-m23: explicit TOTP enrolment status for every user
+                      (was only a "2FA on" badge when enabled — a missing
+                      badge was ambiguous). Backend exposes totp_enabled. */}
+                  <th className="px-6 py-3 text-center">2FA</th>
                   <th className="px-6 py-3 text-left">Last Login</th>
                   <th className="px-6 py-3 text-right">Actions</th>
                 </tr>
@@ -561,6 +565,13 @@ export default function ManageUsersPage() {
                           <span className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 dark:border-indigo-500/30 px-2.5 py-0.5 rounded-full">2FA on</span>
                         )}
                       </div>
+                    </td>
+                    <td className="px-6 py-3.5 text-center">
+                      {u.totp_enabled ? (
+                        <span className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 dark:border-indigo-500/30 px-2.5 py-0.5 rounded-full">2FA on</span>
+                      ) : (
+                        <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 bg-slate-200/60 dark:bg-slate-700/60 border border-slate-300 dark:border-slate-600 px-2.5 py-0.5 rounded-full">2FA off</span>
+                      )}
                     </td>
                     <td className="px-6 py-3.5 text-slate-500 dark:text-slate-400">{u.last_login_display || 'Never'}</td>
                     <td className="px-6 py-3.5">

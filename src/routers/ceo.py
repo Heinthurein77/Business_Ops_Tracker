@@ -348,6 +348,7 @@ def ceo_dashboard(
         return {
             "revenue": float(f.revenue),
             "revenue_anomaly": bool(getattr(f, "revenue_anomaly", False)),
+            "revenue_anomaly_reviewed": bool(getattr(f, "revenue_anomaly_reviewed_at", None)),
             "expenses": float(f.expenses),
             "net_profit": float(f.net_profit),
             "cash_in_hand": float(f.cash_in_hand),
@@ -979,6 +980,11 @@ def submit_report(
                 ("revenue", "revenue"), ("cash_flow", "cash_flow"),
                 ("receivable", "receivable"), ("payable", "payable"),
                 ("other_amount", "other_amount"), ("other_notes", "financial_other_notes"),
+                # PM-6: the sticky-anomaly check below reads the previous
+                # row's flag/review state from this snapshot (previous is
+                # a dict, not the ORM row).
+                ("revenue_anomaly", "revenue_anomaly"),
+                ("revenue_anomaly_reviewed_at", "revenue_anomaly_reviewed_at"),
             ),
         ),
         DailyReportRowSpec(
@@ -1114,17 +1120,36 @@ def submit_report(
     except Exception as exc:
         # Never break a submission over the anomaly check itself.
         logger.warning("revenue anomaly check failed for BU %s: %s", user.business_unit_id, exc)
+    # PM-6: sticky anomaly — a resubmit must NOT silently clear an
+    # unreviewed anomaly. If the previous row for this date was flagged
+    # and nobody has reviewed it yet, the flag stays set whatever today
+    # recomputes; only a reviewed flag is replaced by the new computation.
+    # A reviewed flag clears its review stamp when a NEW anomaly is set,
+    # so the new flag waits for its own review. (previous_financial is
+    # the upsert snapshot dict — see snapshot_fields above.)
+    _prev_anomaly = (previous_financial or {}).get("revenue_anomaly", False)
+    _prev_reviewed_at = (previous_financial or {}).get("revenue_anomaly_reviewed_at")
+    previously_flagged_unreviewed = bool(_prev_anomaly) and _prev_reviewed_at is None
+    if previously_flagged_unreviewed:
+        revenue_anomaly = True
     financial.revenue_anomaly = revenue_anomaly
-    if revenue_anomaly:
+    if revenue_anomaly and not previously_flagged_unreviewed:
+        financial.revenue_anomaly_reviewed_at = None
+        financial.revenue_anomaly_reviewed_by = None
+    if revenue_anomaly and not previously_flagged_unreviewed:
         bu = db.query(BusinessUnit).filter(BusinessUnit.id == user.business_unit_id).first()
         bu_label = bu.name if bu else f"BU {user.business_unit_id}"
-        deviation = (float(form.revenue or 0) - anomaly_avg) / anomaly_avg * 100
-        for ho_user in db.query(User).filter(User.role == Role.HO, User.is_active == True).all():  # noqa: E712
+        deviation = (float(form.revenue or 0) - anomaly_avg) / anomaly_avg * 100 if anomaly_avg else 0
+        # PM-6: notify the Chairman too (was HO-only), so the flag's
+        # reviewer actually sees it.
+        for recipient in db.query(User).filter(User.role.in_([Role.CHAIRMAN, Role.HO]), User.is_active == True).all():  # noqa: E712
             notify(
-                db, ho_user.id, NotificationType.ALERT,
+                db, recipient.id, NotificationType.ALERT,
                 f"Revenue anomaly: {bu_label}",
                 f"Revenue Ks {float(form.revenue or 0):,.0f} on {report_date.isoformat()} "
-                f"vs 14-day average Ks {anomaly_avg:,.0f} ({deviation:+.0f}%) — please review.",
+                f"vs 14-day average Ks {anomaly_avg:,.0f} ({deviation:+.0f}%) — please review." if anomaly_avg else
+                f"Revenue Ks {float(form.revenue or 0):,.0f} on {report_date.isoformat()} "
+                f"flagged as a revenue anomaly — please review.",
                 link=f"/admin/business-unit/{user.business_unit_id}",
             )
 

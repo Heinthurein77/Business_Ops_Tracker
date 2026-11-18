@@ -3,8 +3,13 @@
 
 Run once daily from cron on the server, e.g.:
 
-    # 8:30 AM every day (server time), inside the running container:
-    30 8 * * * cd ~/business-ops-tracker && docker compose -f docker-compose.prod.yml exec -T app python -m src.jobs.scheduled_alerts >> ~/bot-alerts.log 2>&1
+    # 4:00 PM every day (server time), inside the running container:
+    0 16 * * * cd ~/business-ops-tracker && docker compose -f docker-compose.prod.yml exec -T app python -m src.jobs.scheduled_alerts >> ~/bot-alerts.log 2>&1
+
+PM-2: the missing-report reminder runs at MISSING_REPORT_HOUR (16:00,
+src/services/ops_alerts.py) — the old 08:30 run fired before almost any
+CEO had submitted. The job also refuses to send missing-report
+reminders before that hour, so a stray early run is a no-op, not noise.
 
 All three checks are idempotent/throttled in src/services/ops_alerts.py:
 - Missing reports: one notification per CEO per run for today's missing report.
@@ -18,9 +23,12 @@ everyone, since nothing monitors that file.
 import logging
 import sys
 
+from src.constants import NotificationType
 from src.database import SessionLocal
 from src.models import Notification, User
 from src.services.ops_alerts import (
+    MISSING_REPORT_HOUR,
+    missing_report_due,
     run_check_document_expiry,
     run_remind_action_items,
     run_remind_missing_reports,
@@ -39,7 +47,7 @@ def _notify_failure(db, exc: Exception) -> None:
             User.role.in_(["Chairman", "HO"]), User.is_active == True).all()  # noqa: E712
         for recipient in recipients:
             db.add(Notification(
-                user_id=recipient.id, type="alert",
+                user_id=recipient.id, type=NotificationType.ALERT,
                 title="Scheduled alerts failed",
                 message=f"scheduled_alerts failed: {exc}",
                 link="/admin/daily-ops"))
@@ -53,7 +61,12 @@ def _notify_failure(db, exc: Exception) -> None:
 def main() -> int:
     db = SessionLocal()
     try:
-        reminded = run_remind_missing_reports(db)
+        # PM-2: missing-report reminders only at/after MISSING_REPORT_HOUR.
+        if missing_report_due():
+            reminded = run_remind_missing_reports(db)
+        else:
+            reminded = 0
+            print(f"missing-report reminders skipped: before {MISSING_REPORT_HOUR:02d}:00 local time")
         expiry = run_check_document_expiry(db, days=30)
         actions = run_remind_action_items(db)
         print(f"missing-report reminders sent: {reminded}")

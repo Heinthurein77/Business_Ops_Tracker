@@ -184,6 +184,14 @@ class DailyFinancial(Base):
     # Stored (not computed at read time) so the flag survives resubmission
     # edits and is visible to every review view that reads the row.
     revenue_anomaly = Column(Boolean, default=False, nullable=False)
+    # PM-6: sticky-anomaly review state. A resubmit must NOT silently
+    # clear an unreviewed anomaly: the flag stays set until a Chairman/HO
+    # reviewer explicitly acknowledges it via POST
+    # /api/admin/business-unit/{bu_id}/anomaly/review, which stamps
+    # reviewed_at/reviewed_by. A later resubmit recomputes the flag only
+    # once it has been reviewed.
+    revenue_anomaly_reviewed_at = Column(DateTime, nullable=True)
+    revenue_anomaly_reviewed_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     other_notes = Column(Text, nullable=True)
     submitted_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
@@ -586,7 +594,7 @@ class Notification(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    type = Column(String(40), nullable=False, index=True)  # missing_report/help_resolved/action_assigned/action_due/document_expiry/alert
+    type = Column(String(40), nullable=False, index=True)  # missing_report/help_resolved/action_assigned/action_due/document_expiry/login_lockout/alert
     title = Column(String(200), nullable=False)
     message = Column(Text, nullable=True)
     link = Column(String(300), nullable=True)

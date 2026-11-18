@@ -346,8 +346,10 @@ def test_forgot_password_same_response_everywhere(auth_db):
     db = auth_db
     expected = {
         "ok": True,
+        # PM-19: reworded — there is no delivery channel; the Chairman
+        # shares the temp password out-of-band once approved.
         "message": ("If this account exists, a reset request has been sent to the Chairman. "
-                    "You will receive a temporary password once it is approved."),
+                    "Ask the Chairman — they will share a temporary password with you once approved."),
     }
     for username in ("nobody", "chairman", "mallory", "alice"):
         out = forgot_password(ForgotPasswordRequest(username=username),
@@ -535,6 +537,10 @@ def alerts_db(db):
 
 def _run_job(monkeypatch, session2):
     monkeypatch.setattr(scheduled_alerts, "SessionLocal", lambda: session2)
+    # PM-2: the job only sends missing-report reminders at/after
+    # MISSING_REPORT_HOUR (16:00 Yangon); these tests exercise the
+    # reminder logic itself, so run as if the hour has arrived.
+    monkeypatch.setattr(scheduled_alerts, "missing_report_due", lambda now=None: True)
     return scheduled_alerts.main()
 
 
@@ -585,6 +591,9 @@ def test_scheduled_alerts_document_expiry(monkeypatch, alerts_db):
 
 def test_scheduled_alerts_failure_returns_one(monkeypatch, alerts_db):
     db, session2 = alerts_db
+    # PM-2: run as if the 16:00 hour has arrived, otherwise main()
+    # skips the missing-report step and returns 0.
+    monkeypatch.setattr(scheduled_alerts, "missing_report_due", lambda now=None: True)
     monkeypatch.setattr(scheduled_alerts, "run_remind_missing_reports",
                         lambda db: (_ for _ in ()).throw(RuntimeError("db down")))
     monkeypatch.setattr(scheduled_alerts, "SessionLocal", lambda: session2)

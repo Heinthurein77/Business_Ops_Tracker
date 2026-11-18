@@ -160,6 +160,28 @@ export default function HealthDashboardPage() {
           </section>
         </div>
 
+        {/* PM-m2: Head Office health — was excluded from this dashboard
+            (CEO-only), even though HO submits health daily. */}
+        {data.ho_health && (
+          <section className={`${GLASS} overflow-hidden`}>
+            <div className="p-6 border-b border-slate-200/70 dark:border-slate-800 flex items-center justify-between flex-wrap gap-4">
+              <div>
+                <p className="text-[10.5px] font-bold uppercase tracking-[0.12em] text-brand-600 dark:text-brand-400 mb-1">Head Office</p>
+                <h2 className="font-bold text-slate-900 dark:text-slate-100 tracking-tight text-lg">HO Staff Health</h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Latest Head Office health check-in{data.ho_health.submitted_today ? ' — submitted today' : ' — not submitted today'}</p>
+              </div>
+              <span className={`w-2.5 h-2.5 rounded-full ${RISK_DOT[data.ho_health.risk]}`} />
+            </div>
+            <div className="p-6 grid sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
+              <div className="bg-white dark:bg-slate-900 rounded-lg px-3 py-2.5"><p className="text-slate-500 dark:text-slate-400">Heart Rate</p><p className="font-semibold text-slate-800 dark:text-slate-200 text-sm">{data.ho_health.heart_rate != null ? `${data.ho_health.heart_rate} bpm` : '—'}</p></div>
+              <div className="bg-white dark:bg-slate-900 rounded-lg px-3 py-2.5"><p className="text-slate-500 dark:text-slate-400">Sleep Time</p><p className="font-semibold text-slate-800 dark:text-slate-200 text-sm">{data.ho_health.sleep_hours != null ? `${data.ho_health.sleep_hours} hrs` : '—'}</p></div>
+              <div className="bg-white dark:bg-slate-900 rounded-lg px-3 py-2.5"><p className="text-slate-500 dark:text-slate-400">Blood Pressure</p><p className="font-semibold text-slate-800 dark:text-slate-200 text-sm">{data.ho_health.bp_systolic != null && data.ho_health.bp_diastolic != null ? `${data.ho_health.bp_systolic}/${data.ho_health.bp_diastolic} mmHg` : '—'}</p></div>
+              <div className="bg-white dark:bg-slate-900 rounded-lg px-3 py-2.5"><p className="text-slate-500 dark:text-slate-400">Step Counter</p><p className="font-semibold text-slate-800 dark:text-slate-200 text-sm">{data.ho_health.daily_steps != null ? `${data.ho_health.daily_steps.toLocaleString()} / ${DAILY_STEP_GOAL.toLocaleString()}` : '—'}</p></div>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 sm:col-span-2 lg:col-span-4">Reported {data.ho_health.reported_display} · {data.ho_health.report_date}</p>
+            </div>
+          </section>
+        )}
+
         <section className={`${GLASS} overflow-hidden`}>
           <div className="p-6 border-b border-slate-200/70 dark:border-slate-800 flex items-center justify-between flex-wrap gap-4">
             <div>

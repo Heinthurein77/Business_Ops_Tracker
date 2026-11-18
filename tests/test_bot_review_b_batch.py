@@ -439,6 +439,9 @@ class TestJobFailureBlindness:
         session.commit()
         session.close()
         monkeypatch.setattr(scheduled_alerts, "SessionLocal", sessionmaker(bind=engine))
+        # PM-2: the job skips the missing-report step before
+        # MISSING_REPORT_HOUR — force it due so the failing run is reached.
+        monkeypatch.setattr(scheduled_alerts, "missing_report_due", lambda: True)
         monkeypatch.setattr(scheduled_alerts, "run_remind_missing_reports",
                             lambda db: (_ for _ in ()).throw(RuntimeError("boom")))
         with caplog.at_level("ERROR", logger="src.jobs.scheduled_alerts"):
@@ -711,7 +714,9 @@ class TestSecurityLogPagination:
 # ------------------------------------------------------------------ m-19
 
 class TestScheduledAlertsCronRetry:
-    def test_0830_line_retries_once_after_a_short_sleep(self):
+    def test_1600_line_retries_once_after_a_short_sleep(self):
+        # PM-2: the scheduled_alerts line moved 08:30 -> 16:00 (the old
+        # 08:30 run fired before almost any CEO had submitted).
         from pathlib import Path
         repo = Path(__file__).resolve().parents[1]
         lines = [l for l in (repo / "deploy" / "crontab").read_text().splitlines()
@@ -719,7 +724,7 @@ class TestScheduledAlertsCronRetry:
         alerts = [l for l in lines if "scheduled_alerts" in l and "bot-alerts.lock" in l]
         assert len(alerts) == 1
         line = alerts[0]
-        assert line.startswith("30 8 * * * ")
+        assert line.startswith("0 16 * * * ")
         # One retry: the job is invoked twice, the second after a sleep.
         assert line.count("python -m src.jobs.scheduled_alerts") == 2
         assert "sleep 60" in line

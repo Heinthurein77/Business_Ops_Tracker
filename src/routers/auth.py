@@ -26,7 +26,7 @@ from src.auth import (
     warn_null_bu_ceo,
 )
 from src.client_ip import get_client_ip
-from src.constants import Role
+from src.constants import NotificationType, Role
 from src.config import settings
 from src.database import get_db
 from src.models import PasswordResetRequest, User
@@ -56,7 +56,7 @@ from src.throttle import (
     check_password_change_throttle,
     normalize_username,
 )
-from src.utils import log_audit, utcnow
+from src.utils import log_audit, notify, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ _FORGOT_PASSWORD_RESPONSE = {
     "ok": True,
     "message": (
         "If this account exists, a reset request has been sent to the Chairman. "
-        "You will receive a temporary password once it is approved."
+        "Ask the Chairman — they will share a temporary password with you once approved."
     ),
 }
 _RESETTABLE_USERNAME = re.compile(r"[a-z0-9_]{1,80}")
@@ -143,6 +143,18 @@ def login(payload: LoginRequest, request: Request, response: Response, db: Sessi
         raise HTTPException(status_code=401, detail=_LOGIN_FAILED_DETAIL)
 
     password_ok = verify_password(payload.password, user.hashed_password if user else _DUMMY_HASH)
+    # PM-20: an expired Chairman-issued temporary password gets its own
+    # message instead of the generic "wrong password" — the user can
+    # otherwise retry forever assuming a typo. This deliberately reveals
+    # that the account exists and its temp password lapsed (accepted
+    # trade-off, per the PM review); it fires only when the password
+    # itself was correct.
+    if user and user.is_active and password_ok and is_temp_password_expired(user):
+        log_audit(db, user, "LOGIN_FAILED", f"username={username}", request, username=username)
+        raise HTTPException(
+            status_code=401,
+            detail="Your temporary password has expired — ask the Chairman for a new one",
+        )
     # An expired Chairman-issued temporary password is a wrong password: same
     # generic 401, same code path and timing as any other failure.
     if not user or not user.is_active or not password_ok or is_temp_password_expired(user):
@@ -279,8 +291,20 @@ def forgot_password(payload: ForgotPasswordRequest, request: Request, db: Sessio
     user, pending = _find_requestable_user(db, username)
 
     try:
+        created = False
         if user is not None and not state.throttled:
-            _open_reset_request(db, user, pending)
+            created = _open_reset_request(db, user, pending)
+        if created:
+            # PM-7: the Chairman only learned of a reset request by
+            # opening Manage Users. Notify every active Chairman now
+            # (link /admin/users), reusing the existing bell.
+            for chairman in db.query(User).filter(User.role == Role.CHAIRMAN, User.is_active == True).all():  # noqa: E712
+                notify(
+                    db, chairman.id, NotificationType.ALERT,
+                    f"Password reset requested: {user.username}",
+                    f"{user.username} asked for a password reset — approve or reject it in User Management.",
+                    link="/admin/users",
+                )
         if state.record_audit:
             log_audit(db, None, PASSWORD_RESET_REQUESTED, "", request, username=username)  # commits both rows
         else:
