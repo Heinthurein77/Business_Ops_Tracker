@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.auth import assert_token_current, require_roles
+from src.constants import Role
 from src.config import settings
 from src.database import get_db
 from src.models import (
@@ -71,7 +72,7 @@ ALLOWED_ATTACHMENT_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "gif", "webp", "do
 logger = logging.getLogger(__name__)
 
 @router.get("/dashboard")
-def ho_dashboard(user: User = Depends(require_roles("HO")), db: Session = Depends(get_db)):
+def ho_dashboard(user: User = Depends(require_roles(Role.HO)), db: Session = Depends(get_db)):
     report_date = today_local()
 
     financial = db.query(HeadOfficeDailyFinancial).filter(HeadOfficeDailyFinancial.report_date == report_date).first()
@@ -218,7 +219,7 @@ def ho_dashboard(user: User = Depends(require_roles("HO")), db: Session = Depend
 
 
 @router.get("/monthly-target")
-def get_monthly_target(month: str = "", user: User = Depends(require_roles("HO")), db: Session = Depends(get_db)):
+def get_monthly_target(month: str = "", user: User = Depends(require_roles(Role.HO)), db: Session = Depends(get_db)):
     """Fetches the target already set for the given month (default: current
     month) — mirrors /api/ceo/monthly-target so the "Set Monthly Target" form
     can pre-fill the same way."""
@@ -245,7 +246,7 @@ def get_monthly_target(month: str = "", user: User = Depends(require_roles("HO")
 def set_monthly_target(
     payload: MonthlyTargetRequest,
     request: Request,
-    user: User = Depends(require_roles("HO")),
+    user: User = Depends(require_roles(Role.HO)),
     db: Session = Depends(get_db),
 ):
     """Sets Head Office's monthly target for the given month — but only once,
@@ -322,7 +323,7 @@ def submit_report(
     golf_flag: str = Form("false"),
     social_other_notes: str = Form(""),
     attachment: Optional[UploadFile] = File(None),
-    user: User = Depends(require_roles("HO")),
+    user: User = Depends(require_roles(Role.HO)),
     db: Session = Depends(get_db),
 ):
     # Deliberately a plain `def`, not `async def`: everything below is blocking

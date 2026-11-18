@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.auth import get_current_user, require_roles
+from src.constants import ACTION_ITEM_STATUSES, NotificationType, Role
 from src.services.ops_alerts import (  # noqa: F401 - re-exported for callers/tests
     _action_item_link,
     run_check_document_expiry,
@@ -45,7 +46,7 @@ from src.models import (
 )
 
 router = APIRouter(prefix="/api/ops", tags=["ops"])
-require_admin = require_roles("Chairman", "HO")
+require_admin = require_roles(Role.CHAIRMAN, Role.HO)
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +163,7 @@ def bu_scope(user: User, bu_id: Optional[int]) -> Optional[int]:
     """Resolve which BU the caller may touch. CEOs are pinned to their own:
     naming another BU is a 403, naming none means their own BU.
     Chairman/HO may name any BU (or none, for all)."""
-    if user.role == "CEO":
+    if user.role == Role.CEO:
         if bu_id is not None and bu_id != user.business_unit_id:
             raise HTTPException(403, "CEOs can only access their own business unit")
         return user.business_unit_id
@@ -233,7 +234,7 @@ def _validate_assignee(db: Session, user: User, assigned_to_id: Optional[int]) -
         raise HTTPException(400, "Assigned user does not exist")
     if not assignee.is_active:
         raise HTTPException(400, "Assigned user is not active")
-    if user.role == "CEO" and assignee.business_unit_id != user.business_unit_id:
+    if user.role == Role.CEO and assignee.business_unit_id != user.business_unit_id:
         raise HTTPException(400, "Assignee must be in your business unit")
     return assignee
 
@@ -265,7 +266,7 @@ def create_action_item(payload: ActionItemIn, request: Request = None, user: Use
     db.commit()
     db.refresh(item)
     if item.assigned_to_id and item.assigned_to_id != user.id:
-        notify(db, item.assigned_to_id, "action_assigned",
+        notify(db, item.assigned_to_id, NotificationType.ACTION_ASSIGNED,
                "New action item assigned", item.title, link=_action_item_link(assignee))
         db.commit()
     _log_audit(db, user, "CREATE_ACTION_ITEM", f"id={item.id}")
@@ -292,7 +293,7 @@ def update_action_item(item_id: int, payload: ActionItemUpdate, user: User = Dep
         raise HTTPException(404, "Action item not found")
     bu_scope(user, item.business_unit_id)
     if payload.status is not None:
-        if payload.status not in ("pending", "in_progress", "done"):
+        if payload.status not in ACTION_ITEM_STATUSES:
             raise HTTPException(400, "Invalid status")
         item.status = payload.status
         item.completed_at = utcnow() if payload.status == "done" else None
@@ -422,7 +423,7 @@ def view_upload(key: str = Query(...), user: User = Depends(get_current_user),
                 break
         if profile_owner_id is None:
             raise HTTPException(404, "Attachment not found")
-        if user.role not in ("Chairman", "HO") and profile_owner_id != user.id:
+        if user.role not in (Role.CHAIRMAN, Role.HO) and profile_owner_id != user.id:
             raise HTTPException(403, "Not your profile photo")
     else:
         for bu_id, stored_url in db.query(
@@ -438,14 +439,14 @@ def view_upload(key: str = Query(...), user: User = Depends(get_current_user),
                     HeadOfficeActivityLog.document_url.isnot(None)).all()
             )
             if ho_found:
-                if user.role not in ("Chairman", "HO"):
+                if user.role not in (Role.CHAIRMAN, Role.HO):
                     raise HTTPException(403, "Only Chairman/HO can view head-office attachments")
             else:
                 raise HTTPException(404, "Attachment not found")
         # m-26: fail closed — the old `and user.business_unit_id`
         # condition skipped the 403 entirely for a NULL-BU CEO. A CEO
         # whose BU is unset now matches nothing, instead of everything.
-        if owner_bu_id is not None and user.role == "CEO":
+        if owner_bu_id is not None and user.role == Role.CEO:
             if owner_bu_id != user.business_unit_id:
                 raise HTTPException(403, "Attachment belongs to another business unit")
     # M-04: record who viewed which attachment (key only, never contents).

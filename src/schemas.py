@@ -9,6 +9,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from src.constants import Role
+
 # bcrypt only reads the first 72 BYTES of a password and silently ignores the
 # rest, so a longer "password" would be weaker than it looks; the floor is a
 # minimum length rather than a composition rule.
@@ -225,7 +227,7 @@ class CreateUserRequest(BaseModel):
         # Chairman is deliberately not creatable here — there's exactly one,
         # seeded at boot; adding another is a code change, not a self-service
         # admin action.
-        if value not in ("CEO", "HO"):
+        if value not in (Role.CEO, Role.HO):
             raise ValueError('role must be "CEO" or "HO"')
         return value
 

@@ -9,6 +9,7 @@ from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
 from src.config import settings
+from src.constants import Role
 from src.database import get_db
 from src.models import PasswordHistory, User
 from src.utils import utcnow
@@ -61,9 +62,9 @@ _PROFILE_SETUP_EXEMPT_PATHS = {
 
 
 def role_home_path(role: str) -> str:
-    if role == "CEO":
+    if role == Role.CEO:
         return "/ceo"
-    if role in ("Chairman", "HO"):
+    if role in (Role.CHAIRMAN, Role.HO):
         return "/admin"
     return "/login"
 
@@ -75,7 +76,7 @@ def resolve_redirect_path(user: User) -> str:
     then an incomplete CEO profile, then the user's normal role home."""
     if user.require_password_change:
         return "/force-password-change"
-    if user.role == "CEO" and not user.is_profile_completed:
+    if user.role == Role.CEO and not user.is_profile_completed:
         return "/profile-setup"
     return role_home_path(user.role)
 
@@ -200,7 +201,7 @@ def warn_null_bu_ceo(user: User) -> None:
     silently skip the cross-BU owner check in /api/ops/uploads/view.
     Warning only — the request still proceeds so a data glitch
     can never lock a CEO out of the whole system."""
-    if user.role == "CEO" and user.business_unit_id is None:
+    if user.role == Role.CEO and user.business_unit_id is None:
         logger.warning(
             "CEO user %s (id=%s) resolved with NULL business_unit_id — "
             "expected every CEO to belong to a business unit",
@@ -274,7 +275,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
         return user
 
     if (
-        user.role == "CEO"
+        user.role == Role.CEO
         and not user.is_profile_completed
         and request.url.path not in _PROFILE_SETUP_EXEMPT_PATHS
     ):
@@ -290,9 +291,15 @@ def get_optional_user(request: Request, db: Session = Depends(get_db)) -> Option
     return _user_from_token(request, db)
 
 
-def require_roles(*roles: str):
+def require_roles(*roles: Role | str):
+    # NOTE: the dependency below must keep closing over the parameter named
+    # `roles` (not a normalised copy): tests/test_auth_matrix.py reads the
+    # role gate off that closure variable to cross-check docs/auth-model.md.
+    # Role members compare/hash equal to their plain-string values, so the
+    # matrix sees "Chairman"/"CEO"/"HO" either way.
     def dependency(user: User = Depends(get_current_user)) -> User:
-        if user.role not in roles:
+        allowed = {r.value if isinstance(r, Role) else r for r in roles}
+        if user.role not in allowed:
             raise InsufficientRoleException(redirect_to=role_home_path(user.role))
         return user
 

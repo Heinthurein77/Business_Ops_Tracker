@@ -23,6 +23,7 @@ from sqlalchemy import case, func
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.config import settings
+from src.constants import Role
 from src.models import ActivityLog, AuditLog, BusinessUnit, CeoProfile, DailyFinancial, HeadOfficeDailyFinancial, HealthStatus, JobHeartbeat, MonthlyTarget, Notification, SocialLog, User
 
 APP_TZ = ZoneInfo(settings.APP_TIMEZONE)
@@ -199,7 +200,7 @@ def bu_lookup_maps(db):
     bu_by_id = {bu.id: bu for bu in business_units}
     ceo_by_bu = {
         u.business_unit_id: u
-        for u in db.query(User).filter(User.role == "CEO", User.is_active == True).order_by(User.id).all()  # noqa: E712
+        for u in db.query(User).filter(User.role == Role.CEO, User.is_active == True).order_by(User.id).all()  # noqa: E712
     }
     return business_units, bu_by_id, ceo_by_bu
 

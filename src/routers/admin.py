@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.auth import require_roles
+from src.constants import NotificationType, Role
 from src.database import get_db
 from src.models import (
     ActivityLog,
@@ -70,7 +71,7 @@ from src.utils import (
 )
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
-require_admin = require_roles("Chairman", "HO")
+require_admin = require_roles(Role.CHAIRMAN, Role.HO)
 # Chairman-only: HO Staff is included in require_admin for its own oversight
 # pages, but must not be able to reach the escape-hatch override for its own
 # monthly target — that would let it bypass the once-a-month lock enforced by
@@ -78,7 +79,7 @@ require_admin = require_roles("Chairman", "HO")
 # up for an HO viewer (see HeadOfficePage.jsx's isHo branch), but that's not
 # real enforcement — a direct API call could still hit it, so the lock has to
 # live here too.
-require_chairman = require_roles("Chairman")
+require_chairman = require_roles(Role.CHAIRMAN)
 
 
 def pct_change(current: float, previous: float) -> Optional[float]:
@@ -621,7 +622,7 @@ def business_unit_detail(bu_id: int, user: User = Depends(require_admin), db: Se
     # deactivated predecessor must not shadow the current CEO.
     ceo_user = (
         db.query(User)
-        .filter(User.business_unit_id == bu_id, User.role == "CEO", User.is_active == True)  # noqa: E712
+        .filter(User.business_unit_id == bu_id, User.role == Role.CEO, User.is_active == True)  # noqa: E712
         .order_by(User.id.desc())
         .first()
     )
@@ -790,7 +791,7 @@ def head_office_report(user: User = Depends(require_admin), db: Session = Depend
         for t in db.query(HeadOfficeMonthlyTarget).filter(HeadOfficeMonthlyTarget.target_month.in_(target_months)).all():
             targets_by_month[t.target_month] = t
 
-    ho_staff = db.query(User).filter(User.role == "HO").order_by(User.id).first()
+    ho_staff = db.query(User).filter(User.role == Role.HO).order_by(User.id).first()
 
     return {
         "today": today.isoformat(),
@@ -1002,7 +1003,7 @@ def report_logs(limit: int = 200, offset: int = 0,
                 # AuditLog.username is the name captured at write time - the
                 # fallback once the user row itself is gone.
                 "username": submitter.username if submitter else (audit.username or "(deleted user)"),
-                "bu_code": "HO" if is_ho else (bu.code if bu else "-"),
+                "bu_code": Role.HO.value if is_ho else (bu.code if bu else "-"),
                 "bu_name": "Head Office" if is_ho else (bu.name if bu else "-"),
                 # Absent entirely on a day's first submission (nothing to
                 # diff against yet, see submit_report in ceo.py/ho.py) —
@@ -1151,7 +1152,7 @@ def ceo_profiles(user: User = Depends(require_admin), db: Session = Depends(get_
     Admin Dashboard to look one up at a time."""
     ceos = (
         db.query(User)
-        .filter(User.role == "CEO", User.is_active == True)  # noqa: E712
+        .filter(User.role == Role.CEO, User.is_active == True)  # noqa: E712
         .order_by(User.business_unit_id, User.id)
         .all()
     )
@@ -1202,7 +1203,7 @@ def ceo_activity_calendar(
 
     ceo_user = (
         db.query(User)
-        .filter(User.business_unit_id == business_unit.id, User.role == "CEO", User.is_active == True)  # noqa: E712
+        .filter(User.business_unit_id == business_unit.id, User.role == Role.CEO, User.is_active == True)  # noqa: E712
         .first()
     )
     return {
@@ -1427,7 +1428,7 @@ def resolve_help_request(
             f"({log.report_date.strftime('%d %b %Y')})"
         )[:200]
         notify(
-            db, log.submitted_by, "help_resolved", title, response_text,
+            db, log.submitted_by, NotificationType.HELP_RESOLVED, title, response_text,
             link=f"/ceo?date={log.report_date.isoformat()}",
         )
     db.commit()
@@ -1478,7 +1479,7 @@ def ceo_monthly_summary(
 
     ceo_user = (
         db.query(User)
-        .filter(User.business_unit_id == business_unit.id, User.role == "CEO", User.is_active == True)  # noqa: E712
+        .filter(User.business_unit_id == business_unit.id, User.role == Role.CEO, User.is_active == True)  # noqa: E712
         .first()
     )
 
@@ -1991,7 +1992,7 @@ from pydantic import BaseModel as _BaseModel, Field as _Field  # noqa: E402
 
 def _serialize_bu_admin(db: Session, bu: BusinessUnit) -> dict:
     user_count = db.query(User).filter(User.business_unit_id == bu.id).count()
-    ceo = db.query(User).filter(User.business_unit_id == bu.id, User.role == "CEO",
+    ceo = db.query(User).filter(User.business_unit_id == bu.id, User.role == Role.CEO,
                                 User.is_active == True).first()  # noqa: E712
     return {
         "id": bu.id, "code": bu.code, "name": bu.name,

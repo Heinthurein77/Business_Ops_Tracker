@@ -26,6 +26,7 @@ from src.auth import (
     warn_null_bu_ceo,
 )
 from src.client_ip import get_client_ip
+from src.constants import Role
 from src.config import settings
 from src.database import get_db
 from src.models import PasswordResetRequest, User
@@ -154,7 +155,7 @@ def login(payload: LoginRequest, request: Request, response: Response, db: Sessi
     # Chairman may not sign in at all without an enrolled TOTP: a correct
     # password alone earns only a short-lived setup token, and the caller
     # must complete enrollment (below) before a session exists.
-    if user.role == "Chairman" and not user.totp_enabled:
+    if user.role == Role.CHAIRMAN and not user.totp_enabled:
         return JSONResponse(
             status_code=403,
             content={
@@ -176,7 +177,7 @@ def login(payload: LoginRequest, request: Request, response: Response, db: Sessi
     # owner check), the same warning get_current_user emits per request.
     warn_null_bu_ceo(user)
     log_audit(db, user, "LOGIN_SUCCESS", "", request)
-    if user.role == "Chairman":
+    if user.role == Role.CHAIRMAN:
         # m-17: the bootstrap password file has served its purpose once
         # the Chairman signs in — delete it so the credential stops
         # existing on disk. Local import: main.py imports this router, so
@@ -233,7 +234,7 @@ def _find_requestable_user(db: Session, username: str):
     if _RESETTABLE_USERNAME.fullmatch(username):
         user = db.query(User).filter(User.username == username).first()
     pending = _pending_reset_request(db, user.id if user else 0)
-    if not user or not user.is_active or user.role == "Chairman":
+    if not user or not user.is_active or user.role == Role.CHAIRMAN:
         # The Chairman has nobody above him to approve a request; his
         # recovery is the out-of-band `python -m src.scripts.reset_chairman`.
         return None, None

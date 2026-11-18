@@ -586,7 +586,7 @@ class Notification(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    type = Column(String(40), nullable=False, index=True)  # missing_report/action_assigned/action_due/document_expiry/alert
+    type = Column(String(40), nullable=False, index=True)  # missing_report/help_resolved/action_assigned/action_due/document_expiry/alert
     title = Column(String(200), nullable=False)
     message = Column(Text, nullable=True)
     link = Column(String(300), nullable=True)

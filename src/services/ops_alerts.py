@@ -12,6 +12,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
+from src.constants import ACTION_ITEM_OPEN_STATUSES, NotificationType, Role
 from src.models import ActionItem, BusinessUnit, DailyFinancial, LicenseDocument, Notification, User
 from src.utils import APP_TZ, clamp_days, notify, today_local, utcnow
 
@@ -21,7 +22,7 @@ def _action_item_link(assignee: Optional[User]) -> str:
     sees their items on /ceo (CeoOpsSection on the CEO dashboard);
     Chairman/HO use /admin/daily-ops. The old '/admin' link bounced a
     CEO to their home page — /admin is Chairman/HO-only."""
-    if assignee is not None and assignee.role == "CEO":
+    if assignee is not None and assignee.role == Role.CEO:
         return "/ceo"
     return "/admin/daily-ops"
 
@@ -40,19 +41,19 @@ def run_remind_missing_reports(db: Session) -> int:
     submitted_bu_ids = {
         row[0] for row in db.query(DailyFinancial.business_unit_id).filter(DailyFinancial.report_date == today).all()
     }
-    ceos = db.query(User).filter(User.role == "CEO", User.is_active == True).all()  # noqa: E712
+    ceos = db.query(User).filter(User.role == Role.CEO, User.is_active == True).all()  # noqa: E712
     sent = 0
     for ceo in ceos:
         if ceo.business_unit_id and ceo.business_unit_id not in submitted_bu_ids:
             already = db.query(Notification).filter(
                 Notification.user_id == ceo.id,
-                Notification.type == "missing_report",
+                Notification.type == NotificationType.MISSING_REPORT,
                 Notification.created_at >= day_start_utc,
             ).first()
             if already is not None:
                 continue
             notify(
-                db, ceo.id, "missing_report",
+                db, ceo.id, NotificationType.MISSING_REPORT,
                 "Report not submitted today",
                 "Please submit today's business performance report.",
                 link="/ceo",
@@ -70,7 +71,7 @@ def run_remind_action_items(db: Session) -> dict:
     to notify."""
     today = today_local()
     items = db.query(ActionItem).filter(
-        ActionItem.status.in_(["pending", "in_progress"]),
+        ActionItem.status.in_(ACTION_ITEM_OPEN_STATUSES),
         ActionItem.due_date.is_not(None),
         ActionItem.due_date <= today,
         ActionItem.assigned_to_id.is_not(None),
@@ -92,7 +93,7 @@ def run_remind_action_items(db: Session) -> dict:
         else:
             title = f"Action item due today: {item.title}"
             message = f"'{item.title}' ({bu_name}) is due today ({item.due_date.isoformat()})."
-        notify(db, assignee.id, "action_due", title, message, link=_action_item_link(assignee))
+        notify(db, assignee.id, NotificationType.ACTION_DUE, title, message, link=_action_item_link(assignee))
         item.reminder_sent_at = utcnow()
         sent += 1
     db.commit()
@@ -108,7 +109,7 @@ def run_check_document_expiry(db: Session, days: int = 30) -> dict:
     horizon = today + timedelta(days=days)
     docs = db.query(LicenseDocument).filter(
         LicenseDocument.expiry_date >= today, LicenseDocument.expiry_date <= horizon).all()
-    admins = db.query(User).filter(User.role.in_(["Chairman", "HO"]), User.is_active == True).all()  # noqa: E712
+    admins = db.query(User).filter(User.role.in_([Role.CHAIRMAN, Role.HO]), User.is_active == True).all()  # noqa: E712
     sent = 0
     for d in docs:
         if d.expiry_notified_at and d.expiry_notified_at > utcnow() - timedelta(days=7):
@@ -118,13 +119,13 @@ def run_check_document_expiry(db: Session, days: int = 30) -> dict:
         days_left = (d.expiry_date - today).days
         title = f"Document expiring: {d.title} ({bu_name})"
         message = f"{d.document_type} expires in {days_left} days ({d.expiry_date.isoformat()})."
-        ceos = db.query(User).filter(User.role == "CEO", User.business_unit_id == d.business_unit_id, User.is_active == True).all()  # noqa: E712
+        ceos = db.query(User).filter(User.role == Role.CEO, User.business_unit_id == d.business_unit_id, User.is_active == True).all()  # noqa: E712
         seen = set()
         for u in admins + ceos:
             if u.id in seen:
                 continue
             seen.add(u.id)
-            notify(db, u.id, "document_expiry", title, message, link="/admin/daily-ops")
+            notify(db, u.id, NotificationType.DOCUMENT_EXPIRY, title, message, link="/admin/daily-ops")
             sent += 1
         d.expiry_notified_at = utcnow()
     db.commit()

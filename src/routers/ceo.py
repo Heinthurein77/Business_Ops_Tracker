@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.auth import assert_token_current, require_roles, resolve_redirect_path
+from src.constants import NotificationType, Role
 from src.config import settings
 from src.database import get_db
 from src.models import ActivityLog, BusinessUnit, CeoProfile, DailyFinancial, FinancialNote, HealthStatus, MonthlyTarget, SocialLog, User
@@ -85,7 +86,7 @@ ALLOWED_PROFILE_PHOTO_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
 def ceo_dashboard(
     month: str = "",
     for_date: str = Query("", alias="date"),
-    user: User = Depends(require_roles("CEO")),
+    user: User = Depends(require_roles(Role.CEO)),
     db: Session = Depends(get_db),
 ):
     report_date = today_local()
@@ -550,7 +551,7 @@ def ceo_dashboard(
 @router.get("/monthly-target")
 def get_monthly_target(
     month: str = "",
-    user: User = Depends(require_roles("CEO")),
+    user: User = Depends(require_roles(Role.CEO)),
     db: Session = Depends(get_db),
 ):
     """Fetches the target already set for the given month (default: current
@@ -583,7 +584,7 @@ def get_monthly_target(
 def set_monthly_target(
     payload: MonthlyTargetRequest,
     request: Request,
-    user: User = Depends(require_roles("CEO")),
+    user: User = Depends(require_roles(Role.CEO)),
     db: Session = Depends(get_db),
 ):
     """Sets this business unit's monthly target for the given month — but only
@@ -639,7 +640,7 @@ def set_monthly_target(
 
 
 @router.get("/profile")
-def get_profile(user: User = Depends(require_roles("CEO")), db: Session = Depends(get_db)):
+def get_profile(user: User = Depends(require_roles(Role.CEO)), db: Session = Depends(get_db)):
     """Fetches the CEO's own mandatory profile — pre-fills the Profile Setup
     form with whatever's already on file (blank fields on first visit)."""
     from sqlalchemy.orm import load_only
@@ -701,7 +702,7 @@ def set_profile(
     address: str = Form(...),
     business_details: Optional[str] = Form(None),
     profile_photo: Optional[UploadFile] = File(None),
-    user: User = Depends(require_roles("CEO")),
+    user: User = Depends(require_roles(Role.CEO)),
     db: Session = Depends(get_db),
 ):
     """Creates or updates the CEO's mandatory profile. Individual Form(...)
@@ -815,7 +816,7 @@ def set_profile(
 
 
 @router.get("/financial-notes")
-def list_financial_notes(user: User = Depends(require_roles("CEO")), db: Session = Depends(get_db)):
+def list_financial_notes(user: User = Depends(require_roles(Role.CEO)), db: Session = Depends(get_db)):
     """This month's Record Notes log for the CEO's own business unit."""
     month_start = date(today_local().year, today_local().month, 1)
     notes = (
@@ -836,7 +837,7 @@ def list_financial_notes(user: User = Depends(require_roles("CEO")), db: Session
 def add_financial_note(
     payload: FinancialNoteRequest,
     request: Request,
-    user: User = Depends(require_roles("CEO")),
+    user: User = Depends(require_roles(Role.CEO)),
     db: Session = Depends(get_db),
 ):
     """Appends one dated entry to this month's Record Notes log — an
@@ -951,7 +952,7 @@ def submit_report(
     golf_flag: str = Form("false"),
     social_other_notes: str = Form(""),
     attachment: Optional[UploadFile] = File(None),
-    user: User = Depends(require_roles("CEO")),
+    user: User = Depends(require_roles(Role.CEO)),
     db: Session = Depends(get_db),
 ):
     # Deliberately a plain `def`, not `async def`: everything below is blocking
@@ -1418,9 +1419,9 @@ def submit_report(
         bu = db.query(BusinessUnit).filter(BusinessUnit.id == user.business_unit_id).first()
         bu_label = bu.name if bu else f"BU {user.business_unit_id}"
         deviation = (float(revenue_val or 0) - anomaly_avg) / anomaly_avg * 100
-        for ho_user in db.query(User).filter(User.role == "HO", User.is_active == True).all():  # noqa: E712
+        for ho_user in db.query(User).filter(User.role == Role.HO, User.is_active == True).all():  # noqa: E712
             notify(
-                db, ho_user.id, "alert",
+                db, ho_user.id, NotificationType.ALERT,
                 f"Revenue anomaly: {bu_label}",
                 f"Revenue Ks {float(revenue_val or 0):,.0f} on {report_date.isoformat()} "
                 f"vs 14-day average Ks {anomaly_avg:,.0f} ({deviation:+.0f}%) — please review.",
@@ -1434,9 +1435,9 @@ def submit_report(
         bu = db.query(BusinessUnit).filter(BusinessUnit.id == user.business_unit_id).first()
         bu_label = bu.name if bu else f"BU {user.business_unit_id}"
         for recipient in db.query(User).filter(
-                User.role.in_(["Chairman", "HO"]), User.is_active == True).all():  # noqa: E712
+                User.role.in_([Role.CHAIRMAN, Role.HO]), User.is_active == True).all():  # noqa: E712
             notify(
-                db, recipient.id, "alert",
+                db, recipient.id, NotificationType.ALERT,
                 f"Backdated report edit: {bu_label}",
                 f"{user.username} resubmitted the {report_date.isoformat()} report for "
                 f"{bu_label} — please review the change.",

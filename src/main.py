@@ -32,6 +32,7 @@ from src.auth import (
     hash_password,
 )
 from src.config import settings
+from src.constants import Role
 from src.database import SessionLocal, engine, probe_engine, verify_pooler_timeouts
 from src.edge import EdgeMiddleware
 from src.models import BusinessUnit, User
@@ -246,7 +247,7 @@ def _ensure_user(db, username, password, role, require_password_change, business
             # CEOs land in the mandatory Profile Setup flow after their first
             # password rotation; Chairman/HO have no profile, so the column
             # default (True) is left as-is for them.
-            is_profile_completed=(role != "CEO"),
+            is_profile_completed=(role != Role.CEO),
         )
     )
 
@@ -355,15 +356,15 @@ def seed_users(db) -> dict:
                      business_unit_id=business_unit_id, full_name=full_name)
         generated[username] = password
 
-    _seed_dev_account("chairman", "Chairman", full_name="Chairman")
-    _seed_dev_account("ho_staff", "HO", full_name="Head Office Staff")
+    _seed_dev_account("chairman", Role.CHAIRMAN, full_name="Chairman")
+    _seed_dev_account("ho_staff", Role.HO, full_name="Head Office Staff")
 
     business_units = {bu.code: bu.id for bu in db.query(BusinessUnit).all()}
     for i in range(1, settings.TOTAL_BUSINESS_UNITS + 1):
         code = f"BU{i}"
         _seed_dev_account(
             f"ceo_bu{i}",
-            "CEO",
+            Role.CEO,
             business_unit_id=business_units.get(code),
             full_name=f"CEO - Business Unit {i}",
         )
