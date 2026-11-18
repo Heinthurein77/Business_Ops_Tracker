@@ -2,11 +2,12 @@
  *
  * The global 401 handler (api/client.js) drops the user to /login when a
  * session ends mid-form. Without this, the form's contents would be gone
- * after re-login. Each form saves its state to localStorage on every
- * change (debounced by the caller via useEffect) and restores it on mount;
- * a successful submit clears it. Keys are namespaced per form; values are
- * plain JSON. Storage failures (private mode, quota) are swallowed — a
- * draft is a convenience, never a blocker.
+ * after re-login. Each form saves its state to localStorage when the
+ * caller asks it to — callers debounce the save (see useDebouncedEffect,
+ * ~400 ms) so typing does not write on every keystroke — and restores it
+ * on mount; a successful submit clears it. Keys are namespaced per form;
+ * values are plain JSON. Storage failures (private mode, quota) are
+ * swallowed — a draft is a convenience, never a blocker.
  */
 
 const PREFIX = 'bot-draft:';

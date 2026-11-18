@@ -21,9 +21,11 @@ import { useEffect, useRef } from 'react';
 const MAX_AUTH_FAILURES = 3;
 const MIN_REFRESH_GAP_MS = 2000;
 
-export default function useRefreshOnFocus(onRefresh) {
+export default function useRefreshOnFocus(onRefresh, enabled = true) {
   const callbackRef = useRef(onRefresh);
   callbackRef.current = onRefresh;
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
   const lastRefreshRef = useRef(0);
   const authFailuresRef = useRef(0);
 
@@ -33,7 +35,7 @@ export default function useRefreshOnFocus(onRefresh) {
     let onFocus;
 
     const maybeRefresh = () => {
-      if (stopped || document.hidden) return;
+      if (stopped || document.hidden || !enabledRef.current) return;
       const now = Date.now();
       if (now - lastRefreshRef.current < MIN_REFRESH_GAP_MS) return;
       if (authFailuresRef.current >= MAX_AUTH_FAILURES) {
