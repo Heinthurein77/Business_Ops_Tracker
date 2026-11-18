@@ -24,6 +24,17 @@
 # still reports it. The skip is logged with a timestamp. New cron lines must follow the same pattern.
 #
 # Times are server time (Asia/Yangon on the VPS).
+#
+# Out-of-band alerting (PM-14): cron mails the output of any failing job
+# to MAILTO, so a dead backup / dead alerts job is noticed instead of
+# living only in ~/bot-*.log on the host. REPLACE the placeholder with
+# the Chairman's (or ops) email address BEFORE installing this crontab —
+# with the placeholder in place, failure mail goes nowhere. This is the
+# minimum: for the machine itself going down, also run a cheap external
+# uptime check pinging /healthz (UptimeRobot / Healthchecks — see the
+# go-live runbook §2C). Telegram alerting for job failures is an open
+# user decision (backlog, not built).
+MAILTO=alerts@example.invalid
 
 # --- scheduled_alerts: missing-report reminders + document/batch expiry
 # alerts. Daily 08:30. Idempotent (one notification per CEO per run,
