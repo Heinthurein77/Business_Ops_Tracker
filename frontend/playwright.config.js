@@ -3,20 +3,23 @@
 // Run from frontend/ with the dev backend running:
 //
 //   cd ~/workspace/business-ops-tracker
-//   rm -f local_dev.db*            # fresh seed: deterministic first logins
-//   ENVIRONMENT=development DATABASE_URL=sqlite:///./local_dev.db \
+//   E2E_DB=/tmp/bot-e2e.db
+//   rm -f "$E2E_DB" .dev_seed_passwords
+//   ENVIRONMENT=development ALLOW_DEV_SEED=true \
+//     ALLOWED_ORIGINS=http://localhost:5173 \
+//     DATABASE_URL="sqlite:///$E2E_DB" \
 //     .venv/bin/python -m uvicorn src.main:app --host 127.0.0.1 --port 8123 &
+//   # Export the random seed passwords from .dev_seed_passwords, then:
 //   cd frontend && npm run dev &  # port 5173 (proxies /api to :8123)
 //   npm run test:e2e
 //
 // The specs log in with the local dev seed accounts (chairman /
-// Chairman123!, ho_staff / HOStaff123!); override with E2E_* env vars
-// (see e2e/helpers.js). The seed marks every account
-// require_password_change, so the first login rotates the password to
-// E2E_ROTATED_PASSWORD (default "E2eRotated123!") — that is why the run
-// needs a fresh local_dev.db. The specs create one throwaway BU
-// accountant per run (username e2e_acct_<timestamp>) and leave it in the
-// dev DB; harmless, and reruns never collide with it.
+// ho_staff / ceo_bu1); their passwords are random per boot and come
+// from E2E_*_PASSWORD env vars (see e2e/helpers.js). The seed marks
+// every account require_password_change, so the first login rotates the
+// password to E2E_ROTATED_PASSWORD (default "E2eRotated123!") — that is
+// why the run needs a fresh scratch DB. The CEO spec completes the
+// seeded CEO's profile over the API; it creates no accounts.
 //
 // The config starts the vite dev server itself (and reuses it if it is
 // already running); the backend must already be up on :8123.
