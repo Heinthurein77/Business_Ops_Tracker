@@ -73,6 +73,10 @@ export default function useDailyReport(config) {
   const loadedRef = useRef(false);
   const [draftRestored, setDraftRestored] = useState(false);
 
+  // load() never throws: on failure it surfaces the error and returns
+  // null, so a manual Refresh click (LastUpdated) can call it bare
+  // without an unhandled rejection. Callers that need to know whether
+  // the reload worked (reloadAfterSave) check the return value.
   const load = useCallback(async () => {
     const cfg = configRef.current;
     setRefreshing(true);
@@ -93,6 +97,9 @@ export default function useDailyReport(config) {
       loadedRef.current = true;
       setUpdatedAt(new Date());
       return payload;
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to load dashboard');
+      return null;
     } finally {
       setRefreshing(false);
     }
@@ -100,10 +107,7 @@ export default function useDailyReport(config) {
   }, []);
 
   useEffect(() => {
-    load().catch((err) => {
-      setRefreshing(false);
-      setError(err instanceof ApiError ? err.message : 'Failed to load dashboard');
-    });
+    load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, loadDeps);
 
@@ -138,10 +142,9 @@ export default function useDailyReport(config) {
   /** Reload after a successful mutation, without letting a reload failure
    * masquerade as a mutation failure (F-m3). */
   async function reloadAfterSave() {
-    try {
-      await load();
-    } catch (err) {
-      setRefreshError(err instanceof ApiError ? err.message : 'Saved, but the page could not be refreshed — reload to see the latest data.');
+    const reloaded = await load();
+    if (!reloaded) {
+      setRefreshError('Saved, but the page could not be refreshed — reload to see the latest data.');
     }
   }
 
