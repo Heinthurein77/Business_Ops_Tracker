@@ -8,6 +8,7 @@ import LastUpdated from '../components/LastUpdated';
 import useRefreshOnFocus from '../hooks/useRefreshOnFocus';
 import { useTheme } from '../context/ThemeContext';
 import { BUDGET_BADGE_CLASS, BUDGET_STATUS_LABEL } from '../utils/quadrantMetrics';
+import { money } from '../utils/format';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
 
 const METRICS = {
@@ -17,9 +18,6 @@ const METRICS = {
   payable: { label: 'Payable', color: '#f97316' },
 };
 
-function formatMoney(v) {
-  return `Ks ${Math.round(v).toLocaleString()}`;
-}
 
 export default function ComparisonPage() {
   const navigate = useNavigate();
@@ -99,7 +97,7 @@ export default function ComparisonPage() {
       yaxis: { labels: { formatter: (v) => 'Ks ' + (v / 1000).toFixed(0) + 'k', style: { colors: '#94a3b8', fontSize: '11px' } } },
       grid: { borderColor: isDark ? '#334155' : '#eef2f7' },
       legend: { show: false },
-      tooltip: { theme: isDark ? 'dark' : 'light', y: { formatter: (v) => formatMoney(v) } },
+      tooltip: { theme: isDark ? 'dark' : 'light', y: { formatter: (v) => money(v) } },
     },
   };
 
@@ -117,7 +115,7 @@ export default function ComparisonPage() {
       yaxis: { labels: { formatter: (v) => 'Ks ' + (v / 1000).toFixed(0) + 'k', style: { colors: '#94a3b8', fontSize: '11px' } } },
       grid: { borderColor: isDark ? '#334155' : '#eef2f7' },
       legend: { position: 'top', horizontalAlign: 'right', fontSize: '12px', labels: { colors: isDark ? '#94a3b8' : '#64748b' } },
-      tooltip: { theme: isDark ? 'dark' : 'light', y: { formatter: (v) => formatMoney(v) } },
+      tooltip: { theme: isDark ? 'dark' : 'light', y: { formatter: (v) => money(v) } },
     },
   };
 
@@ -139,7 +137,7 @@ export default function ComparisonPage() {
       },
       colors: [METRICS[metric].color],
       plotOptions: { bar: { horizontal: true, borderRadius: 3, barHeight: '62%' } },
-      dataLabels: { enabled: true, formatter: (v) => formatMoney(v), style: { fontSize: '10px', colors: [isDark ? '#e2e8f0' : '#1e293b'] }, offsetX: 24 },
+      dataLabels: { enabled: true, formatter: (v) => money(v), style: { fontSize: '10px', colors: [isDark ? '#e2e8f0' : '#1e293b'] }, offsetX: 24 },
       xaxis: { categories: sorted.map((d) => d.code), labels: { formatter: (v) => 'Ks ' + (v / 1000).toFixed(0) + 'k', style: { colors: '#94a3b8', fontSize: '11px' } } },
       yaxis: { labels: { style: { colors: isDark ? '#cbd5e1' : '#475569', fontSize: '11px', fontWeight: 600 } } },
       grid: { borderColor: isDark ? '#334155' : '#eef2f7' },
@@ -150,7 +148,7 @@ export default function ComparisonPage() {
             borderColor: '#94a3b8',
             strokeDashArray: 4,
             label: {
-              text: 'Avg ' + formatMoney(average),
+              text: 'Avg ' + money(average),
               orientation: 'horizontal',
               style: isDark
                 ? { color: '#c7d2fe', background: '#312e81', fontSize: '10px', fontWeight: 600 }
@@ -159,7 +157,7 @@ export default function ComparisonPage() {
           },
         ],
       },
-      tooltip: { theme: isDark ? 'dark' : 'light', y: { formatter: (v) => formatMoney(v) } },
+      tooltip: { theme: isDark ? 'dark' : 'light', y: { formatter: (v) => money(v) } },
     },
   };
 
@@ -260,7 +258,7 @@ export default function ComparisonPage() {
                         <td className="px-4 py-3">
                           <p className="font-semibold text-slate-800 dark:text-slate-200">{d.name}</p>
                         </td>
-                        <td className="px-4 py-3 text-right font-semibold tabular-nums text-slate-700 dark:text-slate-300">{formatMoney(d[metric])}</td>
+                        <td className="px-4 py-3 text-right font-semibold tabular-nums text-slate-700 dark:text-slate-300">{money(d[metric])}</td>
                         <td className={`px-4 py-3 text-right text-xs font-semibold tabular-nums ${delta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>
                           {delta >= 0 ? '+' : ''}
                           {delta.toFixed(1)}%

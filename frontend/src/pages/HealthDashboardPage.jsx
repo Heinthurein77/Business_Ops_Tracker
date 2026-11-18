@@ -1,11 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import Chart from 'react-apexcharts';
 import { api } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import Footer from '../components/Footer';
 import LastUpdated from '../components/LastUpdated';
-import useRefreshOnFocus from '../hooks/useRefreshOnFocus';
 import { useTheme } from '../context/ThemeContext';
 import { DAILY_STEP_GOAL } from '../constants';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
@@ -21,32 +20,9 @@ const RISK_DOT = { red: 'bg-red-500', yellow: 'bg-amber-500', green: 'bg-emerald
 export default function HealthDashboardPage() {
   const { theme } = useTheme();
   const isDark = theme === 'dark';
-  const [data, setData] = useState(null);
-  const [error, setError] = useState('');
-  const [dirSearch, setDirSearch] = useState('');
-  const [dirFilter, setDirFilter] = useState('all');
-  const [historySearch, setHistorySearch] = useState('');
-  // F-12: when the dashboard was last refreshed (LastUpdated, header).
-  const [updatedAt, setUpdatedAt] = useState(null);
-  const [refreshing, setRefreshing] = useState(false);
-
-  const load = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      setData(await api.healthDashboard());
-      setError('');
-      setUpdatedAt(new Date());
-    } catch (err) {
-      setError(err.message || 'Failed to load health dashboard');
-    } finally {
-      setRefreshing(false);
-    }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-
-  // m-09: re-run the load when the tab regains focus (no polling).
-  useRefreshOnFocus(load);
+  // F-M2: shared server-state hook — load/error/refreshing + abort +
+  // refresh-on-focus, instead of the hand-rolled triple.
+  const { data, error, refreshing, refetch, updatedAt } = useApi(() => api.healthDashboard(), []);
 
   const filteredDirectory = useMemo(() => {
     if (!data) return [];
@@ -111,7 +87,7 @@ export default function HealthDashboardPage() {
             <h1 className="font-bold text-slate-900 dark:text-slate-100 text-xl tracking-tight">Health and Fitness</h1>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{data.today_display}</p>
           </div>
-          <LastUpdated updatedAt={updatedAt} onRefresh={load} refreshing={refreshing} />
+          <LastUpdated updatedAt={updatedAt} onRefresh={refetch} refreshing={refreshing} />
         </header>
 
         <div className="grid lg:grid-cols-12 gap-6">

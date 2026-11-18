@@ -1,4 +1,9 @@
 import { DAILY_STEP_GOAL } from '../constants';
+import { money } from './format';
+
+// Canonical money() lives in utils/format.js (F-M5) — re-exported here so
+// existing imports keep working.
+export { money };
 
 // Maps this app's red/yellow/green/grey status vocabulary to the
 // good/warning/critical/unknown vocabulary used by the quadrant card styling
@@ -64,10 +69,6 @@ export const QUADRANT_BADGE_CLASS = {
   unknown: 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400',
 };
 export const QUADRANT_STATUS_LABEL = { good: 'Good', warning: 'Warning', critical: 'Critical', unknown: 'No Data' };
-
-export function money(v) {
-  return `Ks ${Math.round(Number(v || 0)).toLocaleString()}`;
-}
 
 export function yesNo(flag) {
   return flag == null ? '—' : flag ? 'Yes' : 'No';

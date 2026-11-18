@@ -223,8 +223,8 @@ export default function LoginPage() {
                     </div>
                     <form onSubmit={handleEnrollConfirm} className="space-y-5">
                       <div>
-                        <label className="block text-sm font-medium lg:text-slate-700 text-slate-300 mb-1.5">Authenticator code</label>
-                        <input
+                        <label className="block text-sm font-medium lg:text-slate-700 text-slate-300 mb-1.5" htmlFor="login-enroll-code">Authenticator code</label>
+                        <input id="login-enroll-code"
                           type="text"
                           required
                           autoComplete="one-time-code"
@@ -251,8 +251,8 @@ export default function LoginPage() {
                 <>
                 <form onSubmit={handleLogin} className="mt-8 space-y-5">
                   <div>
-                    <label className="block text-sm font-medium lg:text-slate-700 text-slate-300 mb-1.5">Username</label>
-                    <input
+                    <label className="block text-sm font-medium lg:text-slate-700 text-slate-300 mb-1.5" htmlFor="login-username">Username</label>
+                    <input id="login-username"
                       type="text"
                       required
                       autoComplete="username"
@@ -264,8 +264,8 @@ export default function LoginPage() {
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium lg:text-slate-700 text-slate-300 mb-1.5">Password</label>
-                    <input
+                    <label className="block text-sm font-medium lg:text-slate-700 text-slate-300 mb-1.5" htmlFor="login-password">Password</label>
+                    <input id="login-password"
                       type="password"
                       required
                       autoComplete="current-password"
@@ -278,8 +278,8 @@ export default function LoginPage() {
                   </div>
                   {needsTotp && (
                     <div>
-                      <label className="block text-sm font-medium lg:text-slate-700 text-slate-300 mb-1.5">Authenticator code</label>
-                      <input
+                      <label className="block text-sm font-medium lg:text-slate-700 text-slate-300 mb-1.5" htmlFor="login-totp">Authenticator code</label>
+                      <input id="login-totp"
                         type="text"
                         required
                         autoComplete="one-time-code"
@@ -339,8 +339,8 @@ export default function LoginPage() {
 
                 <form onSubmit={handleForgot} className="mt-8 space-y-5">
                   <div>
-                    <label className="block text-sm font-medium lg:text-slate-700 text-slate-300 mb-1.5">Username</label>
-                    <input
+                    <label className="block text-sm font-medium lg:text-slate-700 text-slate-300 mb-1.5" htmlFor="login-forgot-username">Username</label>
+                    <input id="login-forgot-username"
                       type="text"
                       required
                       autoComplete="username"

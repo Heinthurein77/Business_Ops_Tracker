@@ -151,9 +151,10 @@ export default function ManageUsersPage() {
   }
 
   // Reloads the request list and the users table (approval flips "must set password").
-  // Never throws, so a refresh failure can't replace a success banner holding a one-time secret.
+  // Never throws, so a refresh failure can't replace a success banner holding a one-time secret;
+  // the failure is still surfaced in the resets-error slot (F-M2).
   function refreshAfterResetAction() {
-    return Promise.all([loadResets(), loadUsers().catch(() => {})]);
+    return Promise.all([loadResets(), loadUsers().catch((err) => setResetsError(err instanceof ApiError ? err.message : 'Failed to reload users'))]);
   }
 
   async function handleApproveReset(r) {

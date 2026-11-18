@@ -58,17 +58,55 @@ async function handle(response) {
   return body;
 }
 
-function getJson(path) {
-  return fetch(path, { credentials: 'include' }).then(handle);
+// F-M4: every request goes through this one path, with a 30 s timeout so
+// a hung request can never spin forever. Callers may pass their own
+// signal (e.g. useApi's AbortController); it takes precedence.
+const REQUEST_TIMEOUT_MS = 30000;
+
+function request(path, { method = 'GET', headers, body, signal } = {}) {
+  return fetch(path, {
+    method,
+    credentials: 'include',
+    headers,
+    body,
+    signal: signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  }).then(handle);
 }
 
-function postJson(path, data, extraHeaders = {}) {
-  return fetch(path, {
+function buildQuery(params) {
+  const q = new URLSearchParams();
+  for (const [key, value] of Object.entries(params || {})) {
+    if (value === undefined || value === null || value === '') continue;
+    q.set(key, String(value));
+  }
+  const query = q.toString();
+  return query ? `?${query}` : '';
+}
+
+function getJson(path, signal) {
+  return request(path, { signal });
+}
+
+function postJson(path, data, extraHeaders = {}, signal) {
+  return request(path, {
     method: 'POST',
-    credentials: 'include',
     headers: { ...JSON_HEADERS, ...extraHeaders },
     body: JSON.stringify(data ?? {}),
-  }).then(handle);
+    signal,
+  });
+}
+
+function patchJson(path, data, signal) {
+  return request(path, {
+    method: 'PATCH',
+    headers: JSON_HEADERS,
+    body: JSON.stringify(data ?? {}),
+    signal,
+  });
+}
+
+function deleteJson(path, signal) {
+  return request(path, { method: 'DELETE', signal });
 }
 
 // m-10: one fresh UUID per create attempt, sent as Idempotency-Key so a
@@ -80,12 +118,8 @@ function newIdempotencyKey() {
   return `idem-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function postForm(path, formData) {
-  return fetch(path, {
-    method: 'POST',
-    credentials: 'include',
-    body: formData,
-  }).then(handle);
+function postForm(path, formData, signal) {
+  return request(path, { method: 'POST', body: formData, signal });
 }
 
 export const api = {
@@ -127,7 +161,7 @@ export const api = {
   adminOverview: () => getJson('/api/admin/overview'),
   adminComparison: () => getJson('/api/admin/comparison'),
   adminOperations: () => getJson('/api/admin/operations'),
-  businessUnitDetail: (id) => getJson(`/api/admin/business-unit/${id}`),
+  businessUnitDetail: (id, signal) => getJson(`/api/admin/business-unit/${id}`, signal),
   overrideMonthlyTarget: (id, payload) => postJson(`/api/admin/business-unit/${id}/monthly-target`, payload),
   reportLogs: () => getJson('/api/admin/report-logs'),
   securityLog: () => getJson('/api/admin/security-log'),
@@ -136,7 +170,7 @@ export const api = {
   overrideHoMonthlyTarget: (payload) => postJson('/api/admin/head-office/monthly-target', payload),
   activityDashboard: () => getJson('/api/admin/activity-dashboard'),
   ceoActivityCalendar: (buId, month) =>
-    getJson(`/api/admin/ceo-activity-calendar?business_unit_id=${buId}${month ? `&month=${month}` : ''}`),
+    getJson(`/api/admin/ceo-activity-calendar${buildQuery({ business_unit_id: buId, month })}`),
   resolveHelp: (logId, response) => postJson(`/api/admin/activity-logs/${logId}/resolve-help`, { response }),
   ceoMonthlySummaryUrl: (buId, month) =>
     `/api/admin/ceo-monthly-summary?business_unit_id=${buId}${month ? `&month=${month}` : ''}`,
@@ -167,12 +201,8 @@ export const api = {
     return getJson(`/api/ops/action-items${query ? `?${query}` : ''}`);
   },
   createActionItem: (payload) => postJson('/api/ops/action-items', payload, { 'Idempotency-Key': newIdempotencyKey() }),
-  updateActionItem: (id, payload) => fetch(`/api/ops/action-items/${id}`, {
-    method: 'PATCH', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
-  }).then(handle),
-  deleteActionItem: (id) => fetch(`/api/ops/action-items/${id}`, {
-    method: 'DELETE', credentials: 'include',
-  }).then(handle),
+  updateActionItem: (id, payload) => patchJson(`/api/ops/action-items/${id}`, payload),
+  deleteActionItem: (id) => deleteJson(`/api/ops/action-items/${id}`),
 
   listNotifications: (unreadOnly = false) => getJson(`/api/ops/notifications${unreadOnly ? '?unread_only=true' : ''}`),
   markNotificationRead: (id) => postJson(`/api/ops/notifications/${id}/read`),
@@ -180,7 +210,7 @@ export const api = {
   remindMissingReports: () => postJson('/api/ops/notifications/remind-missing'),
   remindActionItems: () => postJson('/api/ops/notifications/remind-actions'),
 
-  submitStaff: (payload) => postJson('/api/ops/staff', payload),
+  submitStaff: (payload) => postJson('/api/ops/staff', payload, { 'Idempotency-Key': newIdempotencyKey() }),
   listStaff: (params = {}) => {
     const q = new URLSearchParams();
     if (params.business_unit_id) q.set('business_unit_id', params.business_unit_id);
@@ -188,7 +218,7 @@ export const api = {
     const query = q.toString();
     return getJson(`/api/ops/staff${query ? `?${query}` : ''}`);
   },
-  submitCustomers: (payload) => postJson('/api/ops/customers', payload),
+  submitCustomers: (payload) => postJson('/api/ops/customers', payload, { 'Idempotency-Key': newIdempotencyKey() }),
   listCustomers: (params = {}) => {
     const q = new URLSearchParams();
     if (params.business_unit_id) q.set('business_unit_id', params.business_unit_id);
@@ -196,7 +226,7 @@ export const api = {
     const query = q.toString();
     return getJson(`/api/ops/customers${query ? `?${query}` : ''}`);
   },
-  forecast: (businessUnitId) => getJson(`/api/ops/forecast${businessUnitId ? `?business_unit_id=${businessUnitId}` : ''}`),
+  forecast: (businessUnitId) => getJson(`/api/ops/forecast${buildQuery({ business_unit_id: businessUnitId })}`),
 
   listDocuments: (params = {}) => {
     const q = new URLSearchParams();
@@ -206,9 +236,7 @@ export const api = {
     return getJson(`/api/ops/documents${query ? `?${query}` : ''}`);
   },
   createDocument: (payload) => postJson('/api/ops/documents', payload, { 'Idempotency-Key': newIdempotencyKey() }),
-  deleteDocument: (id) => fetch(`/api/ops/documents/${id}`, {
-    method: 'DELETE', credentials: 'include',
-  }).then(handle),
+  deleteDocument: (id) => deleteJson(`/api/ops/documents/${id}`),
   checkDocumentExpiry: () => postJson('/api/ops/documents/check-expiry'),
   monthlyReportUrl: (month) => `/api/ops/monthly-report${month ? `?month=${month}` : ''}`,
   opsExportUrl: (tab, buId) => {
@@ -220,9 +248,7 @@ export const api = {
   // ---- Business units (management) ----
   adminBusinessUnits: () => getJson('/api/admin/business-units'),
   adminCreateBU: (payload) => postJson('/api/admin/business-units', payload),
-  adminUpdateBU: (id, payload) => fetch(`/api/admin/business-units/${id}`, {
-    method: 'PATCH', credentials: 'include', headers: JSON_HEADERS, body: JSON.stringify(payload),
-  }).then(handle),
+  adminUpdateBU: (id, payload) => patchJson(`/api/admin/business-units/${id}`, payload),
 };
 
-export { ApiError };
+export { ApiError, buildQuery };

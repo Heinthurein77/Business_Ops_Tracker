@@ -83,8 +83,8 @@ export default function ForcePasswordChangePage() {
 
           <form onSubmit={handleSubmit} className="space-y-5">
             <div>
-              <label className="block text-sm font-medium text-slate-300 mb-1.5">Current Password</label>
-              <input
+              <label className="block text-sm font-medium text-slate-300 mb-1.5" htmlFor="fpc-current">Current Password</label>
+              <input id="fpc-current"
                 type="password"
                 required
                 autoComplete="current-password"
@@ -96,8 +96,8 @@ export default function ForcePasswordChangePage() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-300 mb-1.5">New Password</label>
-              <input
+              <label className="block text-sm font-medium text-slate-300 mb-1.5" htmlFor="fpc-new">New Password</label>
+              <input id="fpc-new"
                 type="password"
                 required
                 minLength={MIN_LENGTH}
@@ -118,8 +118,8 @@ export default function ForcePasswordChangePage() {
               </div>
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-300 mb-1.5">Confirm New Password</label>
-              <input
+              <label className="block text-sm font-medium text-slate-300 mb-1.5" htmlFor="fpc-confirm">Confirm New Password</label>
+              <input id="fpc-confirm"
                 type="password"
                 required
                 minLength={MIN_LENGTH}

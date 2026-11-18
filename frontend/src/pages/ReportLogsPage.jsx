@@ -1,42 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { api } from '../api/client';
 import AdminSidebar from '../components/AdminSidebar';
 import DatePicker from '../components/DatePicker';
 import Footer from '../components/Footer';
 import LastUpdated from '../components/LastUpdated';
 import { GLASS, PAGE_BG } from '../utils/glassTheme';
-
-function formatReportDate(iso) {
-  if (!iso) return '—';
-  const [y, m, d] = iso.split('-').map(Number);
-  if (!y || !m || !d) return iso;
-  return new Date(y, m - 1, d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-}
+import { formatDate } from '../utils/format';
 
 export default function ReportLogsPage() {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState('');
-  const [search, setSearch] = useState('');
-  const [dateFilter, setDateFilter] = useState(null);
-  const [buFilter, setBuFilter] = useState('all');
-  // F-12: when the logs were last refreshed (LastUpdated, header).
-  const [updatedAt, setUpdatedAt] = useState(null);
-  const [refreshing, setRefreshing] = useState(false);
-
-  const load = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      setData(await api.reportLogs());
-      setError('');
-      setUpdatedAt(new Date());
-    } catch (err) {
-      setError(err.message || 'Failed to load report logs');
-    } finally {
-      setRefreshing(false);
-    }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
+  // F-M2: shared server-state hook — load/error/refreshing + abort +
+  // refresh-on-focus, instead of the hand-rolled triple.
+  const { data, error, refreshing, refetch, updatedAt } = useApi(() => api.reportLogs(), []);
 
   const buOptions = useMemo(() => {
     if (!data) return [];
@@ -104,7 +78,7 @@ export default function ReportLogsPage() {
               </p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
-              <LastUpdated updatedAt={updatedAt} onRefresh={load} refreshing={refreshing} />
+              <LastUpdated updatedAt={updatedAt} onRefresh={refetch} refreshing={refreshing} />
               <input
                 type="text"
                 placeholder="Search BU, submitter..."
@@ -153,7 +127,7 @@ export default function ReportLogsPage() {
                 {filtered.map((log, i) => (
                   <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors">
                     <td className="px-6 py-3.5 font-medium tabular-nums text-slate-700 dark:text-slate-300">{log.timestamp_display}</td>
-                    <td className="px-6 py-3.5 text-slate-500 dark:text-slate-400">{formatReportDate(log.report_date)}</td>
+                    <td className="px-6 py-3.5 text-slate-500 dark:text-slate-400">{formatDate(log.report_date)}</td>
                     <td className="px-6 py-3.5">
                       <p className="font-semibold text-slate-800 dark:text-slate-200">{log.bu_name}</p>
                     </td>

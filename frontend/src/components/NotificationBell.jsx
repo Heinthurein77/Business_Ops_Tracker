@@ -18,6 +18,19 @@ export default function NotificationBell() {
   const [status, setStatus] = useState(null);
   const [actionError, setActionError] = useState('');
   const authFailures = useRef(0);
+  const panelRef = useRef(null);
+
+  // F-m5: the panel used to be mouse-only (backdrop click to close). Escape
+  // now closes it too, and the button/panel carry the aria wiring.
+  useEffect(() => {
+    if (!open) return;
+    panelRef.current?.focus();
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [open]);
 
   const refresh = async () => {
     try {
@@ -106,6 +119,9 @@ export default function NotificationBell() {
         onClick={() => (open ? setOpen(false) : openPanel())}
         className="w-9 h-9 flex items-center justify-center rounded-lg bg-white/10 text-slate-200 hover:bg-white/15 hover:text-white transition-colors relative"
         aria-label="Notifications"
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        aria-controls="notification-panel"
       >
         <svg xmlns="http://www.w3.org/2000/svg" className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
           <path strokeLinecap="round" strokeLinejoin="round" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
@@ -124,7 +140,14 @@ export default function NotificationBell() {
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 mt-2 w-80 max-h-96 overflow-y-auto z-50 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-2xl shadow-slate-900/10 p-2">
+          <div
+            id="notification-panel"
+            ref={panelRef}
+            tabIndex={-1}
+            role="dialog"
+            aria-label="Notifications"
+            className="absolute right-0 mt-2 w-80 max-h-96 overflow-y-auto z-50 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-2xl shadow-slate-900/10 p-2"
+          >
             <div className="flex items-center justify-between px-3 py-2">
               <p className="text-sm font-bold text-slate-900 dark:text-slate-100">Notifications</p>
               {status === null && unread > 0 && <button onClick={markAll} className="text-xs font-semibold text-brand-600 dark:text-brand-400 hover:underline">Mark all read</button>}

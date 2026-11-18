@@ -5,7 +5,11 @@ import { ApiError, api } from '../api/client';
 import DatePicker from '../components/DatePicker';
 import { viewUploadUrl } from '../utils/safeUrl';
 
-const TODAY_ISO = new Date().toISOString().slice(0, 10);
+import { localTodayISO } from '../utils/format';
+
+// F-m4: local date, not UTC — before 06:30 Yangon time the UTC date is
+// still yesterday.
+const TODAY_ISO = localTodayISO();
 
 const emptyForm = {
   full_name: '',
@@ -59,7 +63,7 @@ export default function ProfileSetupPage() {
     api
       .getCeoProfile()
       .then(applyProfile)
-      .catch(() => {})
+      .catch((err) => setError(err instanceof ApiError ? err.message : 'Failed to load profile'))
       .finally(() => setLoading(false));
   }, []);
 

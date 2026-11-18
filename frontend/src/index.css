@@ -26,19 +26,6 @@ body {
   background: #0f172a;
   border-color: #1e293b;
 }
-.card-hover {
-  transition: box-shadow 0.2s ease, transform 0.2s ease;
-}
-.card-hover:hover {
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
-}
-.eyebrow {
-  font-size: 10.5px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: #4f46e5;
-}
 .fade-in {
   animation: fadeIn 0.4s ease-out;
 }
@@ -51,47 +38,6 @@ body {
     opacity: 1;
     transform: translateY(0);
   }
-}
-.glass-mesh {
-  background: #f1f5f9;
-}
-.dark .glass-mesh {
-  background: #020617;
-}
-.glass-card {
-  background: #fff;
-  border: 1px solid #e2e8f0;
-  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
-  border-radius: 0.75rem;
-}
-.dark .glass-card {
-  background: #0f172a;
-  border-color: #1e293b;
-}
-.nav-link {
-  color: #94a3b8;
-}
-.nav-link:hover {
-  color: #e2e8f0;
-}
-.nav-link.active-nav {
-  color: #fff;
-  background: linear-gradient(180deg, rgba(99, 102, 241, 0.28), rgba(99, 102, 241, 0.16));
-  box-shadow: inset 0 0 0 1px rgba(129, 140, 248, 0.35), 0 4px 10px -4px rgba(79, 70, 229, 0.5);
-}
-.alert-card {
-  transition: box-shadow 0.15s ease, transform 0.15s ease;
-}
-.alert-card:hover {
-  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
-  transform: translateY(-1px);
-}
-.app-bg {
-  min-height: 100vh;
-  background: #f1f5f9;
-}
-.dark .app-bg {
-  background: #020617;
 }
 /* Dark-surface scrollbars — the default thumb color above is tuned for the
    light theme and is nearly invisible once the admin section's dark-mode
@@ -177,21 +123,6 @@ body {
   box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 1px 3px rgba(16, 24, 40, 0.04);
 }
 @layer components {
-  .btn-primary {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60;
-  }
-  .btn-secondary {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800;
-  }
-  .btn-danger {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-rose-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60;
-  }
-  .input {
-    @apply w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm transition placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/25 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100;
-  }
-  .label {
-    @apply mb-1.5 block text-[13px] font-medium text-slate-700 dark:text-slate-300;
-  }
   /* Pill tab bar: a slate track with a raised white active pill. */
   .tab-track {
     @apply inline-flex max-w-full items-center gap-1 overflow-x-auto rounded-xl bg-slate-100 p-1 dark:bg-slate-800/80;
@@ -201,15 +132,6 @@ body {
   }
   .tab-pill-active {
     @apply bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white;
-  }
-  .page-title {
-    @apply text-[22px] font-bold leading-7 tracking-tight text-slate-900 dark:text-white;
-  }
-  .page-sub {
-    @apply mt-0.5 text-[13px] text-slate-500 dark:text-slate-400;
-  }
-  .th-pro {
-    @apply text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-400 dark:text-slate-500;
   }
   /* Sidebar nav (always on the navy shell, in both color modes). */
   .side-link {
