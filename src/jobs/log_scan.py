@@ -33,6 +33,7 @@ import sys
 from datetime import datetime, timedelta
 from typing import Iterable
 
+from src.constants import NotificationType
 from src.database import SessionLocal
 from src.models import JobHeartbeat, User
 from src.utils import notify, record_job_heartbeat as _record_heartbeat, utcnow
@@ -192,7 +193,7 @@ def _notify_chairman(db, title: str, message: str) -> bool:
     least one Chairman exists to notify."""
     chairmen = db.query(User).filter(User.role == "Chairman", User.is_active == True).all()  # noqa: E712
     for chairman in chairmen:
-        notify(db, chairman.id, "alert", title, message, link="/admin")
+        notify(db, chairman.id, NotificationType.ALERT, title, message, link="/admin")
     if chairmen:
         db.commit()
     return bool(chairmen)

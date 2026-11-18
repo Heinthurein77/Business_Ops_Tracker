@@ -64,7 +64,8 @@ def report_date_window_error(report_date: date, today: date, window_days: int) -
     if (today - report_date).days > window_days:
         return (
             f"report_date is more than {window_days} days old — reports older than "
-            f"{window_days} days can only be corrected by Head Office"
+            f"{window_days} days can only be corrected by Head Office. Contact HO; "
+            "correction is manual (there is no in-app correction flow yet)."
         )
     return None
 
