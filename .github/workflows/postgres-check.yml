@@ -49,7 +49,7 @@ jobs:
       DATABASE_URL: postgresql+psycopg2://bot_pgcheck:bot_pgcheck@localhost:5432/bot_pgcheck
       MIGRATION_DATABASE_URL: postgresql+psycopg2://bot_pgcheck:bot_pgcheck@localhost:5432/bot_pgcheck
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:

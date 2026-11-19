@@ -23,7 +23,7 @@ jobs:
       ENVIRONMENT: test
       DATABASE_URL: sqlite://
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -139,7 +139,7 @@ jobs:
       ALLOWED_ORIGINS: http://localhost:5173
       DATABASE_URL: sqlite:////tmp/bot-e2e.db
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
