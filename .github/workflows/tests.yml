@@ -60,7 +60,7 @@ jobs:
       # first would make the gate red for a step-ordering reason, not a
       # code reason. (Found while verifying the 2026-11-16 review fix pass:
       # the suite went red locally as soon as dist/ was removed.)
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -148,7 +148,7 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
