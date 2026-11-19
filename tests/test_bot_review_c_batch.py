@@ -386,8 +386,22 @@ class TestAdminOverviewQueries:
         today = today_local()
         month_start = date(today.year, today.month, 1)
         days = [today - timedelta(days=2), today - timedelta(days=1), today]
+        # Weekday trap: missing_submissions covers the whole operational
+        # week (Mon..today), but `days` is only the last 3 days. On Thu-Sun
+        # the week is longer than 3 days, so every BU would "miss" Mon
+        # (and Tue/Wed) and the test only passed Mon-Wed. Seed ActivityLog
+        # for the earlier week days too (all BUs, incl. BU23 — its miss
+        # is today only); financials stay on the 3-day window.
+        week_start = today - timedelta(days=today.weekday())
+        extra_activity_days = [
+            week_start + timedelta(days=i)
+            for i in range(max(0, (today - week_start).days - 2))
+        ]
         for i in range(1, 24):
             db.add(BusinessUnit(id=i, code=f"BU{i}", name=f"Unit {i}"))
+        for d in extra_activity_days:
+            for i in range(1, 24):
+                db.add(ActivityLog(business_unit_id=i, report_date=d))
         db.add(User(id=100, username="ceo_bu1", hashed_password="x",
                     role="CEO", business_unit_id=1, is_active=True))
         # A huge pre-month row: MTD totals must exclude it.

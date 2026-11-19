@@ -1,6 +1,5 @@
 import logging
 from datetime import date, timedelta
-from typing import Optional
 
 # PM-m22: alias for datetime.date — ho_dashboard's `date` query parameter
 # shadows the class in that function's scope.

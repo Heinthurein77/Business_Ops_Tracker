@@ -8,12 +8,9 @@ is identical — the code below is the old router bodies, only the
 FastAPI/StreamingResponse/audit lines removed.
 """
 from datetime import date, datetime, timedelta
-from decimal import Decimal
-from io import BytesIO
 from typing import Optional
 
 from fastapi import HTTPException
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.models import (
@@ -27,7 +24,7 @@ from src.models import (
     User,
 )
 from src.routers.month_params import parse_month_or_422
-from src.utils import _sanitize_excel_cell, clamp_days, today_local
+from src.utils import _sanitize_excel_cell, today_local
 
 # PM-4: ops exports are bounded. Unbounded tabs used to load every row
 # into one workbook; now each tab is capped and the date-bearing tabs
@@ -42,8 +39,6 @@ def build_monthly_report_pdf(db: Session, month: Optional[str] = None):
     `month` format YYYY-MM; defaults to the current month.
     Returns (pdf_bytes, filename).
     """
-    from io import BytesIO
-
     from sqlalchemy import func
 
     y, m = parse_month_or_422(month)

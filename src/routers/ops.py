@@ -9,7 +9,7 @@ import json
 import logging
 import threading
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
 
@@ -32,7 +32,7 @@ from src.database import get_db
 from src.schemas import ActionItemIn, ActionItemUpdate, CustomerIn, DocumentIn, StaffIn
 from src.reports.ops_reports import OPS_EXPORT_MAX_ROWS  # PM-m5: builders live there now
 from src.routers.month_params import parse_month_or_422
-from src.utils import _sanitize_excel_cell, clamp_days, clamp_limit, clamp_offset, log_audit, notify, page_response, today_local, utcnow
+from src.utils import clamp_days, clamp_limit, clamp_offset, log_audit, notify, page_response, today_local, utcnow
 from src.models import (
     ActionItem,
     ActivityLog,
@@ -43,7 +43,6 @@ from src.models import (
     HeadOfficeActivityLog,
     IdempotencyKey,
     LicenseDocument,
-    MonthlyTarget,
     Notification,
     StaffRecord,
     User,

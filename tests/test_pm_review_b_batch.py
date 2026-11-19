@@ -2,7 +2,7 @@
 
 One test per behaviour fix; each names the finding it proves.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -12,7 +12,7 @@ from starlette.requests import Request
 from src.auth import hash_password
 from src.models import (
     ActionItem, AuditLog, BusinessUnit, DailyFinancial,
-    HeadOfficeDailyFinancial, LicenseDocument, Notification, User,
+    LicenseDocument, Notification, User,
 )
 from src.report_forms import build_ceo_report_form, build_ho_report_form
 from src.routers.ceo import submit_report as ceo_submit_report
@@ -284,7 +284,7 @@ def test_pm1_action_item_assign_round_trip(client, http_db):
 
 def test_pm_m3_done_to_in_progress_rejected_done_to_pending_reopens_with_audit(db):
     from fastapi import HTTPException
-    from src.routers.ops import create_action_item, delete_action_item, update_action_item
+    from src.routers.ops import create_action_item, update_action_item
     from src.schemas import ActionItemIn, ActionItemUpdate
     chairman = db.test_users["chairman"]
     out = create_action_item(ActionItemIn(business_unit_id=1, title="T"), user=chairman, db=db)
